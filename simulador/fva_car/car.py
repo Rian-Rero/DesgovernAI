@@ -23,7 +23,7 @@ except ImportError:
 ########################################
 # parametros do carro
 CAR = {
-		'VELMAX'	: 1.5,				# m/s
+		'VELMAX'	: 3.0,				# m/s
 		'ACCELMAX'	: 1.0, 				# m/s^2
 		'STEERMAX'	: np.deg2rad(20.0),	# deg
 		'MASS'		: 6.3,				# kg
@@ -32,6 +32,12 @@ CAR = {
 		'MI' 		: 0.05,				# constante de friccao
 		'GRAV'   	: 9.81, 			# gravidade [m/s^2]
 	}
+
+# Controlador PI-D de velocidade. A derivada e aplicada sobre a velocidade
+# medida (usando a aceleracao filtrada), evitando kick de referencia.
+SPEED_KP = 4.0
+SPEED_KI = 4.0
+SPEED_KD = 0.5
 
 
 ########################################
@@ -55,12 +61,16 @@ class Car:
 		# velocidade de comando
 		self.vref = 0.0
 		self.v = 0.0
+		# compensacao antecipativa da componente da gravidade na rampa
+		self.grade_compensation = 0.0
 		
 		# marcha
 		self.gear = 1   # +1 forward, -1 reverse
 		
 		# comando de aceleracao
 		self.u = 0.0
+		# estado integral do controlador de velocidade
+		self.speed_error_integral = 0.0
 		
 		# comando de esterçamento
 		self.st = 0.0
@@ -73,6 +83,7 @@ class Car:
 		self.a_filt    = filter.AlphaFilter(alpha=0.2)
 		self.vref_filt = filter.AlphaFilter(alpha=0.2)
 		self.w_filt    = filter.AlphaFilter(alpha=0.5)
+		self.grade_filt = filter.AlphaFilter(alpha=0.2)
 		
 		# logs de salvamento
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -99,6 +110,15 @@ class Car:
 		self.robot = self.sim.getObject(car_name)
 		if self.robot == -1:
 			print ('Remote API function call returned with error code (robot): ', -1)
+
+		# reposiciona o carro antes do inicio da simulacao, preservando a
+		# altura e a orientacao configuradas na cena
+		initial_position = self.parameters.get('initial_position')
+		if initial_position is not None:
+			position = list(self.sim.getObjectPosition(self.robot, -1))
+			position[0] = float(initial_position[0])
+			position[1] = float(initial_position[1])
+			self.sim.setObjectPosition(self.robot, position, -1)
 			
 		# motors
 		self.motorL = self.sim.getObject(car_name+'/joint_motor_L')
@@ -266,8 +286,22 @@ class Car:
 			if lin != -1:
 				break
 
-		# velocidade longitudinal
-		v = self.gear * np.linalg.norm(lin)
+		lin = np.asarray(lin, dtype=float)
+		speed = np.linalg.norm(lin)
+
+		# Feedforward da rampa. A componente vertical da direcao de movimento
+		# fornece sin(inclinacao); g*sin(inclinacao) cancela a gravidade ao
+		# subir e acrescenta frenagem ao descer.
+		if speed > 0.1:
+			grade_compensation = CAR['GRAV']*lin[2]/speed
+		else:
+			grade_compensation = 0.0
+		grade_compensation = np.clip(
+			grade_compensation, -CAR['ACCELMAX'], CAR['ACCELMAX'])
+		self.grade_compensation = self.grade_filt.filter(grade_compensation)
+
+		# magnitude da velocidade no sentido da marcha
+		v = self.gear * speed
 
 		# filtros
 		v = self.v_filt.filter(v)
@@ -308,24 +342,31 @@ class Car:
 	########################################
 	# seta torque do veiculo
 	def set_vel(self, vref):
-		
-		# ganhos
-		Kp = 3.5
-		Kd = 2.5
-		
+
 		# define referencia e marcha
 		self._set_ref(vref)
 		
 		# controla magnitude da velocidade
 		vref_abs = abs(self.vref)
 		v_abs = abs(self.v)
-
-		# aceleracao da magnitude
+		error = vref_abs - v_abs
 		a_abs = np.sign(self.v) * self.a
 
-		# controle PD
-		du = Kp*(vref_abs - v_abs) - Kd*a_abs
-		u = self.u + du*self.dt
+		# Integracao por Euler com anti-windup condicional. O integrador so
+		# acumula durante a saturacao quando o erro ajuda a retirar o comando
+		# do limite do atuador.
+		integral_candidate = self.speed_error_integral + error*self.dt
+		u_candidate = (self.grade_compensation + SPEED_KP*error
+					   + SPEED_KI*integral_candidate - SPEED_KD*a_abs)
+		is_saturated_high = u_candidate > CAR['ACCELMAX']
+		is_saturated_low = u_candidate < -CAR['ACCELMAX']
+		if not ((is_saturated_high and error > 0.0) or
+				(is_saturated_low and error < 0.0)):
+			self.speed_error_integral = integral_candidate
+
+		# PI-D: a parcela derivativa atua apenas na medida da velocidade.
+		u = (self.grade_compensation + SPEED_KP*error
+			 + SPEED_KI*self.speed_error_integral - SPEED_KD*a_abs)
 		self.set_u(u)
 	
 	########################################
@@ -335,8 +376,8 @@ class Car:
 		# limita aceleracao
 		self.u = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
 		
-		# atrito sempre contrario ao movimento
-		F_friction = -np.sign(self.v)*CAR['MASS']*CAR['GRAV']*CAR['MI']
+		# compensa o atrito para que u represente a aceleracao longitudinal
+		F_friction = np.tanh(10.0*abs(self.v))*CAR['MASS']*CAR['GRAV']*CAR['MI']
 
 		# força de controle
 		F_control = CAR['MASS']*self.u
@@ -357,6 +398,17 @@ class Car:
 			self.sim.setJointTargetVelocity(m, np.sign(T)*CAR['VELMAX'])
 			# Apply the desired torques to the joints
 			self.sim.setJointForce(m, abs(T))
+
+	########################################
+	# deixa o veiculo em banguela
+	def set_coast(self):
+
+		# velocidade-alvo alta com torque nulo deixa as rodas livres
+		for m in [self.motorL, self.motorR]:
+			self.sim.setJointTargetVelocity(m, self.gear*CAR['VELMAX'])
+			self.sim.setJointForce(m, 0.0)
+
+		self.u = 0.0
 			
 	########################################
 	# vai para frente
@@ -463,6 +515,7 @@ class Car:
 					'th'    : self.th,
 					'w'     : self.w,
 					'u'     : self.u,
+					'u_grade': self.grade_compensation,
 				}
 				
 		# se ja iniciou as trajetorias
