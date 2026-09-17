@@ -1,6 +1,6 @@
 """PI para a entrada normalizada, com velocidade filtrada e anti-windup."""
 
-SPEED_KP = 4.0  # 1/s
+SPEED_KP = 3 * 4.0  # 1/s
 SPEED_KI = 4.0  # 1/s^2
 CONTROL_SAMPLE_TIME = 0.05  # s: 20 Hz para a banda do PI
 VELOCITY_FILTER_TIME = 0.03  # s
@@ -18,18 +18,21 @@ class SpeedPI:
     def reset(self) -> None:
         self.integral = 0.0
 
-    def update(self, error: float, dt: float,
-               lower_limit: float, upper_limit: float) -> float:
+    def update(
+        self, error: float, dt: float, lower_limit: float, upper_limit: float
+    ) -> float:
         if dt < 0:
-            raise ValueError('O intervalo de amostragem nao pode ser negativo.')
+            raise ValueError("O intervalo de amostragem nao pode ser negativo.")
 
         unrestricted = self.kp * error + self.ki * self.integral
         output = min(max(unrestricted, lower_limit), upper_limit)
 
         # Integra somente sem saturacao ou quando o erro desfaz a saturacao.
-        if (unrestricted == output
-                or (unrestricted > upper_limit and error < 0)
-                or (unrestricted < lower_limit and error > 0)):
+        if (
+            unrestricted == output
+            or (unrestricted > upper_limit and error < 0)
+            or (unrestricted < lower_limit and error > 0)
+        ):
             self.integral += error * dt
 
         return output

@@ -73,6 +73,7 @@ class Car:
 		# comando de aceleracao
 		self.u = 0.0
 		self.motor_torque = 0.0
+		self.motor_pwm_percent = 0.0
 		self.coasting = False
 		self.speed_controller = SpeedPI()
 		self.velocity_filter_time = VELOCITY_FILTER_TIME
@@ -385,6 +386,11 @@ class Car:
 		# aplica o sentido da marcha
 		T = self.gear*T
 		self.motor_torque = float(T)
+		# PWM equivalente: torque assinado como percentual do torque maximo.
+		max_torque = MOTOR_TORQUE_FACTOR * CAR['RW'] * CAR['MASS'] * (
+			CAR['ACCELMAX'] + CAR['MI'] * CAR['GRAV']
+		)
+		self.motor_pwm_percent = 100.0 * self.motor_torque / max_torque
 		self.coasting = not compensate_friction and self.u == 0.0
 
 		# atua
@@ -516,6 +522,7 @@ class Car:
 					'w'     : self.w,
 					'u'     : self.u,
 					'torque_motor' : self.motor_torque,
+					'motor_pwm_percent' : self.motor_pwm_percent,
 					'coasting' : int(self.coasting),
 				}
 				
