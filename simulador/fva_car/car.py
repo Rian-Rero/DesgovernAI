@@ -335,14 +335,17 @@ class Car:
 		# limita aceleracao
 		self.u = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
 		
-		# atrito sempre contrario ao movimento
-		F_friction = -np.sign(self.v)*CAR['MASS']*CAR['GRAV']*CAR['MI']
+		# Compensa o atrito ja modelado pela cena, no sentido da marcha.
+		# Na partida, compensa apenas se houver comando de aceleracao.
+		F_compensation = 0.0
+		if abs(self.v) > 0.01 or self.u > 0.0:
+			F_compensation = CAR['MASS']*CAR['GRAV']*CAR['MI']
 
 		# força de controle
 		F_control = CAR['MASS']*self.u
 		
 		# forca longitudinal
-		F = F_friction + F_control
+		F = F_compensation + F_control
 		
 		# torque
 		GAMMA = 0.63
@@ -353,8 +356,8 @@ class Car:
 
 		# atua
 		for m in [self.motorL, self.motorR]:
-			# Set the velocity to some large number with the correct sign, because v-rep is weird like that
-			self.sim.setJointTargetVelocity(m, np.sign(T)*CAR['VELMAX'])
+			# A junta recebe rad/s: converte a velocidade linear pelo raio.
+			self.sim.setJointTargetVelocity(m, np.sign(T)*CAR['VELMAX']/CAR['RW'])
 			# Apply the desired torques to the joints
 			self.sim.setJointForce(m, abs(T))
 			
