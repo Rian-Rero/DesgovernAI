@@ -7,17 +7,20 @@
 # Universidade Federal de Minas Gerais
 ########################################
 from fva_car import Car
+from fva_car.speed_controller import CONTROL_SAMPLE_TIME
 import os
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 import matplotlib.pyplot as plt
 plt.rcParams['figure.figsize'] = (6,8)
 
 # Globais
-parameters = {	
+VELOCITY_REFERENCE = 1.5  # m/s
+parameters = {
 				'ts'		: 10.0, 			# tempo da simulacao
 				'save'		: True,
 				'logfile'	: 'logs/',
 				'beep'		: True,
+				'sample_time': CONTROL_SAMPLE_TIME,
 			}
 	
 ########################################
@@ -27,7 +30,7 @@ def control_func(car):
 		
 	# segue a reta com velocidade constante
 	car.set_steer(0.0)
-	car.set_vel(0.5)
+	car.set_vel(VELOCITY_REFERENCE)
 		
 ########################################
 # thread de visão

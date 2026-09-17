@@ -1,0 +1,171 @@
+{
+  "model": "q_dot=(K*u_motor-q)/tau; v_dot=q-c0-c1*v-c2*v^2; tau=0 means q=K*u_motor",
+  "coast_loss": {
+    "c0_m_s2": 0.5943207589601419,
+    "c1_s_inv": 0.0,
+    "c2_m_inv": 0.0,
+    "terms": 1,
+    "validation_rmse_m_s": 0.014444614553865582
+  },
+  "gain_motor_normalized": 0.78,
+  "tau_best_grid_s": 0.02,
+  "tau_resolved": false,
+  "sample_time_s": 0.04999999999999982,
+  "input": "u_motor=(torque_L+torque_R)/(mass_nominal*radius_nominal), m/s^2",
+  "identification": "Fit loss on coast; fit K,tau on accelerate+hold+coast, first repetitions only",
+  "loss_model_selection": "Second repetition for selection, then refit on first+second; last repetition never used for tuning. With two repetitions, use training BIC.",
+  "dynamic_validation_band_m_s": [
+    0.45,
+    2.55
+  ],
+  "excluded_from_dynamic_model": "startup/stiction below 0.45 m/s; slopes; reverse",
+  "tau_grid": [
+    {
+      "tau": 0.0,
+      "gain": 0.78,
+      "train_rmse": 0.027181192614437
+    },
+    {
+      "tau": 0.02,
+      "gain": 0.78,
+      "train_rmse": 0.019219445309927488
+    },
+    {
+      "tau": 0.02499999999999991,
+      "gain": 0.78,
+      "train_rmse": 0.019966011852256858
+    },
+    {
+      "tau": 0.04999999999999982,
+      "gain": 0.77,
+      "train_rmse": 0.02329678047336148
+    },
+    {
+      "tau": 0.05,
+      "gain": 0.77,
+      "train_rmse": 0.023296780473361433
+    },
+    {
+      "tau": 0.1,
+      "gain": 0.76,
+      "train_rmse": 0.031460028239182015
+    },
+    {
+      "tau": 0.2,
+      "gain": 0.74,
+      "train_rmse": 0.05814840753855623
+    },
+    {
+      "tau": 0.4,
+      "gain": 0.7,
+      "train_rmse": 0.11267487923664143
+    },
+    {
+      "tau": 0.8,
+      "gain": 0.65,
+      "train_rmse": 0.20245154016182434
+    }
+  ],
+  "validation": [
+    {
+      "target": 0.5,
+      "file": "banguela_0.50ms_rep03.csv",
+      "rmse_m_s": 0.020059155985151334,
+      "max_error_m_s": 0.05213785965502449
+    },
+    {
+      "target": 1.0,
+      "file": "banguela_1.00ms_rep03.csv",
+      "rmse_m_s": 0.02164958346625236,
+      "max_error_m_s": 0.049338061387767085
+    },
+    {
+      "target": 1.5,
+      "file": "banguela_1.50ms_rep03.csv",
+      "rmse_m_s": 0.00899159269049993,
+      "max_error_m_s": 0.02912476598956104
+    },
+    {
+      "target": 2.0,
+      "file": "banguela_2.00ms_rep03.csv",
+      "rmse_m_s": 0.015609033496480566,
+      "max_error_m_s": 0.0262190447024383
+    },
+    {
+      "target": 2.5,
+      "file": "banguela_2.50ms_rep03.csv",
+      "rmse_m_s": 0.016360996493976362,
+      "max_error_m_s": 0.039508399811080785
+    }
+  ],
+  "reduced_tau_zero_validation": [
+    {
+      "target": 0.5,
+      "rmse_m_s": 0.02251628331623151
+    },
+    {
+      "target": 1.0,
+      "rmse_m_s": 0.04001159724553637
+    },
+    {
+      "target": 1.5,
+      "rmse_m_s": 0.02706902297887757
+    },
+    {
+      "target": 2.0,
+      "rmse_m_s": 0.011438398399432469
+    },
+    {
+      "target": 2.5,
+      "rmse_m_s": 0.02110279777432313
+    }
+  ],
+  "recommended_linear_model": {
+    "gain_for_set_u": 0.9828,
+    "tau_s": 0.0,
+    "formula": "0.9828/s",
+    "note": "Incremental plant around forward motion on flat track. tau=0 here is a reduced approximation, not proof of zero physical lag."
+  },
+  "passes_0_05_m_s_rmse": true,
+  "speed_range_m_s": [
+    0.5,
+    2.5
+  ],
+  "local_linear_plants": [
+    {
+      "operating_speed_m_s": 0.5,
+      "gain_for_set_u": 0.9828,
+      "damping_s_inv": 0.0,
+      "formula": "G_u(s)=1.26*K/[(tau*s+1)*(s+c1+2*c2*v0)]"
+    },
+    {
+      "operating_speed_m_s": 1.0,
+      "gain_for_set_u": 0.9828,
+      "damping_s_inv": 0.0,
+      "formula": "G_u(s)=1.26*K/[(tau*s+1)*(s+c1+2*c2*v0)]"
+    },
+    {
+      "operating_speed_m_s": 1.5,
+      "gain_for_set_u": 0.9828,
+      "damping_s_inv": 0.0,
+      "formula": "G_u(s)=1.26*K/[(tau*s+1)*(s+c1+2*c2*v0)]"
+    },
+    {
+      "operating_speed_m_s": 2.0,
+      "gain_for_set_u": 0.9828,
+      "damping_s_inv": 0.0,
+      "formula": "G_u(s)=1.26*K/[(tau*s+1)*(s+c1+2*c2*v0)]"
+    },
+    {
+      "operating_speed_m_s": 2.5,
+      "gain_for_set_u": 0.9828,
+      "damping_s_inv": 0.0,
+      "formula": "G_u(s)=1.26*K/[(tau*s+1)*(s+c1+2*c2*v0)]"
+    }
+  ],
+  "photo_model": {
+    "formula": "P(s)=1/[s*(tau*s+1)]",
+    "status": "not_confirmed",
+    "note": "Coast alone does not identify input gain or actuator tau. Do not treat an unresolved tau as an identified positive time constant. A unity numerator requires normalizing the input by the identified gain."
+  }
+}

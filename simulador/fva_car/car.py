@@ -15,15 +15,21 @@ import threading
 from datetime import datetime
 try:
 	from . import filter
+	from .speed_controller import (
+		COAST_DECELERATION, MOTOR_INPUT_GAIN, MOTOR_TORQUE_FACTOR, SpeedPI,
+	)
 except ImportError:
 	import filter
+	from speed_controller import (
+		COAST_DECELERATION, MOTOR_INPUT_GAIN, MOTOR_TORQUE_FACTOR, SpeedPI,
+	)
 
 ########################################
 # GLOBAIS
 ########################################
 # parametros do carro
 CAR = {
-		'VELMAX'	: 1.5,				# m/s
+		'VELMAX'	: 2.5,				# m/s
 		'ACCELMAX'	: 1.0, 				# m/s^2
 		'STEERMAX'	: np.deg2rad(20.0),	# deg
 		'MASS'		: 6.3,				# kg
@@ -55,12 +61,16 @@ class Car:
 		# velocidade de comando
 		self.vref = 0.0
 		self.v = 0.0
+		self.v_raw = 0.0
 		
 		# marcha
 		self.gear = 1   # +1 forward, -1 reverse
 		
 		# comando de aceleracao
 		self.u = 0.0
+		self.motor_torque = 0.0
+		self.coasting = False
+		self.speed_controller = SpeedPI()
 		
 		# comando de esterçamento
 		self.st = 0.0
@@ -71,11 +81,10 @@ class Car:
 		# filtros dos sinais
 		self.v_filt    = filter.AlphaFilter(alpha=0.6)
 		self.a_filt    = filter.AlphaFilter(alpha=0.2)
-		self.vref_filt = filter.AlphaFilter(alpha=0.2)
 		self.w_filt    = filter.AlphaFilter(alpha=0.5)
 		
 		# logs de salvamento
-		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 		self.logfile = os.path.join(parameters['logfile'], timestamp)
 		# cria a pasta do experimento
 		os.makedirs(self.logfile, exist_ok=True)
@@ -89,9 +98,16 @@ class Car:
 	def init_coppelia_sim(self):
 			
 		# Cria o cliente
-		RemoteAPIClient().getObject('sim').stopSimulation()
-		self.client = RemoteAPIClient()
+		self.client = RemoteAPIClient(port=self.parameters.get('port', 23000))
 		self.sim = self.client.getObject('sim')
+		self.sim.stopSimulation()
+		while self.sim.getSimulationState() != self.sim.simulation_stopped:
+			time.sleep(0.01)
+		if 'sample_time' in self.parameters:
+			sample_time = self.parameters['sample_time']
+			self.sim.setFloatParam(self.sim.floatparam_simulation_time_step, sample_time)
+			if not np.isclose(self.sim.getSimulationTimeStep(), sample_time):
+				raise RuntimeError('O simulador nao aceitou o intervalo de amostragem.')
 		
 		car_name = '/Car'
 		
@@ -132,6 +148,11 @@ class Car:
 	# get states
 	def get_states(self):
 
+		# Usa o intervalo atual tambem no calculo da aceleracao.
+		t = self.get_time() - self.tinit
+		self.dt = t - self.t
+		self.t = t
+
 		# velocidade 
 		self.v_ant = self.v
 		self.v, self.w = self.get_vel()
@@ -145,14 +166,12 @@ class Car:
 		# posicao
 		self.p = self.get_pos()
 		
-		# tempo
-		self.t = self.get_time() - self.tinit
-				
 		return self.p, self.v, self.a, self.th, self.w, self.t
 	
 	########################################
 	# comeca a missao
 	def start_mission(self):
+		self.speed_controller.reset()
 		
 		# sicronizado com o simulador
 		self.client.setStepping(True)
@@ -185,14 +204,8 @@ class Car:
 			# passo de simulacao
 			self.client.step()
 
-			# tempo anterior
-			t0 = self.t
-
 			# atualiza estados
 			self.get_states()
-
-			# atualiza amostragem
-			self.dt = self.t - t0
 
 			# se esta dando re, avise
 			if self.gear == -1:
@@ -266,8 +279,12 @@ class Car:
 			if lin != -1:
 				break
 
-		# velocidade longitudinal
-		v = self.gear * np.linalg.norm(lin)
+		# O eixo Z local do modelo Car aponta para a frente do veiculo.
+		# A projecao exclui a queda vertical inicial e preserva o sinal real.
+		matrix = self.sim.getObjectMatrix(self.robot, -1)
+		forward = np.array([matrix[2], matrix[6], matrix[10]])
+		self.v_raw = float(np.dot(lin, forward))
+		v = self.v_raw
 
 		# filtros
 		v = self.v_filt.filter(v)
@@ -292,8 +309,7 @@ class Car:
 	# seta referencia de controle
 	def _set_ref(self, vref):
 
-		self.vref = self.vref_filt.filter(vref)
-		self.vref = np.clip(self.vref, -CAR['VELMAX'], CAR['VELMAX'])
+		self.vref = float(np.clip(vref, -CAR['VELMAX'], CAR['VELMAX']))
 
 		# troca para re
 		if (self.vref < 0.0) and (self.gear == 1):
@@ -308,29 +324,26 @@ class Car:
 	########################################
 	# seta torque do veiculo
 	def set_vel(self, vref):
-		
-		# ganhos
-		Kp = 3.5
-		Kd = 2.5
-		
-		# define referencia e marcha
 		self._set_ref(vref)
-		
-		# controla magnitude da velocidade
-		vref_abs = abs(self.vref)
-		v_abs = abs(self.v)
+		if self.vref == 0.0 and abs(self.v_raw) < 0.01:
+			self.set_coast()
+			return
 
-		# aceleracao da magnitude
-		a_abs = np.sign(self.v) * self.a
+		# Usa a velocidade sem filtro, como no projeto MATLAB.
+		error = abs(self.vref) - self.gear * self.v_raw
+		motor_gain = 2 * MOTOR_TORQUE_FACTOR * MOTOR_INPUT_GAIN
+		compensation = CAR['MI'] * CAR['GRAV']
+		lower = motor_gain * (-CAR['ACCELMAX'] + compensation) - COAST_DECELERATION
+		upper = motor_gain * (CAR['ACCELMAX'] + compensation) - COAST_DECELERATION
+		normalized_input = self.speed_controller.update(error, self.dt, lower, upper)
 
-		# controle PD
-		du = Kp*(vref_abs - v_abs) - Kd*a_abs
-		u = self.u + du*self.dt
-		self.set_u(u)
+		# Inverte u_normalizado = ganho_motor*(set_u + compensacao) - atrito.
+		command = (normalized_input + COAST_DECELERATION) / motor_gain - compensation
+		self.set_u(command)
 	
 	########################################
 	# seta torque dos motores do veiculo
-	def set_u(self, u):
+	def set_u(self, u, compensate_friction=True):
 
 		# limita aceleracao
 		self.u = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
@@ -338,7 +351,7 @@ class Car:
 		# Compensa o atrito ja modelado pela cena, no sentido da marcha.
 		# Na partida, compensa apenas se houver comando de aceleracao.
 		F_compensation = 0.0
-		if abs(self.v) > 0.01 or self.u > 0.0:
+		if compensate_friction and (abs(self.v) > 0.01 or self.u > 0.0):
 			F_compensation = CAR['MASS']*CAR['GRAV']*CAR['MI']
 
 		# força de controle
@@ -348,11 +361,12 @@ class Car:
 		F = F_compensation + F_control
 		
 		# torque
-		GAMMA = 0.63
-		T = GAMMA*CAR['RW']*F
+		T = MOTOR_TORQUE_FACTOR*CAR['RW']*F
 
 		# aplica o sentido da marcha
 		T = self.gear*T
+		self.motor_torque = float(T)
+		self.coasting = not compensate_friction and self.u == 0.0
 
 		# atua
 		for m in [self.motorL, self.motorR]:
@@ -361,6 +375,13 @@ class Car:
 			# Apply the desired torques to the joints
 			self.sim.setJointForce(m, abs(T))
 			
+	########################################
+	# banguela: sem torque de tracao, frenagem ou compensacao
+	def set_coast(self):
+		self.set_u(0.0, compensate_friction=False)
+		self.vref = 0.0
+		self.speed_controller.reset()
+
 	########################################
 	# vai para frente
 	def set_forward(self):
@@ -376,6 +397,7 @@ class Car:
 
 		# troca a marcha
 		self.gear = 1
+		self.speed_controller.reset()
 		
 	########################################
 	# coloca re
@@ -392,6 +414,7 @@ class Car:
 
 		# troca a marcha
 		self.gear = -1
+		self.speed_controller.reset()
 		
 	########################################
 	# seta steer do veiculo
@@ -461,11 +484,14 @@ class Car:
 					'x'     : self.p[0], 
 					'y'     : self.p[1],
 					'v'     : self.v,
+					'v_raw' : self.v_raw,
 					'a'		: self.a,
 					'vref'  : self.vref,
 					'th'    : self.th,
 					'w'     : self.w,
 					'u'     : self.u,
+					'torque_motor' : self.motor_torque,
+					'coasting' : int(self.coasting),
 				}
 				
 		# se ja iniciou as trajetorias
