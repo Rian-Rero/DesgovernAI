@@ -1,8 +1,9 @@
-"""PI projetado em Controlador/controller.m para a entrada normalizada."""
+"""PI para a entrada normalizada, com velocidade filtrada e anti-windup."""
 
-SPEED_KP = 10.980038  # 1/s
-SPEED_KI = 38.801744  # 1/s^2
-CONTROL_SAMPLE_TIME = 0.01  # s
+SPEED_KP = 4.0  # 1/s
+SPEED_KI = 4.0  # 1/s^2
+CONTROL_SAMPLE_TIME = 0.05  # s: 20 Hz para a banda do PI
+VELOCITY_FILTER_TIME = 0.03  # s
 MOTOR_INPUT_GAIN = 0.77
 COAST_DECELERATION = 0.5880832138991398
 MOTOR_TORQUE_FACTOR = 0.63

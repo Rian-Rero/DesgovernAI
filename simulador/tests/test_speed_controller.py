@@ -43,15 +43,15 @@ class SpeedControllerTests(unittest.TestCase):
 
     def make_car(self, gear=1):
         car = Car.__new__(Car)
-        car.v_raw = gear * 1.5
-        car.v = 0.0
+        car.v_raw = 0.0
+        car.v = gear * 1.5
         car.dt = 0.01
         car.gear = gear
         car.speed_controller = SpeedPI()
         car.set_u = Mock()
         return car
 
-    def test_set_vel_uses_raw_velocity_and_converts_normalized_input(self):
+    def test_set_vel_uses_filtered_velocity_and_converts_normalized_input(self):
         motor_gain = 2 * MOTOR_TORQUE_FACTOR * MOTOR_INPUT_GAIN
         expected = COAST_DECELERATION / motor_gain - CAR['MI'] * CAR['GRAV']
         for gear in [-1, 1]:

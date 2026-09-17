@@ -15,13 +15,17 @@ import threading
 from datetime import datetime
 try:
 	from . import filter
+	from .remote_api import CarRemoteAPI
 	from .speed_controller import (
-		COAST_DECELERATION, MOTOR_INPUT_GAIN, MOTOR_TORQUE_FACTOR, SpeedPI,
+		COAST_DECELERATION, MOTOR_INPUT_GAIN, MOTOR_TORQUE_FACTOR,
+		VELOCITY_FILTER_TIME, SpeedPI,
 	)
 except ImportError:
 	import filter
+	from remote_api import CarRemoteAPI
 	from speed_controller import (
-		COAST_DECELERATION, MOTOR_INPUT_GAIN, MOTOR_TORQUE_FACTOR, SpeedPI,
+		COAST_DECELERATION, MOTOR_INPUT_GAIN, MOTOR_TORQUE_FACTOR,
+		VELOCITY_FILTER_TIME, SpeedPI,
 	)
 
 ########################################
@@ -71,6 +75,8 @@ class Car:
 		self.motor_torque = 0.0
 		self.coasting = False
 		self.speed_controller = SpeedPI()
+		self.velocity_filter_time = VELOCITY_FILTER_TIME
+		self._steering_command = None
 		
 		# comando de esterçamento
 		self.st = 0.0
@@ -143,28 +149,34 @@ class Car:
 		self.ultra = self.sim.getObject('/Car/ultra_front')  # ajuste o nome igual ao da cena
 		if self.ultra == -1:
 			print('Erro: ultrassônico não encontrado')
+		self.remote = CarRemoteAPI(self.sim, self.robot)
+		self._vision_handling = None
+		if self.parameters.get('explicit_vision', False):
+			self._vision_handling = self.sim.getExplicitHandling(self.cam)
+			self.sim.setExplicitHandling(self.cam, 1)
 	
 	########################################
 	# get states
 	def get_states(self):
 
 		# Usa o intervalo atual tambem no calculo da aceleracao.
-		t = self.get_time() - self.tinit
+		state = self.remote.get_state(self.robot) if getattr(self, 'remote', None) else None
+		t = (state['time'] if state is not None else self.get_time()) - self.tinit
 		self.dt = t - self.t
 		self.t = t
 
 		# velocidade 
 		self.v_ant = self.v
-		self.v, self.w = self.get_vel()
+		self.v, self.w = self.get_vel(state) if state is not None else self.get_vel()
 
 		# aceleracao
 		self.a = self.get_accel()
 
 		# orientacao
-		self.th = self.get_yaw()
+		self.th = self.get_yaw(state['quaternion']) if state is not None else self.get_yaw()
 		
 		# posicao
-		self.p = self.get_pos()
+		self.p = np.asarray(state['position'][:2]) if state is not None else self.get_pos()
 		
 		return self.p, self.v, self.a, self.th, self.w, self.t
 	
@@ -175,12 +187,21 @@ class Car:
 		
 		# sicronizado com o simulador
 		self.client.setStepping(True)
+		# Remove comandos dos motores que possam ter sido salvos na cena.
+		for motor in [self.motorL, self.motorR]:
+			self.sim.setJointTargetVelocity(motor, 0.0)
+			self.sim.setJointForce(motor, 0.0)
+		for steer in [self.steerL, self.steerR]:
+			self.sim.setJointTargetPosition(steer, 0.0)
 		
 		# comeca a simulacao
 		self.sim.startSimulation()
+		# O primeiro passo inicializa os scripts antes das chamadas agrupadas.
+		self.client.step()
 		
 		# tempo inicial
 		self.tinit = self.get_time()
+		self.wall_start = time.perf_counter()
 		
 		# estados iniciais
 		self.get_states()
@@ -238,11 +259,9 @@ class Car:
 				
 	########################################
 	# retorna yaw
-	def get_yaw(self):
-		while True:		
-			q = self.sim.getObjectQuaternion(self.robot,-1)
-			if (q != -1):
-				break
+	def get_yaw(self, q=None):
+		if q is None:
+			q = self.sim.getObjectQuaternion(self.robot, -1)
 	
 		# quaternion to roll-pitch-yaw
 		yaw = self.quaternion_to_yaw(q)
@@ -272,21 +291,22 @@ class Car:
 				
 	########################################
 	# retorna velocidades linear e angular
-	def get_vel(self):
-
-		while True:
+	def get_vel(self, state=None):
+		if state is None:
 			lin, ang = self.sim.getObjectVelocity(self.robot)
-			if lin != -1:
-				break
+			matrix = self.sim.getObjectMatrix(self.robot, -1)
+		else:
+			lin, ang, matrix = state['linear'], state['angular'], state['matrix']
 
 		# O eixo Z local do modelo Car aponta para a frente do veiculo.
 		# A projecao exclui a queda vertical inicial e preserva o sinal real.
-		matrix = self.sim.getObjectMatrix(self.robot, -1)
 		forward = np.array([matrix[2], matrix[6], matrix[10]])
 		self.v_raw = float(np.dot(lin, forward))
 		v = self.v_raw
 
 		# filtros
+		if getattr(self, 'velocity_filter_time', 0) > 0 and self.dt > 0:
+			self.v_filt.alpha = -np.expm1(-self.dt / self.velocity_filter_time)
 		v = self.v_filt.filter(v)
 		w = self.w_filt.filter(ang[2])
 
@@ -329,8 +349,7 @@ class Car:
 			self.set_coast()
 			return
 
-		# Usa a velocidade sem filtro, como no projeto MATLAB.
-		error = abs(self.vref) - self.gear * self.v_raw
+		error = abs(self.vref) - self.gear * self.v
 		motor_gain = 2 * MOTOR_TORQUE_FACTOR * MOTOR_INPUT_GAIN
 		compensation = CAR['MI'] * CAR['GRAV']
 		lower = motor_gain * (-CAR['ACCELMAX'] + compensation) - COAST_DECELERATION
@@ -369,9 +388,13 @@ class Car:
 		self.coasting = not compensate_friction and self.u == 0.0
 
 		# atua
+		velocity = float(np.sign(T)*CAR['VELMAX']/CAR['RW'])
+		if getattr(self, 'remote', None):
+			self.remote.set_motors(self.motorL, self.motorR, velocity, float(abs(T)))
+			return
 		for m in [self.motorL, self.motorR]:
 			# A junta recebe rad/s: converte a velocidade linear pelo raio.
-			self.sim.setJointTargetVelocity(m, np.sign(T)*CAR['VELMAX']/CAR['RW'])
+			self.sim.setJointTargetVelocity(m, velocity)
 			# Apply the desired torques to the joints
 			self.sim.setJointForce(m, abs(T))
 			
@@ -425,25 +448,26 @@ class Car:
 		
 		self.st = np.clip(st, -CAR['STEERMAX'], CAR['STEERMAX'])
 		st = self.st
+		if getattr(self, '_steering_command', None) == st:
+			return
 		if np.tan(st) == 0:
 			stL = stR = 0.0
 		else:
 			stL = np.arctan(CAR['L'] / ( width + CAR['L'] / np.tan(st)))
 			stR = np.arctan(CAR['L'] / (-width + CAR['L'] / np.tan(st)))			
 		
-		# Set steering command
-		while True:
-			status = self.sim.setJointTargetPosition(self.steerL, stL)
-			if status == 1:
-				break
-		while True:
-			status = self.sim.setJointTargetPosition(self.steerR, stR)
-			if status == 1:
-				break
+		if getattr(self, 'remote', None):
+			self.remote.set_steering(self.steerL, self.steerR, float(stL), float(stR))
+		else:
+			self.sim.setJointTargetPosition(self.steerL, stL)
+			self.sim.setJointTargetPosition(self.steerR, stR)
+		self._steering_command = st
 	
 	########################################
 	# get image data
 	def get_image(self, gray=False):
+		if self.parameters.get('explicit_vision', False):
+			self.sim.handleVisionSensor(self.cam)
 		
 		while True:
 			image, resolution = self.sim.getVisionSensorImg(self.cam)
@@ -480,7 +504,8 @@ class Car:
 	def save_traj(self):
 		
 		# dados (COLOCAR APENAS ESCALARES)
-		data = {	't'     : self.t, 
+		data = {	't'     : self.t,
+					'wall_time_s': time.perf_counter() - self.wall_start,
 					'x'     : self.p[0], 
 					'y'     : self.p[1],
 					'v'     : self.v,
@@ -573,6 +598,11 @@ class Car:
 		finally:
 			try:
 				self.sim.stopSimulation()
+				while self.sim.getSimulationState() != self.sim.simulation_stopped:
+					time.sleep(0.01)
+				if self._vision_handling is not None:
+					self.sim.setExplicitHandling(self.cam, self._vision_handling)
+				self.remote.close()
 			except:
 				pass
 

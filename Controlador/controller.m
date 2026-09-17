@@ -75,45 +75,68 @@ for zeta = amortecimentos
 end
 assert(isfinite(melhor_tempo), 'Nenhum PI satisfez as restricoes da busca.');
 
+%% PI aplicado e validado no CoppeliaSim
+fprintf('Busca nominal inicial: kp = %.6f; ki = %.6f\n', kp, ki);
+arquivo = fullfile(fileparts(fileparts(mfilename('fullpath'))), ...
+    'simulador', 'fva_car', 'speed_controller.py');
+configuracao = fileread(arquivo);
+kp = parametro(configuracao, 'SPEED_KP');
+ki = parametro(configuracao, 'SPEED_KI');
+Ts = parametro(configuracao, 'CONTROL_SAMPLE_TIME');
+Tf = parametro(configuracao, 'VELOCITY_FILTER_TIME');
+tempo = (0:Ts:20)';
+H = 1 / (Tf*s + 1);
+alpha = -expm1(-Ts/Tf);
+Hd = tf([alpha 0], [1 -(1-alpha)], Ts);
+Gd = c2d(G, Ts, 'zoh');
+melhor_tempo = 0;
+for incremento = transicoes
+    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max, Tf);
+    ta = desempenho(y, incremento, Ts);
+    melhor_tempo = max(melhor_tempo, ta);
+end
+
 %% Controlador e malha fechada
 C = (kp*s + ki)/s;
-L = C * G;
-T = feedback(L, 1);
+L = C * G * H;
+T = feedback(C*G, H);
+Tc = feedback(L, 1);
 S = feedback(1, L);
 CS = minreal(C * S);
 Cd = c2d(C, Ts, 'zoh');
-Ld = Cd * Gd;
-Td = feedback(Ld, 1);
+Ld = Cd * Gd * Hd;
+Td = feedback(Cd*Gd, Hd);
 assert(isstable(T) && isstable(Td) && kp > tau*ki);
 erro_estacionario = dcgain(S);
 assert(abs(erro_estacionario) < 1e-9, 'Erro estacionario diferente de zero.');
 [gm, pm, ~, wc] = margin(Ld);
 fprintf('\nkp = %.6f; ki = %.6f\n', kp, ki);
-fprintf('wn = %.6f rad/s; zeta = %.3f\n', wn_projeto, zeta_projeto);
+fprintf('Amostragem = %.3f s; filtro de velocidade = %.3f s\n', Ts, Tf);
+fprintf('Polinomio com filtro: tau*Tf*s^4+(tau+Tf)*s^3+s^2+kp*s+ki\n');
 fprintf('Erro estacionario para degrau = %.3g\n', erro_estacionario);
 fprintf('Acomodacao de 2%%, pior transicao simulada = %.3f s\n', melhor_tempo);
 fprintf('Margens digitais: %.2f dB, %.2f graus; wc = %.3f rad/s\n', ...
     20*log10(gm), pm, wc);
-fprintf('Menor tempo encontrado na grade; nao e um otimo global.\n');
+fprintf('Ganhos aplicados lidos do Python e validados na simulacao real.\n');
 C
 disp('Polos de malha fechada:'); disp(pole(T));
 
 %% LGR, Bode e loop shaping
 figure('Name', 'LGR com PI');
-rlocus((s + ki/kp)/s * G); grid on; hold on;
+rlocus((s + ki/kp)/s * G * H); grid on; hold on;
 plot(real(pole(T)), imag(pole(T)), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
 title(sprintf('LGR com zero do PI; ganho escolhido kp = %.4f', kp));
 
 figure('Name', 'Bode: planta e controlador');
-bode(G, C, L); grid on; legend('G', 'C', 'L = CG');
+bode(G, C, H, L); grid on; legend('G', 'C', 'H', 'L = CGH');
 
 figure('Name', 'Loop shaping e margens');
-margin(L); grid on; title('Loop shaping: L(s) = C(s)G(s)');
+margin(L); grid on; title('Loop shaping: L(s) = C(s)G(s)H(s)');
 figure('Name', 'Margens com amostragem');
 margin(Ld); grid on; title('Malha digital: controlador e planta com ZOH');
 
 figure('Name', 'Sensibilidade');
-bodemag(S, T); grid on; legend('S = 1/(1+L)', 'T = L/(1+L)');
+bodemag(S, Tc); grid on; legend('S = 1/(1+L)', 'Tc = L/(1+L)');
 title('Sensibilidade e sensibilidade complementar');
 figure('Name', 'Esforco de controle');
 bodemag(CS); grid on; title('C(s)S(s): referencia para entrada normalizada');
@@ -132,7 +155,7 @@ scatter(resultados(viaveis, 6), resultados(viaveis, 3), 35, ...
     resultados(viaveis, 7), 'filled');
 set(gca, 'XScale', 'log'); grid on; colorbar;
 xlabel('wn (rad/s)'); ylabel('Acomodacao de 2% (s)');
-title('Projetos viaveis; cor indica zeta');
+title('Busca nominal inicial sem filtro; cor indica zeta');
 
 %% Velocidades com saturacao e anti-windup
 figure('Name', 'Referencias de velocidade');
@@ -140,7 +163,7 @@ tiledlayout(2, 1);
 nexttile; hold on; grid on;
 for vref = velocidades
     incremento = vref - min(velocidades);
-    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max);
+    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max, Tf);
     plot(tempo, y + min(velocidades), 'DisplayName', sprintf('%.1f m/s', vref));
     yline(vref, ':', 'HandleVisibility', 'off');
     if incremento > 0
@@ -152,7 +175,7 @@ xlabel('Tempo (s)'); ylabel('Velocidade (m/s)'); legend('Location', 'best');
 title('Partida em 0.5 m/s, saturacao e anti-windup');
 nexttile; hold on; grid on;
 for sentido = [1 -1]
-    [y, u] = simular_pi(kp, ki, tau, tempo, sentido*delta_v, u_min, u_max);
+    [y, u] = simular_pi(kp, ki, tau, tempo, sentido*delta_v, u_min, u_max, Tf);
     [ta, pico] = desempenho(y, sentido*delta_v, Ts);
     fprintf('Transicao %+.1f m/s: acomodacao %.3f s; sobressinal %.2f%%\n', ...
         sentido*delta_v, ta, pico);
@@ -164,15 +187,21 @@ yline(-parametros.ACCELMAX, '--', 'HandleVisibility', 'off');
 xlabel('Tempo (s)'); ylabel('Comando set\_u (m/s^2)'); legend;
 title('Esforco limitado do carrinho');
 
-function [y, u] = simular_pi(kp, ki, tau, t, referencia, u_min, u_max)
+function [y, u] = simular_pi(kp, ki, tau, t, referencia, u_min, u_max, Tf)
     y = zeros(size(t));
     u = zeros(size(t));
     integral = 0;
     a = 0;
     dt = t(2) - t(1);
     h = -expm1(-dt/tau);
+    alpha = 1;
+    if nargin == 8
+        alpha = -expm1(-dt/Tf);
+    end
+    velocidade = 0;
     for k = 1:numel(t)-1
-        e = referencia - y(k);
+        velocidade = (1-alpha)*velocidade + alpha*y(k);
+        e = referencia - velocidade;
         livre = kp*e + ki*integral;
         u(k) = min(max(livre, u_min), u_max);
         if livre == u(k) || (livre > u_max && e < 0) || (livre < u_min && e > 0)
@@ -182,6 +211,12 @@ function [y, u] = simular_pi(kp, ki, tau, t, referencia, u_min, u_max)
         a = a + (u(k)-a)*h;
     end
     u(end) = u(end-1);
+end
+
+function valor = parametro(codigo, nome)
+    token = regexp(codigo, [nome '\s*=\s*([0-9.]+)'], 'tokens', 'once');
+    assert(~isempty(token), 'Parametro %s nao encontrado.', nome);
+    valor = str2double(token{1});
 end
 
 function [ta, pico] = desempenho(y, referencia, Ts)
