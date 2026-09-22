@@ -12,8 +12,16 @@ import time, os
 from datetime import datetime
 try:
 	from . import encoder, servos, buzzer, ultrasonic, imu, filter
+	from .speed_controller import (
+		CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, STOP_SPEED_THRESHOLD,
+		VELOCITY_FILTER_TIME, SpeedPI,
+	)
 except ImportError:
 	import encoder, servos, buzzer, ultrasonic, imu, filter
+	from speed_controller import (
+		CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, STOP_SPEED_THRESHOLD,
+		VELOCITY_FILTER_TIME, SpeedPI,
+	)
 
 
 # QUESTAO DA ORIENTACAO DO CARRINHO NA FUSAO DE POSICAO (COMECA SEMPRE PARA O LESTE)
@@ -60,6 +68,18 @@ class Car:
 	def __init__(self, parameters):
 		
 		self.parameters = parameters
+		self.speed_controller = SpeedPI(
+			kp=parameters.get('speed_kp', SPEED_KP),
+			ki=parameters.get('speed_ki', SPEED_KI),
+		)
+		self.sample_rate = float(parameters.get('sample_time', CONTROL_SAMPLE_TIME))
+		if self.sample_rate <= 0.0:
+			raise ValueError("O periodo de amostragem deve ser positivo.")
+		self.velocity_filter_time = float(parameters.get(
+			'velocity_filter_time', VELOCITY_FILTER_TIME
+		))
+		if self.velocity_filter_time < 0.0:
+			raise ValueError("A constante de tempo do filtro nao pode ser negativa.")
 		
 		# detecta carrinho pronto
 		self.color = self.get_car_color()
@@ -69,10 +89,8 @@ class Car:
 		
 		# tempo
 		self.t = 0.0
-		# tempo de amostragem preterido
-		self.sample_rate = 1.0/CAR['PERIOD']
 		# tempo de amostragem real medido
-		self.dt = 1.0/CAR['PERIOD']
+		self.dt = self.sample_rate
 		
 		# velocidade de referencia
 		self.vref = 0.0
@@ -95,6 +113,8 @@ class Car:
 		
 		# comando de aceleracao
 		self.u = 0.0
+		self.control_percent = 0.0
+		self.motor_pwm_percent = 0.0
 		# comando de estercamento
 		self.st = 0.0
 		
@@ -105,9 +125,8 @@ class Car:
 		self.gear = self.atuador.get_gear()
 		
 		# filtros dos sinais
-		self.v_filt    = filter.MovingAverage(n=30)
+		self.v_filt    = filter.AlphaFilter(alpha=1.0)
 		self.a_filt    = filter.MovingAverage(n=30)
-		self.vref_filt = filter.MovingAverage(n=100)
 		self.w_filt    = filter.MovingAverage(n=20)
 		
 		# logs de salvamento
@@ -196,6 +215,8 @@ class Car:
 	########################################
 	# comeca a missao
 	def start_mission(self):
+		self.speed_controller.reset()
+		self.v_filt.reset(0.0)
 		
 		# desliga a emergencia
 		self.emergencia = False
@@ -348,6 +369,8 @@ class Car:
 
 		# somente atualiza velocidade se a medida for valida
 		if valid:
+			if self.velocity_filter_time > 0.0 and self.dt > 0.0:
+				self.v_filt.alpha = -np.expm1(-self.dt / self.velocity_filter_time)
 			vf = self.v_filt.filter(v)
 		else:
 			vf = self.v
@@ -398,9 +421,9 @@ class Car:
 			self.vref = 0.0
 			return self.vref
 			
-		# referencia filtrada de velocidade
-		self.vref = self.vref_filt.filter(vref)
-		self.vref = np.clip(self.vref, -CAR['VELMAX'], CAR['VELMAX'])
+		# O filtro fica na medida. Filtrar tambem a referencia esconderia do PI
+		# o degrau que se deseja ensaiar e acrescentaria atraso desnecessario.
+		self.vref = float(np.clip(vref, -CAR['VELMAX'], CAR['VELMAX']))
 		
 		# se eh para dar re e estou indo para frente
 		if (self.vref < 0.0) and (self.gear == servos.Gear.FORWARD):
@@ -415,23 +438,23 @@ class Car:
 	########################################
 	# seta torque do veiculo
 	def set_vel(self, vref):
-		
-		# ganhos
-		Kp = 0.4
-		Kd = 0.2
-
 		# define referencia e marcha
 		self._set_ref(vref)
 
-		# controla magnitude da velocidade
-		vref_abs = abs(self.vref)
-		v_abs = abs(self.v)
+		# Em velocidade praticamente nula, coloca o ESC em neutro e elimina
+		# memoria do integrador. Durante a desaceleracao o PI continua reduzindo
+		# o throttle ate atingir esse limiar.
+		if self.vref == 0.0 and abs(self.v) < STOP_SPEED_THRESHOLD:
+			self.set_coast()
+			return
 
-		# aceleracao da magnitude
-		a_abs = np.sign(self.v) * self.a
-
-		# controle PD
-		u = Kp*(vref_abs - v_abs) - Kd*a_abs
+		# O encoder fornece velocidade com sinal, mas a orientacao eletrica pode
+		# variar entre os carrinhos. A marcha define o sentido; o PI controla a
+		# magnitude, como fazia o controlador anterior.
+		error = abs(self.vref) - abs(self.v)
+		u = self.speed_controller.update(
+			error, self.dt, -CAR['ACCELMAX'], CAR['ACCELMAX']
+		)
 		self.set_u(u)
 	
 	########################################
@@ -443,11 +466,12 @@ class Car:
 			u = -CAR['ACCELMAX']
 		
 		# limita aceleracao
-		self.u = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
+		self.u = float(np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX']))
 		
-		# medida de seguranca
-		if np.abs(self.v) > CAR['VELMAX']:
-			self.u = 0.0
+		# Acima do limite, reduza o throttle em vez de congela-lo no valor atual.
+		if np.abs(self.v) > CAR['VELMAX'] and self.u > 0.0:
+			self.u = -CAR['ACCELMAX']
+		self.control_percent = 100.0 * self.u / CAR['ACCELMAX']
 			
 		# controlador linearizante
 		F = CAR['MASS']*self.u
@@ -459,16 +483,27 @@ class Car:
 		self.atuador.set_torque(T)
 
 	########################################
+	# ESC em neutro: sem aumentar nem diminuir o throttle
+	def set_coast(self):
+		self.vref = 0.0
+		self.u = 0.0
+		self.control_percent = 0.0
+		self.speed_controller.reset()
+		self.atuador.set_neutral()
+
+	########################################
 	# coloca re
 	def set_reverse(self):
 		self.atuador.set_reverse()
 		self.gear = self.atuador.get_gear()
+		self.speed_controller.reset()
 		
 	########################################
 	# vai pra frente
 	def set_forward(self):
 		self.atuador.set_forward()
 		self.gear = self.atuador.get_gear()
+		self.speed_controller.reset()
 		
 	########################################
 	# seta steer do veiculo
@@ -509,6 +544,7 @@ class Car:
 	########################################
 	# salva a trajetoria
 	def save_traj(self):
+		self.motor_pwm_percent = self.atuador.get_throttle_percent()
 		
 		# dados (COLOCAR APENAS ESCALARES)
 		data = {	
@@ -521,6 +557,9 @@ class Car:
 					'th'    : self.th,
 					'w'     : self.w,
 					'u'     : self.u,
+					'control_percent' : self.control_percent,
+					'motor_pwm_percent' : self.motor_pwm_percent,
+					'pi_integral' : self.speed_controller.integral,
 					'a_model'	: self.a_model,
 					'a_x'		: self.a_x,
 					'w_model'	: self.w_model,

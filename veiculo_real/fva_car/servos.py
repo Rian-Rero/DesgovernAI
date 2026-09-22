@@ -173,24 +173,23 @@ class Servos:
 			# envia comando de pan da camera/ultrasom
 			self._set_servo(SERVO_ULTRASONIC, pan_pwm)
 			
-			with self.lock:
-				if self.gear == Gear.FORWARD:
-					# envia comando de tracao (integra pwm)
-					self.th_pwm += self.dth_pwm * self.dt
-					# limita tracao com anti-windup
-					self.th_pwm = np.clip(self.th_pwm, 0.0, self.max_throttle)
-				#
-				elif self.gear == Gear.REVERSE:
-					# envia comando de tracao (integra pwm)
-					self.th_pwm -= self.dth_pwm * self.dt
-					# limita tracao com anti-windup
-					self.th_pwm = np.clip(self.th_pwm, -ZERO_THROTTLE_ANGLE, 0.0)
-				
-				# pwm final	
-				th_pwm = self.th_pwm
-			
-			# seta commando
+			# Atualiza o estado e escreve no ESC sob o mesmo lock. Assim, um
+			# comando de neutro nunca pode ser sobrescrito por uma amostra antiga.
 			with self.throttle_lock:
+				with self.lock:
+					if self.gear == Gear.FORWARD:
+						# envia comando de tracao (integra pwm)
+						self.th_pwm += self.dth_pwm * self.dt
+						# limita tracao com anti-windup
+						self.th_pwm = np.clip(self.th_pwm, 0.0, self.max_throttle)
+					elif self.gear == Gear.REVERSE:
+						# envia comando de tracao (integra pwm)
+						self.th_pwm -= self.dth_pwm * self.dt
+						# limita tracao com anti-windup
+						self.th_pwm = np.clip(self.th_pwm, -ZERO_THROTTLE_ANGLE, 0.0)
+					th_pwm = self.th_pwm
+
+				# seta comando
 				self._set_pwm(th_pwm)
 			
 			# espera terminar o periodo
@@ -221,6 +220,25 @@ class Servos:
 		# transforma torque para rad
 		with self.lock:
 			self.dth_pwm = self.gain_torque * T
+
+	########################################
+	# coloca o ESC em neutro e interrompe a integracao do throttle
+	def set_neutral(self):
+		with self.throttle_lock:
+			with self.lock:
+				self.th_pwm = 0.0
+				self.dth_pwm = 0.0
+			self._set_pwm(0.0)
+
+	########################################
+	# comando atual do ESC, normalizado e com sinal da marcha
+	def get_throttle_percent(self):
+		with self.lock:
+			if self.gear == Gear.FORWARD:
+				if self.max_throttle <= 0.0:
+					return 0.0
+				return float(100.0 * self.th_pwm / self.max_throttle)
+			return float(100.0 * self.th_pwm / ZERO_THROTTLE_ANGLE)
 	
 	########################################
 	# seta steer do veiculo (st in rad)		

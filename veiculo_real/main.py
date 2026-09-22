@@ -9,12 +9,15 @@
 ########################################
 # -*- coding: utf-8 -*-
 from fva_car import Car
+from fva_car.speed_controller import (
+	CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, VELOCITY_FILTER_TIME,
+)
 import numpy as np
-import matplotlib.pyplot as plt
 import threading
 import time
 
 MAIN_VEL = 0.7
+SAFE_DISTANCE = 0.20
 
 ########################################
 # thread de visao
@@ -56,7 +59,11 @@ if __name__ == "__main__":
 		'camera'               : False,
 		'ultrasonic_steering'  : False,
 		'us_buzzer'            : False,
-		'initial_position'     : [0, 0, np.deg2rad(0)]
+		'initial_position'     : [0, 0, np.deg2rad(0)],
+		'speed_kp'             : SPEED_KP,
+		'speed_ki'             : SPEED_KI,
+		'sample_time'          : CONTROL_SAMPLE_TIME,
+		'velocity_filter_time' : VELOCITY_FILTER_TIME,
 	}
 
 	car = Car(parameters)
@@ -79,6 +86,7 @@ if __name__ == "__main__":
 			thread_vision.start()
 
 		if parameters['camera']:
+			import matplotlib.pyplot as plt
 			plt.ion()
 			plt.figure(1)
 
@@ -97,8 +105,8 @@ if __name__ == "__main__":
 			# ultrassom
 			dist, valid = car.get_distance()
 
-			if (not valid) or (dist < 0.20):
-				print(f"Colisao: distance {dist:.2f} [m]")
+			if (not valid) or (dist < SAFE_DISTANCE):
+				print(f"Parada de seguranca: distancia {dist:.2f} m")
 				car.set_vel(0.0)
 			else:
 				car.set_vel(MAIN_VEL)
@@ -113,6 +121,8 @@ if __name__ == "__main__":
 				f"{car.vref:.3f},"
 				f"{car.a:.3f},"
 				f"{car.u:.3f},"
+				f"{car.control_percent:.1f},"
+				f"{car.motor_pwm_percent:.1f},"
 				f"{car.w:.3f},"
 				f"{car.th:.3f}",
 				flush=True
@@ -131,17 +141,22 @@ if __name__ == "__main__":
 
 				t_plot = time.monotonic()
 
-		# salva dados
-		if parameters['save']:
-			car.save()
+	except KeyboardInterrupt:
+		print("\nMissao interrompida pelo usuario.")
 
 	finally:
-		# termina a thread de visao
-		stop_event.set()
+		try:
+			# salva inclusive quando o ensaio for interrompido
+			if parameters['save'] and getattr(car, 'traj', None):
+				car.save()
+				print(f"Log salvo em {car.logfile}/car.csv")
+		finally:
+			# termina a thread de visao
+			stop_event.set()
 
-		if thread_vision is not None:
-			thread_vision.join(timeout=1.0)
+			if thread_vision is not None:
+				thread_vision.join(timeout=1.0)
 
-		car.close()
+			car.close()
 
 	print('Terminou...')
