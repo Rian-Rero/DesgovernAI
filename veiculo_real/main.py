@@ -10,7 +10,8 @@
 # -*- coding: utf-8 -*-
 from fva_car import Car
 from fva_car.speed_controller import (
-	CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, VELOCITY_FILTER_TIME,
+	CONTROL_FILTER_TIME, CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP,
+	VELOCITY_FILTER_TIME,
 )
 import numpy as np
 import threading
@@ -64,6 +65,7 @@ if __name__ == "__main__":
 		'speed_ki'             : SPEED_KI,
 		'sample_time'          : CONTROL_SAMPLE_TIME,
 		'velocity_filter_time' : VELOCITY_FILTER_TIME,
+		'control_filter_time'  : CONTROL_FILTER_TIME,
 	}
 
 	car = Car(parameters)

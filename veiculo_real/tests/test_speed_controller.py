@@ -11,7 +11,7 @@ SpeedPI = speed_controller.SpeedPI
 
 class SpeedControllerTests(unittest.TestCase):
 	def test_integral_uses_real_elapsed_time(self):
-		controller = SpeedPI(kp=2.0, ki=3.0)
+		controller = SpeedPI(kp=2.0, ki=3.0, output_filter_time=0.0)
 		controller.update(0.1, 0.02, -1.0, 1.0)
 		output = controller.update(0.1, 0.07, -1.0, 1.0)
 		self.assertAlmostEqual(output, 0.206)
@@ -19,7 +19,7 @@ class SpeedControllerTests(unittest.TestCase):
 
 	def test_saturation_prevents_windup(self):
 		for direction in (-1.0, 1.0):
-			controller = SpeedPI()
+			controller = SpeedPI(output_filter_time=0.0)
 			for _ in range(1000):
 				output = controller.update(direction * 10.0, 0.02, -1.0, 1.0)
 				self.assertEqual(output, direction)
@@ -40,6 +40,16 @@ class SpeedControllerTests(unittest.TestCase):
 			controller.update(0.0, -0.01, -1.0, 1.0)
 		with self.assertRaises(ValueError):
 			controller.update(0.0, 0.01, 1.0, -1.0)
+		with self.assertRaises(ValueError):
+			SpeedPI(output_filter_time=-0.01)
+
+	def test_output_filter_smooths_control_and_reset_clears_it(self):
+		controller = SpeedPI(kp=1.0, ki=0.0, output_filter_time=0.05)
+		output = controller.update(1.0, 0.05, -1.0, 1.0)
+		self.assertAlmostEqual(output, 1.0 - 1.0 / 2.718281828459045)
+		self.assertLess(output, 1.0)
+		controller.reset()
+		self.assertEqual(controller.output, 0.0)
 
 
 if __name__ == "__main__":

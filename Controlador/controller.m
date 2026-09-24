@@ -84,35 +84,39 @@ kp = parametro(configuracao, 'SPEED_KP');
 ki = parametro(configuracao, 'SPEED_KI');
 Ts = parametro(configuracao, 'CONTROL_SAMPLE_TIME');
 Tf = parametro(configuracao, 'VELOCITY_FILTER_TIME');
+Tu = parametro(configuracao, 'CONTROL_FILTER_TIME');
 tempo = (0:Ts:20)';
 H = 1 / (Tf*s + 1);
 alpha = -expm1(-Ts/Tf);
 Hd = tf([alpha 0], [1 -(1-alpha)], Ts);
+Hu = 1 / (Tu*s + 1);
+alpha_u = -expm1(-Ts/Tu);
+Hud = tf([alpha_u 0], [1 -(1-alpha_u)], Ts);
 Gd = c2d(G, Ts, 'zoh');
 melhor_tempo = 0;
 for incremento = transicoes
-    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max, Tf);
+    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max, Tf, Tu);
     ta = desempenho(y, incremento, Ts);
     melhor_tempo = max(melhor_tempo, ta);
 end
 
 %% Controlador e malha fechada
 C = (kp*s + ki)/s;
-L = C * G * H;
-T = feedback(C*G, H);
+L = C * Hu * G * H;
+T = feedback(C*Hu*G, H);
 Tc = feedback(L, 1);
 S = feedback(1, L);
-CS = minreal(C * S);
+CS = minreal(Hu * C * S);
 Cd = c2d(C, Ts, 'zoh');
-Ld = Cd * Gd * Hd;
-Td = feedback(Cd*Gd, Hd);
+Ld = Cd * Hud * Gd * Hd;
+Td = feedback(Cd*Hud*Gd, Hd);
 assert(isstable(T) && isstable(Td) && kp > tau*ki);
 erro_estacionario = dcgain(S);
 assert(abs(erro_estacionario) < 1e-9, 'Erro estacionario diferente de zero.');
 [gm, pm, ~, wc] = margin(Ld);
 fprintf('\nkp = %.6f; ki = %.6f\n', kp, ki);
-fprintf('Amostragem = %.3f s; filtro de velocidade = %.3f s\n', Ts, Tf);
-fprintf('Polinomio com filtro: tau*Tf*s^4+(tau+Tf)*s^3+s^2+kp*s+ki\n');
+fprintf('Amostragem = %.3f s; filtros de velocidade/acao = %.3f/%.3f s\n', ...
+    Ts, Tf, Tu);
 fprintf('Erro estacionario para degrau = %.3g\n', erro_estacionario);
 fprintf('Acomodacao de 2%%, pior transicao simulada = %.3f s\n', melhor_tempo);
 fprintf('Margens digitais: %.2f dB, %.2f graus; wc = %.3f rad/s\n', ...
@@ -123,12 +127,13 @@ disp('Polos de malha fechada:'); disp(pole(T));
 
 %% LGR, Bode e loop shaping
 figure('Name', 'LGR com PI');
-rlocus((s + ki/kp)/s * G * H); grid on; hold on;
+rlocus((s + ki/kp)/s * Hu * G * H); grid on; hold on;
 plot(real(pole(T)), imag(pole(T)), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
 title(sprintf('LGR com zero do PI; ganho escolhido kp = %.4f', kp));
 
 figure('Name', 'Bode: planta e controlador');
-bode(G, C, H, L); grid on; legend('G', 'C', 'H', 'L = CGH');
+bode(G, C, H, Hu, L); grid on;
+legend('G', 'C', 'H velocidade', 'H acao', 'L = C H_u G H');
 
 figure('Name', 'Loop shaping e margens');
 margin(L); grid on; title('Loop shaping: L(s) = C(s)G(s)H(s)');
@@ -163,7 +168,7 @@ tiledlayout(2, 1);
 nexttile; hold on; grid on;
 for vref = velocidades
     incremento = vref - min(velocidades);
-    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max, Tf);
+    y = simular_pi(kp, ki, tau, tempo, incremento, u_min, u_max, Tf, Tu);
     plot(tempo, y + min(velocidades), 'DisplayName', sprintf('%.1f m/s', vref));
     yline(vref, ':', 'HandleVisibility', 'off');
     if incremento > 0
@@ -175,7 +180,7 @@ xlabel('Tempo (s)'); ylabel('Velocidade (m/s)'); legend('Location', 'best');
 title('Partida em 0.5 m/s, saturacao e anti-windup');
 nexttile; hold on; grid on;
 for sentido = [1 -1]
-    [y, u] = simular_pi(kp, ki, tau, tempo, sentido*delta_v, u_min, u_max, Tf);
+    [y, u] = simular_pi(kp, ki, tau, tempo, sentido*delta_v, u_min, u_max, Tf, Tu);
     [ta, pico] = desempenho(y, sentido*delta_v, Ts);
     fprintf('Transicao %+.1f m/s: acomodacao %.3f s; sobressinal %.2f%%\n', ...
         sentido*delta_v, ta, pico);
@@ -187,26 +192,33 @@ yline(-parametros.ACCELMAX, '--', 'HandleVisibility', 'off');
 xlabel('Tempo (s)'); ylabel('Comando set\_u (m/s^2)'); legend;
 title('Esforco limitado do carrinho');
 
-function [y, u] = simular_pi(kp, ki, tau, t, referencia, u_min, u_max, Tf)
+function [y, u] = simular_pi(kp, ki, tau, t, referencia, u_min, u_max, Tf, Tu)
     y = zeros(size(t));
     u = zeros(size(t));
     integral = 0;
     a = 0;
     dt = t(2) - t(1);
     h = -expm1(-dt/tau);
-    alpha = 1;
-    if nargin == 8
-        alpha = -expm1(-dt/Tf);
+    alpha_v = 1;
+    alpha_u = 1;
+    if nargin >= 8
+        alpha_v = -expm1(-dt/Tf);
+    end
+    if nargin >= 9
+        alpha_u = -expm1(-dt/Tu);
     end
     velocidade = 0;
+    acao = 0;
     for k = 1:numel(t)-1
-        velocidade = (1-alpha)*velocidade + alpha*y(k);
+        velocidade = (1-alpha_v)*velocidade + alpha_v*y(k);
         e = referencia - velocidade;
         livre = kp*e + ki*integral;
-        u(k) = min(max(livre, u_min), u_max);
-        if livre == u(k) || (livre > u_max && e < 0) || (livre < u_min && e > 0)
+        alvo = min(max(livre, u_min), u_max);
+        if livre == alvo || (livre > u_max && e < 0) || (livre < u_min && e > 0)
             integral = integral + e*dt;
         end
+        acao = (1-alpha_u)*acao + alpha_u*alvo;
+        u(k) = acao;
         y(k+1) = y(k) + u(k)*dt + (a-u(k))*tau*h;
         a = a + (u(k)-a)*h;
     end

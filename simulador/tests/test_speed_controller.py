@@ -12,7 +12,7 @@ from fva_car.speed_controller import (
 
 class SpeedControllerTests(unittest.TestCase):
     def test_integral_uses_elapsed_simulation_time(self):
-        controller = SpeedPI(kp=2.0, ki=3.0)
+        controller = SpeedPI(kp=2.0, ki=3.0, output_filter_time=0.0)
         controller.update(0.1, 0.02, -1, 1)
         output = controller.update(0.1, 0.07, -1, 1)
         self.assertAlmostEqual(output, 0.206)
@@ -20,7 +20,7 @@ class SpeedControllerTests(unittest.TestCase):
 
     def test_saturation_does_not_accumulate_integral(self):
         for direction in [-1, 1]:
-            controller = SpeedPI()
+            controller = SpeedPI(output_filter_time=0.0)
             for _ in range(1000):
                 output = controller.update(direction * 10, 0.01, -1, 1)
                 self.assertEqual(output, direction)
@@ -40,6 +40,14 @@ class SpeedControllerTests(unittest.TestCase):
         self.assertEqual(controller.integral, 0)
         with self.assertRaises(ValueError):
             controller.update(0.01, -0.01, -1, 1)
+
+    def test_output_filter_smooths_control_and_reset_clears_it(self):
+        controller = SpeedPI(kp=1.0, ki=0.0, output_filter_time=0.05)
+        output = controller.update(1.0, 0.05, -1.0, 1.0)
+        self.assertAlmostEqual(output, 1.0 - 1.0 / 2.718281828459045)
+        self.assertLess(output, 1.0)
+        controller.reset()
+        self.assertEqual(controller.output, 0.0)
 
     def make_car(self, gear=1):
         car = Car.__new__(Car)

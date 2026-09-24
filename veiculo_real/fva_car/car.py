@@ -13,13 +13,13 @@ from datetime import datetime
 try:
 	from . import encoder, servos, buzzer, ultrasonic, imu, filter
 	from .speed_controller import (
-		CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, STOP_SPEED_THRESHOLD,
+		CONTROL_FILTER_TIME, CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, STOP_SPEED_THRESHOLD,
 		VELOCITY_FILTER_TIME, SpeedPI,
 	)
 except ImportError:
 	import encoder, servos, buzzer, ultrasonic, imu, filter
 	from speed_controller import (
-		CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, STOP_SPEED_THRESHOLD,
+		CONTROL_FILTER_TIME, CONTROL_SAMPLE_TIME, SPEED_KI, SPEED_KP, STOP_SPEED_THRESHOLD,
 		VELOCITY_FILTER_TIME, SpeedPI,
 	)
 
@@ -71,6 +71,7 @@ class Car:
 		self.speed_controller = SpeedPI(
 			kp=parameters.get('speed_kp', SPEED_KP),
 			ki=parameters.get('speed_ki', SPEED_KI),
+			output_filter_time=parameters.get('control_filter_time', CONTROL_FILTER_TIME),
 		)
 		self.sample_rate = float(parameters.get('sample_time', CONTROL_SAMPLE_TIME))
 		if self.sample_rate <= 0.0:
