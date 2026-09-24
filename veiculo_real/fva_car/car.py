@@ -38,8 +38,9 @@ CAR = {
 	}
 
 # controlador PI de velocidade
-KP_VEL = 8.0
-KI_VEL = 4.0
+KP_VEL = 0.8
+KI_VEL = 0.1
+SPEED_DEADBAND = 0.05  # m/s
 VELOCITY_FILTER_SIZE = 5
 	
 MACS_CARS = {
@@ -427,6 +428,12 @@ class Car:
 		vref_abs = abs(self.vref)
 		v_abs = abs(self.v)
 		error = vref_abs - v_abs
+
+		# dentro da banda, mantenha o throttle sem oscilar a acao
+		if abs(error) <= SPEED_DEADBAND:
+			self.vel_error_integral = 0.0
+			self.set_u(0.0)
+			return
 
 		# acao de controle PI antes da saturacao
 		u = KP_VEL * error + KI_VEL * self.vel_error_integral
