@@ -7,7 +7,6 @@
 # Universidade Federal de Minas Gerais
 ########################################
 from fva_car import Car
-import numpy as np
 import os
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 import matplotlib.pyplot as plt
@@ -15,7 +14,7 @@ plt.rcParams['figure.figsize'] = (6,8)
 
 # Globais
 parameters = {	
-				'ts'		: 10.0, 			# tempo da simulacao
+				'ts'		: 18.0, 			# tempo da simulacao
 				'save'		: True,
 				'logfile'	: 'logs/',
 				'beep'		: True,
@@ -25,15 +24,10 @@ parameters = {
 # thread de controle de velocidade
 ########################################
 def control_func(car):
-		
-	# seta direcao
-	car.set_steer(np.deg2rad(5.0*np.sin(car.t)))
 
-	# atua
-	if car.t < 5.0:
-		car.set_u(0.3)
-	else:
-		car.set_u(0.0)
+	# segue em linha reta a 1 m/s usando o controlador PI
+	car.set_steer(0.0)
+	car.set_vel(1.0)
 		
 ########################################
 # thread de visão
