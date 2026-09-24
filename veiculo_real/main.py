@@ -16,7 +16,7 @@ import numpy as np
 import threading
 import time
 
-MAIN_VEL = 0.7
+MAIN_VEL = 1.0  # m/s
 SAFE_DISTANCE = 0.20
 
 ########################################
@@ -53,7 +53,7 @@ def vision_func(car, vision_data, stop_event):
 if __name__ == "__main__":
 
 	parameters = {
-		'ts'                   : 20.0,
+		'ts'                   : 18.0,
 		'save'                 : True,
 		'logfile'              : 'logs/',
 		'camera'               : False,
