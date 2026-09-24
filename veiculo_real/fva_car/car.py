@@ -36,6 +36,11 @@ CAR = {
 		'GRAV'   	: 9.81, 			# gravidade [m/s^2]
 		'PERIOD'	: 50.0,				# periodo de amostragem dos sensores
 	}
+
+# controlador PI de velocidade
+KP_VEL = 8.0
+KI_VEL = 4.0
+PI_FILTER_SIZE = 10
 	
 MACS_CARS = {
 	'verde':    '2c:cf:67:1c:29:4a',
@@ -109,6 +114,8 @@ class Car:
 		self.a_filt    = filter.MovingAverage(n=30)
 		self.vref_filt = filter.MovingAverage(n=100)
 		self.w_filt    = filter.MovingAverage(n=20)
+		self.vel_error_filt = filter.MovingAverage(n=PI_FILTER_SIZE)
+		self.vel_error_integral = 0.0
 		
 		# logs de salvamento
 		if self.parameters['save']:
@@ -415,23 +422,26 @@ class Car:
 	########################################
 	# seta torque do veiculo
 	def set_vel(self, vref):
-		
-		# ganhos
-		Kp = 0.4
-		Kd = 0.2
 
 		# define referencia e marcha
 		self._set_ref(vref)
 
-		# controla magnitude da velocidade
+		# erro de velocidade filtrado por media movel
 		vref_abs = abs(self.vref)
 		v_abs = abs(self.v)
+		error = self.vel_error_filt.filter(vref_abs - v_abs)
 
-		# aceleracao da magnitude
-		a_abs = np.sign(self.v) * self.a
+		# termo integral com limite anti-windup
+		self.vel_error_integral += error * self.dt
+		integral_max = CAR['ACCELMAX'] / KI_VEL
+		self.vel_error_integral = np.clip(
+			self.vel_error_integral,
+			-integral_max,
+			integral_max
+		)
 
-		# controle PD
-		u = Kp*(vref_abs - v_abs) - Kd*a_abs
+		# acao de controle PI
+		u = KP_VEL * error + KI_VEL * self.vel_error_integral
 		self.set_u(u)
 	
 	########################################
