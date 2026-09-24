@@ -1,6 +1,6 @@
 """PI para a entrada normalizada, com velocidade filtrada e anti-windup."""
 
-SPEED_KP = 3 * 4.0  # 1/s
+SPEED_KP = 8.0  # 1/s: compromisso entre acomodacao rapida e amortecimento
 SPEED_KI = 4.0  # 1/s^2
 CONTROL_SAMPLE_TIME = 0.05  # s: 20 Hz para a banda do PI
 VELOCITY_FILTER_TIME = 0.03  # s

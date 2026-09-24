@@ -5,7 +5,7 @@ eles devem ser refinados a partir dos logs dos ensaios, sem alterar a logica de
 anti-windup.
 """
 
-SPEED_KP = 12.0  # 1/s
+SPEED_KP = 8.0  # 1/s: compromisso entre acomodacao rapida e amortecimento
 SPEED_KI = 4.0  # 1/s^2
 CONTROL_SAMPLE_TIME = 0.05  # s: 20 Hz, igual ao projeto no simulador
 VELOCITY_FILTER_TIME = 0.03  # s

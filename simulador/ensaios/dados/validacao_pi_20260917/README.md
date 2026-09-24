@@ -1,9 +1,10 @@
 # Validacao do PI de velocidade
 
-O controlador aplicado e `C(s) = (4*s + 4)/s`, com referencia de 1.5 m/s,
+O controlador validado neste conjunto de dados era `C(s) = (4*s + 4)/s`, com referencia de 1.5 m/s,
 amostragem de 50 ms, filtro de velocidade de 30 ms e integracao condicional
 durante a saturacao. Os ganhos e periodos ficam explicitos em
-`simulador/fva_car/speed_controller.py`. O MATLAB le esses parametros do Python.
+`simulador/fva_car/speed_controller.py`; a sintonia atual pode ser diferente
+da sintonia historica destes CSVs. O MATLAB le os parametros atuais do Python.
 
 Os CSVs registram a velocidade longitudinal sem filtro, a velocidade filtrada,
 o comando e a posicao em 10 segundos de simulacao. A validacao usa somente o

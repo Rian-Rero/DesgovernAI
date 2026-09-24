@@ -3,8 +3,14 @@
 O `Car.set_vel()` usa agora o mesmo PI do simulador, com saturacao em
 `[-1, 1] m/s^2`, anti-windup por integracao condicional e filtro exponencial
 de 30 ms na velocidade do encoder. O controle roda a cada 50 ms, como no
-projeto do simulador. Os valores iniciais sao `kp = 12` e `ki = 4`; eles ainda
+projeto do simulador. Os valores iniciais sao `kp = 8` e `ki = 4`; eles ainda
 precisam ser validados e, se necessario, sintonizados no veiculo real.
+
+O ganho proporcional anterior, `kp = 12`, foi reduzido porque amplificava mais
+o ruido e produzia tres cruzamentos da referencia no modelo. Com `kp = 8`, o
+degrau nominal de 1 m/s manteve `Ta` em aproximadamente 1,20 s, com um unico
+cruzamento e sobressinal calculado de aproximadamente 0,38%. Esses numeros sao
+previsoes do modelo e devem ser confirmados pelos logs do carrinho.
 
 O comando zero reduz o throttle enquanto o carrinho ainda se move. Abaixo de
 0,03 m/s, o ESC vai para neutro e o integrador do PI e reiniciado. Trocas de
