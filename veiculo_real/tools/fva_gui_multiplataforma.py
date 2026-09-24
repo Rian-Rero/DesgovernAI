@@ -46,6 +46,48 @@ COLORS = {
 
 CAR_ICON = "🚗 "
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def parse_telemetry_line(line: str):
+	"""Converte uma linha DATA nos campos usados pelos gráficos.
+
+	Aceita tanto o formato atual, que inclui os percentuais do controle e do
+	PWM, quanto o formato antigo sem esses dois campos.
+	"""
+	clean_line = ANSI_ESCAPE_RE.sub("", line).strip()
+	parts = clean_line.split(",")
+
+	if not parts or parts[0] != "DATA":
+		raise ValueError("linha não é de telemetria")
+
+	if len(parts) == 12:
+		(
+			_, t, x, y, v, vref, a, u,
+			control_percent, motor_pwm_percent, w, th,
+		) = parts
+	elif len(parts) == 10:
+		_, t, x, y, v, vref, a, u, w, th = parts
+		control_percent = motor_pwm_percent = "nan"
+	else:
+		raise ValueError(
+			f"quantidade de campos inesperada: {len(parts) - 1}"
+		)
+
+	return {
+		"t": float(t),
+		"x": float(x),
+		"y": float(y),
+		"v": float(v),
+		"vref": float(vref),
+		"a": float(a),
+		"u": float(u),
+		"control_percent": float(control_percent),
+		"motor_pwm_percent": float(motor_pwm_percent),
+		"w": float(w),
+		"th": float(th),
+	}
+
 ########################################
 # Utilitários de rede multiplataforma
 ########################################
@@ -759,24 +801,18 @@ class RsyncGUI(tk.Tk):
 						if not line:
 							continue
 
-						if line.startswith("DATA,"):
+						if ANSI_ESCAPE_RE.sub("", line).lstrip().startswith("DATA,"):
 							try:
-								_, t, x, y, v, vref, a, u, w, th = line.split(",")
+								sample = parse_telemetry_line(line)
 								if name not in self.telemetry:
 									self.telemetry[name] = {
 										"t": [], "x": [], "y": [], "v": [], "vref": [],
-										"a": [], "u": [], "w": [], "th": []
+										"a": [], "u": [], "control_percent": [],
+										"motor_pwm_percent": [], "w": [], "th": []
 									}
 								data = self.telemetry[name]
-								data["t"].append(float(t))
-								data["x"].append(float(x))
-								data["y"].append(float(y))
-								data["v"].append(float(v))
-								data["vref"].append(float(vref))
-								data["a"].append(float(a))
-								data["u"].append(float(u))
-								data["w"].append(float(w))
-								data["th"].append(float(th))
+								for key, value in sample.items():
+									data[key].append(value)
 								self.after(0, self.update_plot)
 							except ValueError:
 								self.ui(self.cmdlog_write, f"[{name.upper()}] Telemetria inválida: {line}")
