@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import threading
 import time
 
-MAIN_VEL = 0.7
+MAIN_VEL = 1.0  # m/s
 
 ########################################
 # thread de visao
@@ -50,7 +50,7 @@ def vision_func(car, vision_data, stop_event):
 if __name__ == "__main__":
 
 	parameters = {
-		'ts'                   : 20.0,
+		'ts'                   : 18.0,
 		'save'                 : True,
 		'logfile'              : 'logs/',
 		'camera'               : False,
@@ -68,6 +68,7 @@ if __name__ == "__main__":
 
 	try:
 		car.start_mission()
+		print(f"Ensaio: {parameters['ts']:.0f} s com vref = {MAIN_VEL:.1f} m/s", flush=True)
 
 		# inicia visao somente se solicitada
 		if parameters['camera']:

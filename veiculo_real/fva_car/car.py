@@ -40,7 +40,7 @@ CAR = {
 # controlador PI de velocidade
 KP_VEL = 8.0
 KI_VEL = 4.0
-PI_FILTER_SIZE = 10
+VELOCITY_FILTER_SIZE = 5
 	
 MACS_CARS = {
 	'verde':    '2c:cf:67:1c:29:4a',
@@ -110,11 +110,9 @@ class Car:
 		self.gear = self.atuador.get_gear()
 		
 		# filtros dos sinais
-		self.v_filt    = filter.MovingAverage(n=30)
+		self.v_filt    = filter.MovingAverage(n=VELOCITY_FILTER_SIZE)
 		self.a_filt    = filter.MovingAverage(n=30)
-		self.vref_filt = filter.MovingAverage(n=100)
 		self.w_filt    = filter.MovingAverage(n=20)
-		self.vel_error_filt = filter.MovingAverage(n=PI_FILTER_SIZE)
 		self.vel_error_integral = 0.0
 		
 		# logs de salvamento
@@ -405,9 +403,8 @@ class Car:
 			self.vref = 0.0
 			return self.vref
 			
-		# referencia filtrada de velocidade
-		self.vref = self.vref_filt.filter(vref)
-		self.vref = np.clip(self.vref, -CAR['VELMAX'], CAR['VELMAX'])
+		# a velocidade medida ja esta filtrada; a referencia entra sem atraso
+		self.vref = float(np.clip(vref, -CAR['VELMAX'], CAR['VELMAX']))
 		
 		# se eh para dar re e estou indo para frente
 		if (self.vref < 0.0) and (self.gear == servos.Gear.FORWARD):
@@ -426,22 +423,20 @@ class Car:
 		# define referencia e marcha
 		self._set_ref(vref)
 
-		# erro de velocidade filtrado por media movel
+		# erro usando a velocidade medida com filtro de media
 		vref_abs = abs(self.vref)
 		v_abs = abs(self.v)
-		error = self.vel_error_filt.filter(vref_abs - v_abs)
+		error = vref_abs - v_abs
 
-		# termo integral com limite anti-windup
-		self.vel_error_integral += error * self.dt
-		integral_max = CAR['ACCELMAX'] / KI_VEL
-		self.vel_error_integral = np.clip(
-			self.vel_error_integral,
-			-integral_max,
-			integral_max
-		)
-
-		# acao de controle PI
+		# acao de controle PI antes da saturacao
 		u = KP_VEL * error + KI_VEL * self.vel_error_integral
+		u_sat = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
+
+		# anti-windup: integra apenas fora da saturacao ou para sair dela
+		if (u == u_sat) or (u > u_sat and error < 0.0) or (u < u_sat and error > 0.0):
+			self.vel_error_integral += error * self.dt
+			u = KP_VEL * error + KI_VEL * self.vel_error_integral
+
 		self.set_u(u)
 	
 	########################################
@@ -455,9 +450,9 @@ class Car:
 		# limita aceleracao
 		self.u = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
 		
-		# medida de seguranca
+		# acima do limite, reduza o throttle em vez de congela-lo
 		if np.abs(self.v) > CAR['VELMAX']:
-			self.u = 0.0
+			self.u = -CAR['ACCELMAX']
 			
 		# controlador linearizante
 		F = CAR['MASS']*self.u
