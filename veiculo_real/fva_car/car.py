@@ -37,10 +37,10 @@ CAR = {
 		'PERIOD'	: 50.0,				# periodo de amostragem dos sensores
 	}
 
-# controlador PI de velocidade
-KP_VEL = 0.8
-KI_VEL = 0.1
-SPEED_DEADBAND = 0.05  # m/s
+# controlador PI de velocidade para comando direto de throttle
+KP_VEL = 0.12
+KI_VEL = 0.005
+THROTTLE_FF_GAIN = 0.17  # fracao de throttle por m/s
 VELOCITY_FILTER_SIZE = 5
 	
 MACS_CARS = {
@@ -235,6 +235,10 @@ class Car:
 		# aviso sonoro de inicio
 		self.bz.beep([0.2] * 3)
 		time.sleep(1.0)
+
+		# desconsidera o tempo do beep no primeiro passo de controle
+		self.t = self.get_time() - self.tinit
+		self.dt = self.sample_rate
 		
 	########################################
 	# get states
@@ -429,58 +433,50 @@ class Car:
 		v_abs = abs(self.v)
 		error = vref_abs - v_abs
 
-		# dentro da banda, mantenha o throttle sem oscilar a acao
-		if abs(error) <= SPEED_DEADBAND:
-			self.vel_error_integral = 0.0
-			self.set_u(0.0)
-			return
-
-		# acao de controle PI antes da saturacao
-		u = KP_VEL * error + KI_VEL * self.vel_error_integral
-		u_sat = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
+		# feedforward fornece o throttle de regime; o PI faz a correcao
+		feedforward = THROTTLE_FF_GAIN * vref_abs
+		u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
+		u_sat = np.clip(u, 0.0, 1.0)
 
 		# anti-windup: integra apenas fora da saturacao ou para sair dela
 		if (u == u_sat) or (u > u_sat and error < 0.0) or (u < u_sat and error > 0.0):
-			self.vel_error_integral += error * self.dt
-			u = KP_VEL * error + KI_VEL * self.vel_error_integral
+			dt_control = min(self.dt, 2.0 * self.sample_rate)
+			self.vel_error_integral += error * dt_control
+			u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
 
 		self.set_u(u)
 	
 	########################################
-	# seta torque dos motores do veiculo
+	# seta throttle dos motores do veiculo
 	def set_u(self, u):
 		
-		# em caso de emergencia, desacelere no maximo
+		# em caso de emergencia, corte o throttle
 		if self.emergencia:
-			u = -CAR['ACCELMAX']
+			u = 0.0
 		
-		# limita aceleracao
-		self.u = np.clip(u, -CAR['ACCELMAX'], CAR['ACCELMAX'])
+		# limita comando entre neutro e throttle maximo
+		self.u = float(np.clip(u, 0.0, 1.0))
 		
-		# acima do limite, reduza o throttle em vez de congela-lo
+		# acima do limite, corte o throttle
 		if np.abs(self.v) > CAR['VELMAX']:
-			self.u = -CAR['ACCELMAX']
-			
-		# controlador linearizante
-		F = CAR['MASS']*self.u
+			self.u = 0.0
 		
-		# torque de referencia
-		T = CAR['RW']*np.sum(F)
-		
-		# seta o torque
-		self.atuador.set_torque(T)
+		# seta diretamente a fracao de throttle
+		self.atuador.set_throttle(self.u)
 
 	########################################
 	# coloca re
 	def set_reverse(self):
 		self.atuador.set_reverse()
 		self.gear = self.atuador.get_gear()
+		self.vel_error_integral = 0.0
 		
 	########################################
 	# vai pra frente
 	def set_forward(self):
 		self.atuador.set_forward()
 		self.gear = self.atuador.get_gear()
+		self.vel_error_integral = 0.0
 		
 	########################################
 	# seta steer do veiculo

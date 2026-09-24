@@ -221,6 +221,19 @@ class Servos:
 		# transforma torque para rad
 		with self.lock:
 			self.dth_pwm = self.gain_torque * T
+
+	########################################
+	# seta diretamente a fracao de throttle entre 0 e 1
+	def set_throttle(self, command):
+
+		command = float(np.clip(command, 0.0, 1.0))
+
+		with self.lock:
+			self.dth_pwm = 0.0
+			if self.gear == Gear.FORWARD:
+				self.th_pwm = command * self.max_throttle
+			else:
+				self.th_pwm = -command * self.max_throttle
 	
 	########################################
 	# seta steer do veiculo (st in rad)		
