@@ -98,11 +98,11 @@ if __name__ == "__main__":
 			# ultrassom
 			dist, valid = car.get_distance()
 
-			if (not valid) or (dist < 0.20):
-				print(f"Colisao: distance {dist:.2f} [m]")
-				car.set_vel(0.0)
-			else:
-				car.set_vel(MAIN_VEL)
+			# if (not valid) or (dist < 0.20):
+			# 	print(f"Colisao: distance {dist:.2f} [m]")
+			# 	car.set_vel(0.0)
+			# else:
+			car.set_vel(MAIN_VEL)
 
 			# telemetria para plots remotos
 			print(

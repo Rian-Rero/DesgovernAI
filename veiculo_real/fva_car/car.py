@@ -38,8 +38,8 @@ CAR = {
 	}
 
 # controlador PI de velocidade para comando direto de throttle
-KP_VEL = 0.12
-KI_VEL = 0.005
+KP_VEL = 0.3
+KI_VEL = 0.2
 THROTTLE_FF_GAIN = 0.17  # fracao de throttle por m/s
 VELOCITY_FILTER_SIZE = 5
 	
