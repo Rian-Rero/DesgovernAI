@@ -158,6 +158,9 @@ def find_ip_by_mac_arptable(target_mac: str):
 # Interface Principal
 ########################################
 class RsyncGUI(tk.Tk):
+	# taxa fixa de redesenho do grafico (Hz != taxa de amostragem da telemetria)
+	PLOT_REFRESH_MS = 66  # ~15 Hz, fluido sem sobrecarregar o mainloop do Tk
+
 	def __init__(self):
 		super().__init__()
 		self.title("FVA - gerenciador de controle")
@@ -166,6 +169,9 @@ class RsyncGUI(tk.Tk):
 		#self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
 		self.devices = {}
 		self.selected_files = []
+		self.telemetry = {}
+		self.telemetry_lock = threading.Lock()
+		self._plot_dirty = False
 		self._build_ui()
 		# preenche a senha padrão (se houver)
 		if DEFAULT_PASS:
@@ -177,9 +183,12 @@ class RsyncGUI(tk.Tk):
 						daemon=True
 					).start()
 				)
-		
-		self.telemetry = {}
-		
+
+		# redesenha o grafico em uma taxa fixa, independente da taxa de
+		# chegada da telemetria (que pode ser bem mais rapida, ~50 Hz),
+		# evitando que os redraws se acumulem numa fila crescente.
+		self.after(self.PLOT_REFRESH_MS, self._plot_tick)
+
 		# aumenta fontes
 		style = ttk.Style()
 		style.configure(".", font=("Arial", 14))
@@ -776,9 +785,10 @@ class RsyncGUI(tk.Tk):
 			messagebox.showinfo("Nenhum comando", "Digite ao menos um comando.")
 			return
 			
-		self.telemetry = {}
-		self.after(0, self.update_plot)
-		
+		with self.telemetry_lock:
+			self.telemetry = {}
+		self.update_plot()
+
 		threading.Thread(target=self._run_remote_cmds, args=(targets, cmds), daemon=True).start()
 		
 	########################################
@@ -804,16 +814,17 @@ class RsyncGUI(tk.Tk):
 						if ANSI_ESCAPE_RE.sub("", line).lstrip().startswith("DATA,"):
 							try:
 								sample = parse_telemetry_line(line)
-								if name not in self.telemetry:
-									self.telemetry[name] = {
-										"t": [], "x": [], "y": [], "v": [], "vref": [],
-										"a": [], "u": [], "control_percent": [],
-										"motor_pwm_percent": [], "w": [], "th": []
-									}
-								data = self.telemetry[name]
-								for key, value in sample.items():
-									data[key].append(value)
-								self.after(0, self.update_plot)
+								with self.telemetry_lock:
+									if name not in self.telemetry:
+										self.telemetry[name] = {
+											"t": [], "x": [], "y": [], "v": [], "vref": [],
+											"a": [], "u": [], "control_percent": [],
+											"motor_pwm_percent": [], "w": [], "th": []
+										}
+									data = self.telemetry[name]
+									for key, value in sample.items():
+										data[key].append(value)
+									self._plot_dirty = True
 							except ValueError:
 								self.ui(self.cmdlog_write, f"[{name.upper()}] Telemetria inválida: {line}")
 						else:
@@ -919,7 +930,26 @@ class RsyncGUI(tk.Tk):
 		self.data_log.configure(state="disabled")
 
 	########################################
+	def _plot_tick(self):
+		"""Redesenha o grafico numa cadencia fixa (PLOT_REFRESH_MS), somente
+		quando ha dado novo. Isso desacopla a taxa de redraw da taxa de
+		chegada da telemetria (~50 Hz), que e rapida demais para redesenhar
+		a figura inteira a cada amostra sem acumular atraso."""
+		if self._plot_dirty:
+			self._plot_dirty = False
+			self.update_plot()
+		self.after(self.PLOT_REFRESH_MS, self._plot_tick)
+
+	########################################
 	def update_plot(self):
+
+		# snapshot sob lock: evita ler listas com tamanhos inconsistentes
+		# enquanto a thread SSH esta no meio de um append de amostra.
+		with self.telemetry_lock:
+			telemetry_snapshot = {
+				name: {key: list(values) for key, values in data.items()}
+				for name, data in self.telemetry.items()
+			}
 
 		self.ax.clear()
 
@@ -948,7 +978,7 @@ class RsyncGUI(tk.Tk):
 			self.ax.set_aspect("equal", adjustable="datalim")
 
 		# plota os dados, caso existam
-		for name, data in self.telemetry.items():
+		for name, data in telemetry_snapshot.items():
 
 			if plot_type == "Velocidade":
 
@@ -1004,11 +1034,15 @@ class RsyncGUI(tk.Tk):
 					label=name.upper()
 				)
 
-		if self.telemetry:
+		if telemetry_snapshot:
 			self.ax.legend()
 
 		self.ax.grid(True)
-		self.canvas.draw_idle()
+		# draw() (sincrono) em vez de draw_idle(): como o redraw agora e
+		# limitado a PLOT_REFRESH_MS, garantir que o frame seja de fato
+		# renderizado agora evita atrasos de renderizacao observados no
+		# backend TkAgg do macOS com draw_idle() sob certas condicoes.
+		self.canvas.draw()
 	
 ########################################
 # Execução
