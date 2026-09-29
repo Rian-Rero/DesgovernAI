@@ -50,7 +50,7 @@ def vision_func(car, vision_data, stop_event):
 if __name__ == "__main__":
 
 	parameters = {
-		'ts'                   : 18.0,
+		'ts'                   : 50.0,
 		'save'                 : True,
 		'logfile'              : 'logs/',
 		'camera'               : False,

@@ -27,7 +27,7 @@ except ImportError:
 ########################################
 # parametros do carro
 CAR = {
-    "VELMAX": 1.5,  # m/s
+    "VELMAX": 2,  # m/s
     "ACCELMAX": 1.0,  # m/s^2
     "STEERMAX": np.deg2rad(20.0),  # rad
     "MASS": 5.16,  # kg
@@ -39,8 +39,8 @@ CAR = {
 }
 
 # controlador PI de velocidade para comando direto de throttle
-KP_VEL = 0.55
-KI_VEL = 0.2
+KP_VEL = 1
+KI_VEL = 0.8
 THROTTLE_FF_GAIN = 0.17  # fracao de throttle por m/s
 VELOCITY_FILTER_SIZE = 5
 
