@@ -15,6 +15,7 @@ import os
 import re
 import posixpath
 import platform
+import queue
 import subprocess
 import threading
 import stat
@@ -47,6 +48,7 @@ COLORS = {
 CAR_ICON = "🚗 "
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PLOT_UPDATE_INTERVAL_MS = 200
 
 
 def parse_telemetry_line(line: str):
@@ -166,6 +168,9 @@ class RsyncGUI(tk.Tk):
 		#self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
 		self.devices = {}
 		self.selected_files = []
+		self.telemetry = {}
+		self.telemetry_queue = queue.Queue()
+		self.telemetry_run_id = 0
 		self._build_ui()
 		# preenche a senha padrão (se houver)
 		if DEFAULT_PASS:
@@ -178,7 +183,7 @@ class RsyncGUI(tk.Tk):
 					).start()
 				)
 		
-		self.telemetry = {}
+		self.after(PLOT_UPDATE_INTERVAL_MS, self._process_telemetry_queue)
 		
 		# aumenta fontes
 		style = ttk.Style()
@@ -377,7 +382,7 @@ class RsyncGUI(tk.Tk):
 		self.cmd_text.insert(
 								"end",
 								'pkill -f "python3.*main.py"\n'
-								'python3 main.py\n'
+								'python3 -u main.py\n'
 							)
 		self.cmd_text.pack(fill="x", pady=4)
 
@@ -499,7 +504,7 @@ class RsyncGUI(tk.Tk):
 		self.data_dest_entry = ttk.Entry(local_frame)
 		self.data_dest_entry.insert(
 			0,
-			os.path.join(os.getcwd(), "experimentos")
+			os.path.join(os.path.dirname(os.path.abspath(__file__)), "experimentos")
 		)
 		self.data_dest_entry.pack(
 			side="left",
@@ -662,21 +667,33 @@ class RsyncGUI(tk.Tk):
 		if not targets:
 			messagebox.showinfo("Nenhum alvo", "Selecione pelo menos uma Raspberry com IP.")
 			return
-		threading.Thread(target=self._run_sftp_for_targets, args=(targets,), daemon=True).start()
+		self._start_sftp_transfer(targets)
 
 	########################################
 	def send_to_all(self):
 		targets = [(n, i["ip"]) for n, i in self.devices.items() if i["ip"]]
-		threading.Thread(target=self._run_sftp_for_targets, args=(targets,), daemon=True).start()
+		self._start_sftp_transfer(targets)
 
 	########################################
-	def _connect_ssh(self, ip):
+	def _start_sftp_transfer(self, targets):
+		dest = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		username = self.user_entry.get().strip() or SSH_USER
+		password = self.pass_entry.get().strip() or None
+		selected_files = list(self.selected_files)
+		threading.Thread(
+			target=self._run_sftp_for_targets,
+			args=(targets, dest, username, password, selected_files),
+			daemon=True
+		).start()
+
+	########################################
+	def _connect_ssh(self, ip, username, password):
 		client = paramiko.SSHClient()
 		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 		client.connect(
 			ip,
-			username=self.user_entry.get().strip() or SSH_USER,
-			password=self.pass_entry.get().strip() or None,
+			username=username,
+			password=password,
 			timeout=8,
 			auth_timeout=8,
 			banner_timeout=8,
@@ -717,14 +734,12 @@ class RsyncGUI(tk.Tk):
 				)
 
 	########################################
-	def _run_sftp_for_targets(self, targets):
-		dest = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
-
-		if not self.selected_files:
+	def _run_sftp_for_targets(self, targets, dest, username, password, selected_files):
+		if not selected_files:
 			self.ui(self.log_write, "⚠️ Nenhum arquivo ou pasta selecionado.")
 			return
 
-		missing = [p for p in self.selected_files if not os.path.exists(p)]
+		missing = [p for p in selected_files if not os.path.exists(p)]
 		if missing:
 			self.ui(self.log_write, "❌ Itens inexistentes:")
 			for item in missing:
@@ -737,11 +752,11 @@ class RsyncGUI(tk.Tk):
 			client = None
 			sftp = None
 			try:
-				client = self._connect_ssh(ip)
+				client = self._connect_ssh(ip, username, password)
 				sftp = client.open_sftp()
 				self._sftp_mkdir_p(sftp, dest)
 
-				for path in self.selected_files:
+				for path in selected_files:
 					if os.path.isdir(path):
 						# Mesmo comportamento do antigo rsync com barra final:
 						# envia o CONTEÚDO da pasta para o destino.
@@ -776,26 +791,41 @@ class RsyncGUI(tk.Tk):
 			messagebox.showinfo("Nenhum comando", "Digite ao menos um comando.")
 			return
 			
+		self.telemetry_run_id += 1
+		run_id = self.telemetry_run_id
 		self.telemetry = {}
-		self.after(0, self.update_plot)
+		self._discard_pending_telemetry()
+		self.update_plot()
+		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		username = self.user_entry.get().strip() or SSH_USER
+		password = self.pass_entry.get().strip() or None
 		
-		threading.Thread(target=self._run_remote_cmds, args=(targets, cmds), daemon=True).start()
+		threading.Thread(
+			target=self._run_remote_cmds,
+			args=(targets, cmds, run_id, remote_workdir, username, password),
+			daemon=True
+		).start()
 		
 	########################################
-	def _run_remote_cmds(self, targets, cmds):
-		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
-
+	def _run_remote_cmds(self, targets, cmds, run_id, remote_workdir, username, password):
 		for name, ip in targets:
 			self.ui(self.cmdlog_write, "\n" + "=" * 60)
 			self.ui(self.cmdlog_write, f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
 			client = None
 			try:
-				client = self._connect_ssh(ip)
+				client = self._connect_ssh(ip, username, password)
 				for raw_cmd in cmds:
-					wrapped = f'cd "{remote_workdir}" && {raw_cmd}'
+					wrapped = (
+						f'cd "{remote_workdir}" && '
+						f'export PYTHONUNBUFFERED=1 && {raw_cmd}'
+					)
 					self.ui(self.cmdlog_write, f"$ {wrapped}")
 
-					stdin, stdout, stderr = client.exec_command(wrapped, get_pty=True)
+					stdin, stdout, stderr = client.exec_command(
+						wrapped,
+						bufsize=1,
+						get_pty=True
+					)
 					for line in iter(stdout.readline, ""):
 						line = line.rstrip("\r\n")
 						if not line:
@@ -804,16 +834,7 @@ class RsyncGUI(tk.Tk):
 						if ANSI_ESCAPE_RE.sub("", line).lstrip().startswith("DATA,"):
 							try:
 								sample = parse_telemetry_line(line)
-								if name not in self.telemetry:
-									self.telemetry[name] = {
-										"t": [], "x": [], "y": [], "v": [], "vref": [],
-										"a": [], "u": [], "control_percent": [],
-										"motor_pwm_percent": [], "w": [], "th": []
-									}
-								data = self.telemetry[name]
-								for key, value in sample.items():
-									data[key].append(value)
-								self.after(0, self.update_plot)
+								self.telemetry_queue.put((run_id, name, sample))
 							except ValueError:
 								self.ui(self.cmdlog_write, f"[{name.upper()}] Telemetria inválida: {line}")
 						else:
@@ -864,27 +885,36 @@ class RsyncGUI(tk.Tk):
 			return
 
 		os.makedirs(local_base, exist_ok=True)
+		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		username = self.user_entry.get().strip() or SSH_USER
+		password = self.pass_entry.get().strip() or None
 
 		threading.Thread(
 			target=self._collect_data,
-			args=(targets, local_base),
+			args=(targets, local_base, remote_workdir, username, password),
 			daemon=True
 		).start()
 	
 	########################################
 	def _sftp_download_directory_contents(self, sftp, remote_dir, local_dir):
 		os.makedirs(local_dir, exist_ok=True)
+		downloaded_files = 0
 		for entry in sftp.listdir_attr(remote_dir):
 			remote_path = posixpath.join(remote_dir, entry.filename)
 			local_path = os.path.join(local_dir, entry.filename)
 			if stat.S_ISDIR(entry.st_mode):
-				self._sftp_download_directory_contents(sftp, remote_path, local_path)
+				downloaded_files += self._sftp_download_directory_contents(
+					sftp,
+					remote_path,
+					local_path
+				)
 			else:
 				sftp.get(remote_path, local_path)
+				downloaded_files += 1
+		return downloaded_files
 
 	########################################
-	def _collect_data(self, targets, local_base):
-		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+	def _collect_data(self, targets, local_base, remote_workdir, username, password):
 		remote_logs = posixpath.join(remote_workdir, "logs")
 
 		for name, ip in targets:
@@ -895,11 +925,25 @@ class RsyncGUI(tk.Tk):
 			client = None
 			sftp = None
 			try:
-				client = self._connect_ssh(ip)
+				client = self._connect_ssh(ip, username, password)
 				sftp = client.open_sftp()
-				self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
-				self.ui(self.datalog_write, f"✅ Dados de {name.upper()} coletados.")
-			except FileNotFoundError:
+				downloaded_files = self._sftp_download_directory_contents(
+					sftp,
+					remote_logs,
+					local_dest
+				)
+				if downloaded_files:
+					self.ui(
+						self.datalog_write,
+						f"✅ {downloaded_files} arquivo(s) de {name.upper()} "
+						f"salvo(s) em: {local_dest}"
+					)
+				else:
+					self.ui(
+						self.datalog_write,
+						f"⚠️ Nenhum arquivo encontrado em: {remote_logs}"
+					)
+			except (FileNotFoundError, OSError):
 				self.ui(self.datalog_write, f"❌ Pasta remota não encontrada: {remote_logs}")
 			except Exception as e:
 				self.ui(self.datalog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
@@ -910,6 +954,46 @@ class RsyncGUI(tk.Tk):
 					client.close()
 
 		self.ui(self.datalog_write, "🏁 Coleta finalizada.")
+
+	########################################
+	def _discard_pending_telemetry(self):
+		while True:
+			try:
+				self.telemetry_queue.get_nowait()
+			except queue.Empty:
+				return
+
+	########################################
+	def _process_telemetry_queue(self):
+		"""Agrupa amostras e limita a frequência de redesenho do gráfico."""
+		plot_changed = False
+
+		while True:
+			try:
+				run_id, name, sample = self.telemetry_queue.get_nowait()
+			except queue.Empty:
+				break
+
+			# Ignora amostras de uma execução anterior ainda finalizando.
+			if run_id != self.telemetry_run_id:
+				continue
+
+			if name not in self.telemetry:
+				self.telemetry[name] = {
+					"t": [], "x": [], "y": [], "v": [], "vref": [],
+					"a": [], "u": [], "control_percent": [],
+					"motor_pwm_percent": [], "w": [], "th": []
+				}
+
+			data = self.telemetry[name]
+			for key, value in sample.items():
+				data[key].append(value)
+			plot_changed = True
+
+		if plot_changed:
+			self.update_plot()
+
+		self.after(PLOT_UPDATE_INTERVAL_MS, self._process_telemetry_queue)
 	
 	########################################
 	def datalog_write(self, text):
@@ -1008,7 +1092,10 @@ class RsyncGUI(tk.Tk):
 			self.ax.legend()
 
 		self.ax.grid(True)
-		self.canvas.draw_idle()
+		# O redesenho já é limitado por _process_telemetry_queue. Usar draw()
+		# aqui garante que a imagem seja pintada durante a execução, mesmo
+		# quando a fila de eventos do Tkinter está ocupada.
+		self.canvas.draw()
 	
 ########################################
 # Execução
