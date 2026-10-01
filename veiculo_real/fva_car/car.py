@@ -74,7 +74,9 @@ class Car:
         self.adas_distance = float("nan")
         self.adas_distance_valid = False
         self._adas_log_key = None
+        self._adas_last_log = float("-inf")
         self._adas_last_beep = float("-inf")
+        self.ultrasonic_status = {}
         self._control_mode = "drive"
 
         # detecta carrinho pronto
@@ -529,7 +531,7 @@ class Car:
         )
         self.adas_decision = decision
         if decision.mode == BrakingMode.CRUISE:
-            self.set_vel(vref)
+            self.set_vel(decision.target_speed)
         elif decision.mode == BrakingMode.BRAKE:
             self.brake()
         else:
@@ -540,15 +542,26 @@ class Car:
             if self.bz.beep(pattern, silence=0.1):
                 self._adas_last_beep = now
 
-        log_key = (decision.mode, self.adas_distance_valid, self.velocity_valid)
-        if log_key != self._adas_log_key:
+        status = self.ultrasonic_status
+        log_key = (decision.mode, self.adas_distance_valid, self.velocity_valid, status.get("reason"))
+        if log_key != self._adas_log_key or now - self._adas_last_log >= 1.0:
+            pulse_ms = 1000.0 * status["pulse_s"] if status.get("pulse_s") is not None else float("nan")
+            sensor_log = (
+                f",us={status['reason']},us_age={status['age']:.3f},"
+                f"us_error={status['last_error']},us_failures={status['consecutive_failures']},"
+                f"us_pulse_ms={pulse_ms:.3f},us_backend={status['backend']}"
+                if status else ""
+            )
             print(
-                f"ADAS,{decision.mode.name},v={speed:.3f},d={distance:.3f},"
+                f"ADAS,{decision.mode.name},t={self.t:.3f},v={speed:.3f},d={distance:.3f},"
+                f"d_valid={int(self.adas_distance_valid)},v_valid={int(self.velocity_valid)},"
+                f"v_target={decision.target_speed:.3f},d_release={decision.release_distance:.3f},"
                 f"d_coast={decision.coast_stop_distance:.3f},"
                 f"a_req={decision.required_deceleration:.3f},u={self.u:.3f},"
-                f"{decision.reason}", flush=True,
+                f"{decision.reason}{sensor_log}", flush=True,
             )
             self._adas_log_key = log_key
+            self._adas_last_log = now
         self.save_traj()
         return decision
 
@@ -607,7 +620,8 @@ class Car:
     def get_distance(self, max_dist=4.0, d_min=0.3):
 
         # captura a distancia
-        d, valid = self.us.get_distance()
+        self.ultrasonic_status = self.us.get_status()
+        d, valid = self.ultrasonic_status["distance"], self.ultrasonic_status["valid"]
         d = np.min([d, max_dist])
 
         # toca o buzzer se muito proximo ou invalido
@@ -642,6 +656,10 @@ class Car:
             "obstacle_valid": int(self.adas_distance_valid),
             "coast_stop_distance": self.adas_decision.coast_stop_distance,
             "adas_required_deceleration": self.adas_decision.required_deceleration,
+            "adas_target_speed": self.adas_decision.target_speed,
+            "adas_release_distance": self.adas_decision.release_distance,
+            "ultrasonic_age": self.ultrasonic_status.get("age", float("inf")),
+            "ultrasonic_failures": self.ultrasonic_status.get("consecutive_failures", 0),
             "a_model": self.a_model,
             "a_x": self.a_x,
             "w_model": self.w_model,

@@ -56,7 +56,20 @@ class Ultrasonic:
 		# ultima leitura valida
 		self.dist = 0.0
 		self.valid = False
-		self.last_measurement = time.monotonic()
+		self.last_measurement = None
+		self.last_error = "aguardando_primeiro_echo"
+		self.last_pulse_s = None
+		self.consecutive_failures = 0
+		self.total_failures = 0
+		self.lock = threading.Lock()
+		self.measure_lock = threading.Lock()
+		self.echo_condition = threading.Condition()
+		self._accepting_echo = False
+		self._echo_start_ns = None
+		self._echo_duration_ns = None
+		self._echo_armed_at_ns = 0
+		self._attempt_error = None
+		self.echo_callback = None
 
 		# Detectar a versao da Raspberry
 		self.rpi_version = self.detect_rpi_version()
@@ -72,7 +85,10 @@ class Ultrasonic:
 			self.trigger_pin = trigger_pin if trigger_pin is not None else TRIGGER_PIN
 			self.echo_pin = echo_pin if echo_pin is not None else ECHO_PIN
 			self.GPIO.gpio_claim_output(self.handle_chip, self.trigger_pin)
-			self.GPIO.gpio_claim_input(self.handle_chip, self.echo_pin)
+			self.GPIO.gpio_claim_alert(self.handle_chip, self.echo_pin, self.GPIO.BOTH_EDGES)
+			self.echo_callback = self.GPIO.callback(
+				self.handle_chip, self.echo_pin, self.GPIO.BOTH_EDGES, self._on_lgpio_echo
+			)
 			
 			# funcao de leitura pra raspberry pi 5
 			self.read_func = lambda: self.GPIO.gpio_read(self.handle_chip, self.echo_pin)
@@ -90,9 +106,8 @@ class Ultrasonic:
 			
 			# funcao de leitura pra raspberry pi 4
 			self.read_func = lambda: self.GPIO.input(self.echo_pin)
+			self.GPIO.add_event_detect(self.echo_pin, self.GPIO.BOTH, callback=self._on_rpi_echo)
 		
-		# lock de secao critica
-		self.lock = threading.Lock()
 		self.stop = threading.Event()
 		# thread de leitura
 		self.thread = threading.Thread(target=self._read, daemon=True)
@@ -135,25 +150,53 @@ class Ultrasonic:
 
 		# loop de leitura
 		while not self.stop.is_set():
-			d = self.get_measure()
-			if d is not None:
-				with self.lock:
-					self.dist = d
-					self.last_measurement = time.monotonic()
-					self.valid = True
+			started = time.monotonic()
+			self._sample_once()
+			self.stop.wait(max(0.0, SAMPLE_TIME - (time.monotonic() - started)))
 
-			self.stop.wait(SAMPLE_TIME)
+	def _sample_once(self):
+		self._attempt_error = None
+		try:
+			d = self.get_measure()
+		except Exception as exc:
+			d = None
+			self._attempt_error = f"erro_gpio:{type(exc).__name__}:{exc}"
+		with self.lock:
+			if d is not None:
+				self.dist = d
+				self.last_measurement = time.monotonic()
+				self.valid = True
+				self.last_error = "nenhum"
+				self.consecutive_failures = 0
+			else:
+				self.last_error = self._attempt_error or "eco_invalido"
+				self.consecutive_failures += 1
+				self.total_failures += 1
 	
 	########################################
 	# Funcao para medir distancia
 	########################################			
 	def get_distance(self):
-		with self.lock:
-			# medida eh valida?
-			if (time.monotonic() - self.last_measurement) > SENSOR_TIMEOUT:
-				self.valid = False
+		status = self.get_status()
+		return status["distance"], status["valid"]
 
-			return self.dist, self.valid
+	def get_status(self):
+		with self.lock:
+			age = (
+				time.monotonic() - self.last_measurement
+				if self.last_measurement is not None else float("inf")
+			)
+			self.valid = age <= SENSOR_TIMEOUT
+			return {
+				"distance": self.dist, "valid": self.valid, "age": age,
+				"reason": "ok" if self.valid else (
+					"leitura_expirada" if self.last_measurement is not None else "sem_leitura"
+				),
+				"last_error": self.last_error, "pulse_s": self.last_pulse_s,
+				"consecutive_failures": self.consecutive_failures,
+				"total_failures": self.total_failures,
+				"backend": "lgpio_edges" if self.rpi_version == 5 else "rpi_gpio_edges",
+			}
 	
 	########################################
 	# escreve no pino de trigger
@@ -168,43 +211,59 @@ class Ultrasonic:
 	########################################
 	# Funcao para medir distancia
 	########################################
+	def _on_lgpio_echo(self, chip, gpio, level, tick):
+		# lgpio fornece o instante da borda em ns, nao o instante do callback.
+		self._record_echo(level, tick)
+
+	def _on_rpi_echo(self, channel):
+		self._record_echo(self.read_func(), time.monotonic_ns())
+
+	def _record_echo(self, level, tick):
+		with self.echo_condition:
+			if not self._accepting_echo or tick < self._echo_armed_at_ns:
+				return
+			if level == 1 and self._echo_start_ns is None:
+				self._echo_start_ns = tick
+			elif level == 0 and self._echo_start_ns is not None and self._echo_duration_ns is None:
+				self._echo_duration_ns = tick - self._echo_start_ns
+				self.echo_condition.notify_all()
+
 	def get_measure(self):
-
-		# envia pulso de trigger
-		self._set_trigger(True)
-		time.sleep(0.00002)
-		self._set_trigger(False)
-
-		# espera inicio do eco
-		ok1, start_time = self._measure_pulse(1)
-
-		# mede duracao do eco
-		ok2, stop_time = self._measure_pulse(0)
-
-		# deu tudo certo?
-		if not ok1 or not ok2:
-			return None
-
-		# calcula distancia
-		time_elapsed = stop_time - start_time
-		distance = GAIN * time_elapsed
-		
-		if not (self.min_range <= distance <= self.max_range):
-			return None
-
-		return distance
-
-	########################################
-	# mede os pulsos com timeout
-	########################################
-	def _measure_pulse(self, level, timeout_s=0.03):
-		"""Espera por level (0/1) com timeout; retorna (ok, t)."""
-		deadline = time.monotonic() + timeout_s
-		while self.read_func() != level:
-			if time.monotonic() > deadline:
-				return False, None
-		# sucesso	
-		return True, time.monotonic()
+		with self.measure_lock:
+			self._attempt_error = None
+			with self.lock:
+				self.last_pulse_s = None
+			with self.echo_condition:
+				self._echo_start_ns = None
+				self._echo_duration_ns = None
+				self._echo_armed_at_ns = time.monotonic_ns()
+				self._accepting_echo = True
+			try:
+				if self.read_func() != 0:
+					self._attempt_error = "echo_alto_antes_trigger"
+					return None
+				self._set_trigger(True)
+				try:
+					time.sleep(0.00002)
+				finally:
+					self._set_trigger(False)
+				with self.echo_condition:
+					if not self.echo_condition.wait_for(lambda: self._echo_duration_ns is not None, 0.03):
+						self._attempt_error = (
+							"timeout_subida_echo" if self._echo_start_ns is None else "timeout_descida_echo"
+						)
+						return None
+					pulse_s = self._echo_duration_ns / 1e9
+				with self.lock:
+					self.last_pulse_s = pulse_s
+				distance = GAIN * pulse_s
+				if pulse_s <= 0 or not self.min_range <= distance <= self.max_range:
+					self._attempt_error = f"eco_fora_faixa:d={distance:.3f}"
+					return None
+				return distance
+			finally:
+				with self.echo_condition:
+					self._accepting_echo = False
 		
 	########################################
 	# Limpeza dos pinos
@@ -212,8 +271,10 @@ class Ultrasonic:
 	def cleanup(self):
 		# Closes the GPIO connection.
 		if self.rpi_version == 5:
+			self.echo_callback.cancel()
 			self.GPIO.gpiochip_close(self.handle_chip)
 		else:
+			self.GPIO.remove_event_detect(self.echo_pin)
 			self.GPIO.cleanup(self.trigger_pin)
 			self.GPIO.cleanup(self.echo_pin)
 

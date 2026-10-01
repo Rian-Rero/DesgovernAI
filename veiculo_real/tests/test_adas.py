@@ -51,6 +51,40 @@ class DecisionTests(unittest.TestCase):
         self.assertAlmostEqual(system.stopping_distance(1.0), 0.2 + 0.4 + 2.5)
         self.assertAlmostEqual(system.stopping_distance(2.0), 0.2 + 0.8 + 10.0)
 
+    def test_reference_decreases_with_available_space(self):
+        system = self.make_adas()
+        targets = []
+        for distance in (4.0, 2.49, 1.5, 0.8):
+            result = system.update(0, distance, True, 1, 0)
+            self.assertEqual(result.mode, Mode.CRUISE)
+            self.assertGreater(result.target_speed, 0)
+            self.assertLessEqual(result.target_speed, 1)
+            self.assertLessEqual(result.release_distance, distance + 1e-9)
+            targets.append(result.target_speed)
+        self.assertEqual(targets[0], 1)
+        self.assertGreater(targets[1], 0.7)
+        self.assertEqual(targets, sorted(targets, reverse=True))
+
+    def test_log_scenario_can_resume_at_reduced_reference(self):
+        system = self.make_adas()
+        system.update(0, 2.49, True, 1, 0)
+        self.assertEqual(system.update(0, 2.49, False, 1, 0.02).mode, Mode.FAULT)
+        self.assertEqual(system.update(0.501, 3.183, True, 1, 0.04).mode, Mode.COAST)
+        self.assertEqual(system.update(0.012, 0.884, True, 1, 1).mode, Mode.HOLD)
+        self.assertEqual(system.update(0, 2.49, True, 1, 1.3).mode, Mode.HOLD)
+        self.assertEqual(system.update(0, 2.49, False, 1, 1.4).mode, Mode.FAULT)
+        self.assertEqual(system.update(0, 2.49, True, 1, 1.5).mode, Mode.HOLD)
+        self.assertEqual(system.update(0, 2.49, True, 1, 1.99).mode, Mode.HOLD)
+        result = system.update(0, 2.49, True, 1, 2.01)
+        self.assertEqual(result.mode, Mode.CRUISE)
+        self.assertGreater(result.target_speed, 0.7)
+        self.assertLess(result.target_speed, 1)
+
+    def test_zero_delay_adaptive_reference_is_finite_and_respects_clearance(self):
+        system = adas.BrakingADAS(adas.BrakingConfig(reaction_time=0, anticipation_time=0))
+        self.assertEqual(system.safe_speed(0.2), 0)
+        self.assertAlmostEqual(system.safe_speed(0.6), math.sqrt(2 * 0.2 * 0.25))
+
     def test_coast_escalates_and_brake_does_not_chatter(self):
         system = self.make_adas()
         self.assertEqual(system.update(1, 3.3, True, 1, 0).mode, Mode.COAST)
@@ -156,6 +190,28 @@ class ControllerTests(unittest.TestCase):
         self.assertLess(car.u, 0)
         self.assertGreater(car.atuador.commands[-1][1], 0)
         self.assertEqual(car.gear, servos.Gear.FORWARD)
+
+    def test_controller_uses_adapted_reference(self):
+        car = self.make_car()
+        decision = self.apply(car, 0, 2.49)
+        self.assertEqual(decision.mode, Mode.CRUISE)
+        self.assertEqual(car.vref, decision.target_speed)
+        self.assertLess(car.vref, 1)
+        self.assertGreater(car.vref, 0.7)
+
+    def test_log_contains_time_sensor_failure_age_and_release_distance(self):
+        car = self.make_car()
+        car.ultrasonic_status = {
+            "reason": "leitura_expirada", "age": 0.32,
+            "last_error": "timeout_subida_echo", "consecutive_failures": 3,
+            "backend": "lgpio_edges",
+        }
+        car.v = car.v_raw = 0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            car.set_adas_vel(1, 2.49, False)
+        for field in ("t=", "d_valid=0", "v_target=", "d_release=", "us_age=0.320", "timeout_subida_echo"):
+            self.assertIn(field, output.getvalue())
 
     def test_raw_encoder_stops_reverse_command_before_filtered_speed(self):
         car = self.make_car()

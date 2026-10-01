@@ -43,6 +43,8 @@ class BrakingDecision:
     coast_stop_distance: float
     activation_distance: float
     required_deceleration: float
+    target_speed: float = 0.0
+    release_distance: float = 0.0
 
 
 class BrakingADAS:
@@ -59,6 +61,17 @@ class BrakingADAS:
             self.config.clearance
             + speed * self.config.reaction_time
             + speed * speed / (2.0 * self.config.coast_deceleration)
+        )
+
+    def safe_speed(self, distance):
+        """Inverte a distancia de parada, incluindo antecipacao e histerese."""
+        cfg = self.config
+        available = max(0.0, distance - cfg.clearance - cfg.release_margin)
+        if available == 0:
+            return 0.0
+        delay = cfg.reaction_time + cfg.anticipation_time
+        return 2.0 * available / (
+            math.sqrt(delay * delay + 2.0 * available / cfg.coast_deceleration) + delay
         )
 
     def update(self, speed, distance, distance_valid, desired_speed, now, speed_valid=True):
@@ -78,12 +91,20 @@ class BrakingADAS:
             forward_speed * forward_speed / (2.0 * available)
             if usable_distance and available > 0 else math.inf
         )
+        target_speed = min(desired_speed, self.safe_speed(distance)) if usable_distance else 0.0
+        release_distance = (
+            self.stopping_distance(target_speed)
+            + target_speed * cfg.anticipation_time + cfg.release_margin
+        )
 
         def decide(mode, reason):
             self.mode = mode
             if mode != BrakingMode.HOLD:
                 self._clear_since = None
-            return BrakingDecision(mode, reason, coast_stop, activation, required)
+            return BrakingDecision(
+                mode, reason, coast_stop, activation, required,
+                target_speed if mode == BrakingMode.CRUISE else 0.0, release_distance,
+            )
 
         if not usable_speed:
             return decide(BrakingMode.FAULT, "encoder invalido: corta tracao e bloqueia retomada")
@@ -96,18 +117,18 @@ class BrakingADAS:
 
         stopped = abs(speed) <= cfg.stop_speed
         if self.mode != BrakingMode.CRUISE and stopped:
-            release_distance = (
-                self.stopping_distance(desired_speed)
-                + desired_speed * cfg.anticipation_time + cfg.release_margin
-            )
-            if desired_speed > 0 and distance > release_distance:
+            if target_speed > cfg.stop_speed and distance + 1e-9 >= release_distance:
                 if self._clear_since is None:
                     self._clear_since = now
                 if now - self._clear_since >= cfg.release_time:
-                    return decide(BrakingMode.CRUISE, "caminho livre confirmado")
+                    return decide(BrakingMode.CRUISE, "caminho livre confirmado: retomada com velocidade adaptada")
             else:
                 self._clear_since = None
-            return decide(BrakingMode.HOLD, "parado: aguardando distancia segura para retomar")
+            reason = (
+                "parado: confirmando leituras validas para retomar"
+                if self._clear_since is not None else "parado: espaco insuficiente para retomar"
+            )
+            return decide(BrakingMode.HOLD, reason)
 
         if self.mode == BrakingMode.BRAKE:
             return decide(BrakingMode.BRAKE, "mantem frenagem ate a parada")
@@ -117,10 +138,14 @@ class BrakingADAS:
             return decide(BrakingMode.COAST, "mantem roda livre ate a parada")
         if desired_speed == 0:
             return decide(BrakingMode.COAST, "referencia zero: roda livre")
-        if stopped and distance <= cfg.clearance + cfg.release_margin:
+        if stopped and target_speed <= cfg.stop_speed:
             return decide(BrakingMode.HOLD, "obstaculo proximo: impede partida")
         if distance <= activation:
             if distance >= coast_stop:
                 return decide(BrakingMode.COAST, "coast-down suficiente: roda livre")
             return decide(BrakingMode.BRAKE, "distancia insuficiente para coast-down")
-        return decide(BrakingMode.CRUISE, "distancia livre")
+        reason = (
+            "referencia reduzida conforme espaco disponivel"
+            if target_speed < desired_speed else "distancia livre"
+        )
+        return decide(BrakingMode.CRUISE, reason)
