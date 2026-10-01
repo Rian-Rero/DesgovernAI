@@ -28,6 +28,8 @@ TRIGGER_PIN = 24
 ECHO_PIN = 8
 SAMPLE_TIME = 0.1  # 100 ms -> 10 Hz
 SENSOR_TIMEOUT  = 0.30   	# tempo maximo sem medida [s]
+ECHO_TIMEOUT = 0.03
+MAX_POLL_GAP = 0.001  # rejeita pulsos cuja temporizacao ficou imprecisa
 
 ############################################
 # Ultrasonic Class for Raspberry Pi 4 or 5
@@ -70,6 +72,8 @@ class Ultrasonic:
 		self._echo_armed_at_ns = 0
 		self._attempt_error = None
 		self.echo_callback = None
+		self.edge_registered = False
+		self.backend_error = "nenhum"
 
 		# Detectar a versao da Raspberry
 		self.rpi_version = self.detect_rpi_version()
@@ -77,6 +81,7 @@ class Ultrasonic:
 
 		# Raspberry Pi 5
 		if self.rpi_version == 5:
+			self.backend = "lgpio_edges"
 			import lgpio as GPIO
 			self.GPIO = GPIO
 			# detecta o chip
@@ -95,6 +100,7 @@ class Ultrasonic:
 
 		# Raspberry Pi 3/4
 		else:
+			self.backend = "rpi_gpio_edges"
 			import RPi.GPIO as GPIO
 			self.GPIO = GPIO
 			self.trigger_pin = trigger_pin if trigger_pin is not None else TRIGGER_PIN
@@ -106,7 +112,22 @@ class Ultrasonic:
 			
 			# funcao de leitura pra raspberry pi 4
 			self.read_func = lambda: self.GPIO.input(self.echo_pin)
-			self.GPIO.add_event_detect(self.echo_pin, self.GPIO.BOTH, callback=self._on_rpi_echo)
+			try:
+				self.GPIO.add_event_detect(self.echo_pin, self.GPIO.BOTH, callback=self._on_rpi_echo)
+				self.edge_registered = True
+			except (RuntimeError, OSError) as exc:
+				self.backend = "rpi_gpio_polling"
+				self.backend_error = f"{type(exc).__name__}:{exc}"
+				# Remove eventual registro parcial, sem mexer em outros pinos.
+				try:
+					self.GPIO.remove_event_detect(self.echo_pin)
+				except (RuntimeError, OSError) as cleanup_exc:
+					self.backend_error += f";remove_event_detect:{cleanup_exc}"
+				print(
+					f"ULTRASSOM,AVISO,backend={self.backend},echo_pin={self.echo_pin},"
+					f"edge_error={self.backend_error}; leitura direta com timeout; "
+					"precisao limitada pelo escalonamento do sistema", flush=True,
+				)
 		
 		self.stop = threading.Event()
 		# thread de leitura
@@ -195,7 +216,7 @@ class Ultrasonic:
 				"last_error": self.last_error, "pulse_s": self.last_pulse_s,
 				"consecutive_failures": self.consecutive_failures,
 				"total_failures": self.total_failures,
-				"backend": "lgpio_edges" if self.rpi_version == 5 else "rpi_gpio_edges",
+				"backend": self.backend, "backend_error": self.backend_error,
 			}
 	
 	########################################
@@ -228,6 +249,30 @@ class Ultrasonic:
 				self._echo_duration_ns = tick - self._echo_start_ns
 				self.echo_condition.notify_all()
 
+	def _poll_echo_level(self, level, deadline, previous):
+		while True:
+			observed = self.read_func()
+			now = time.monotonic()
+			gap = now - previous
+			if gap > MAX_POLL_GAP:
+				self._attempt_error = f"polling_atrasado:gap_ms={1000.0 * gap:.3f}"
+				return None
+			if now >= deadline:
+				self._attempt_error = "timeout_subida_echo" if level == 1 else "timeout_descida_echo"
+				return None
+			if observed == level:
+				return now
+			previous = now
+
+	def _poll_echo(self):
+		started = time.monotonic()
+		deadline = started + ECHO_TIMEOUT
+		start = self._poll_echo_level(1, deadline, started)
+		if start is None:
+			return None
+		end = self._poll_echo_level(0, deadline, start)
+		return end - start if end is not None else None
+
 	def get_measure(self):
 		with self.measure_lock:
 			self._attempt_error = None
@@ -237,7 +282,7 @@ class Ultrasonic:
 				self._echo_start_ns = None
 				self._echo_duration_ns = None
 				self._echo_armed_at_ns = time.monotonic_ns()
-				self._accepting_echo = True
+				self._accepting_echo = self.backend != "rpi_gpio_polling"
 			try:
 				if self.read_func() != 0:
 					self._attempt_error = "echo_alto_antes_trigger"
@@ -247,13 +292,18 @@ class Ultrasonic:
 					time.sleep(0.00002)
 				finally:
 					self._set_trigger(False)
-				with self.echo_condition:
-					if not self.echo_condition.wait_for(lambda: self._echo_duration_ns is not None, 0.03):
-						self._attempt_error = (
-							"timeout_subida_echo" if self._echo_start_ns is None else "timeout_descida_echo"
-						)
+				if self.backend == "rpi_gpio_polling":
+					pulse_s = self._poll_echo()
+					if pulse_s is None:
 						return None
-					pulse_s = self._echo_duration_ns / 1e9
+				else:
+					with self.echo_condition:
+						if not self.echo_condition.wait_for(lambda: self._echo_duration_ns is not None, ECHO_TIMEOUT):
+							self._attempt_error = (
+								"timeout_subida_echo" if self._echo_start_ns is None else "timeout_descida_echo"
+							)
+							return None
+						pulse_s = self._echo_duration_ns / 1e9
 				with self.lock:
 					self.last_pulse_s = pulse_s
 				distance = GAIN * pulse_s
@@ -274,7 +324,8 @@ class Ultrasonic:
 			self.echo_callback.cancel()
 			self.GPIO.gpiochip_close(self.handle_chip)
 		else:
-			self.GPIO.remove_event_detect(self.echo_pin)
+			if self.edge_registered:
+				self.GPIO.remove_event_detect(self.echo_pin)
 			self.GPIO.cleanup(self.trigger_pin)
 			self.GPIO.cleanup(self.echo_pin)
 

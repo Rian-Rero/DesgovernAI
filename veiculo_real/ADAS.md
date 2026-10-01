@@ -100,25 +100,37 @@ O mecanismo e frontal e recebe referencias >= 0; nao protege marcha re.
 
 ## Ultrassom e registros
 
-O eco e capturado por bordas, sem o loop Python que ficava consultando o
-pino continuamente. Na Raspberry Pi 5, `lgpio` fornece timestamps das
+O modo preferencial captura o eco por bordas. Na Raspberry Pi 5,
+`lgpio` fornece timestamps das
 bordas; o atraso de entrega do callback nao entra no calculo da largura
 do pulso. Na Raspberry Pi 3/4, `RPi.GPIO` registra eventos e os callbacks
 usam o relogio monotonic do processo, com menor precisao temporal.
 As APIs seguem a [implementacao oficial do GPIO Zero para lgpio](https://gpiozero.readthedocs.io/en/latest/_modules/gpiozero/pins/lgpio.html)
 e a [documentacao do RPi.GPIO](https://sourceforge.net/p/raspberry-gpio-python/wiki/Inputs/).
 
+Se `RPi.GPIO.add_event_detect` falhar, a inicializacao registra
+`ULTRASSOM,AVISO,backend=rpi_gpio_polling` com o erro original e passa a
+consultar diretamente o pino. Essa alternativa tem timeout total de
+30 ms para o eco; nao transforma ausencia de eco em caminho livre.
+Pausas entre consultas acima de 1 ms rejeitam a tentativa com
+`polling_atrasado`, porque podem distorcer a duracao do pulso. A precisao
+do modo polling depende do escalonamento do sistema e precisa ser
+validada na Raspberry; a alternativa nao garante medidas em tempo real.
+Falhas de configuracao/acesso aos pinos continuam sendo erros fatais.
+
 O prazo de validade permanece em 0.30 s. Sem eco nao se presume caminho
 livre. Erros do GPIO sao registrados e o ciclo seguinte tenta nova
 leitura. Os diagnosticos distinguem `sem_leitura`, `leitura_expirada`,
 `timeout_subida_echo`, `timeout_descida_echo`, `echo_alto_antes_trigger`,
-`eco_fora_faixa` e `erro_gpio`.
+`eco_fora_faixa`, `polling_atrasado` e `erro_gpio`.
 
 O terminal/GUI exibe linhas `ADAS,...` nas mudancas de estado ou validade
 dos sensores e a cada segundo, inclusive enquanto mantem um estado. O
 log inclui tempo, validade, `v_target`, `d_release`, idade da ultima
 medida valida, erro da ultima tentativa, falhas consecutivas, largura do
-ultimo pulso e backend GPIO. Uma distancia numerica pode ser uma leitura
+ultimo pulso, backend GPIO e `us_backend_error` (erro de inicializacao
+que levou ao polling, preservado mesmo apos uma leitura valida).
+Uma distancia numerica pode ser uma leitura
 antiga; observe sempre `d_valid` e `us_age`.
 
 O CSV mantem `u` com sinal e acrescenta `v_raw`,

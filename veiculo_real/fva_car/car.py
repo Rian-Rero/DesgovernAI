@@ -549,7 +549,8 @@ class Car:
             sensor_log = (
                 f",us={status['reason']},us_age={status['age']:.3f},"
                 f"us_error={status['last_error']},us_failures={status['consecutive_failures']},"
-                f"us_pulse_ms={pulse_ms:.3f},us_backend={status['backend']}"
+                f"us_pulse_ms={pulse_ms:.3f},us_backend={status['backend']},"
+                f"us_backend_error={status.get('backend_error', 'nenhum')}"
                 if status else ""
             )
             print(

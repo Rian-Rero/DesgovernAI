@@ -1,6 +1,9 @@
 """Captura de eco e diagnostico com GPIO substituido, sem hardware."""
 
 import importlib.util
+import contextlib
+import io
+import itertools
 from pathlib import Path
 import sys
 import threading
@@ -18,12 +21,14 @@ spec.loader.exec_module(ultrasonic)
 
 
 class UltrasonicTests(unittest.TestCase):
-    def make_sensor(self, version=5):
+    def make_sensor(self, version=5, edge_error=None, setup_error=None):
         gpio = Mock()
         gpio.gpio_read.return_value = 0
         gpio.input.return_value = 0
         gpio.BOTH_EDGES = 3
         gpio.BOTH = 33
+        gpio.add_event_detect.side_effect = edge_error
+        gpio.setup.side_effect = setup_error
         rpi = types.ModuleType("RPi")
         rpi.GPIO = gpio
         with patch.dict(sys.modules, {"lgpio": gpio, "RPi": rpi, "RPi.GPIO": gpio}), patch.object(
@@ -78,6 +83,75 @@ class UltrasonicTests(unittest.TestCase):
         self.assertAlmostEqual(sensor.get_measure(), 0.343)
         sensor.cleanup()
         gpio.remove_event_detect.assert_called_once_with(sensor.echo_pin)
+
+    def make_polling_sensor(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            sensor, gpio = self.make_sensor(4, RuntimeError("Failed to add edge detection"))
+        self.assertIn("ULTRASSOM,AVISO,backend=rpi_gpio_polling", output.getvalue())
+        self.assertIn("Failed to add edge detection", output.getvalue())
+        self.assertEqual(sensor.get_status()["backend"], "rpi_gpio_polling")
+        self.assertIn("Failed to add edge detection", sensor.get_status()["backend_error"])
+        return sensor, gpio
+
+    def test_failed_edge_registration_falls_back_and_cleanup_is_scoped(self):
+        sensor, gpio = self.make_polling_sensor()
+        self.assertFalse(sensor.edge_registered)
+        self.assertFalse(sensor.get_status()["valid"])
+        sensor.cleanup()
+        gpio.remove_event_detect.assert_called_once_with(sensor.echo_pin)
+        self.assertEqual(gpio.cleanup.call_count, 2)
+        gpio.cleanup.assert_any_call(sensor.trigger_pin)
+        gpio.cleanup.assert_any_call(sensor.echo_pin)
+
+    def test_polling_fallback_measures_pulse_and_keeps_startup_error_visible(self):
+        sensor, gpio = self.make_polling_sensor()
+        gpio.input.side_effect = [0, 0, 1] + [1] * 19 + [0]
+        clock = [100, 100.0001, 100.0002]
+        clock += [100.0002 + n * 0.0001 for n in range(1, 21)]
+        clock += [100.0023, 100.0024]
+        with patch.object(ultrasonic.time, "monotonic", side_effect=clock):
+            sensor._sample_once()
+            status = sensor.get_status()
+        self.assertTrue(status["valid"])
+        self.assertAlmostEqual(status["distance"], 0.343)
+        self.assertEqual(status["last_error"], "nenhum")
+        self.assertIn("Failed to add edge detection", status["backend_error"])
+        self.assertFalse(sensor._accepting_echo)
+
+    def test_polling_missing_edges_have_bounded_timeout(self):
+        for level, expected in ((0, "timeout_subida_echo"), (1, "timeout_descida_echo")):
+            with self.subTest(level=level):
+                sensor, gpio = self.make_polling_sensor()
+                readings = iter([0])
+                gpio.input.side_effect = lambda channel: next(readings, level)
+                ticks = itertools.count()
+                with patch.object(ultrasonic.time, "monotonic", side_effect=lambda: 100 + next(ticks) * 0.0005):
+                    sensor._sample_once()
+                status = sensor.get_status()
+                self.assertFalse(status["valid"])
+                self.assertEqual(status["last_error"], expected)
+                self.assertLess(gpio.input.call_count, 70)
+
+    def test_polling_scheduler_gap_is_rejected_instead_of_false_distance(self):
+        sensor, gpio = self.make_polling_sensor()
+        gpio.input.side_effect = [0, 1]
+        with patch.object(ultrasonic.time, "monotonic", side_effect=[100, 100.002]):
+            sensor._sample_once()
+        self.assertFalse(sensor.get_status()["valid"])
+        self.assertIn("polling_atrasado:gap_ms=2.000", sensor.get_status()["last_error"])
+
+    def test_polling_gap_between_rising_and_falling_wait_is_also_rejected(self):
+        sensor, gpio = self.make_polling_sensor()
+        gpio.input.side_effect = [0, 1, 0]
+        with patch.object(ultrasonic.time, "monotonic", side_effect=[100, 100.0001, 100.0021]):
+            sensor._sample_once()
+        self.assertFalse(sensor.get_status()["valid"])
+        self.assertIn("polling_atrasado", sensor.get_status()["last_error"])
+
+    def test_gpio_pin_setup_failure_is_not_hidden_by_fallback(self):
+        with self.assertRaisesRegex(RuntimeError, "GPIO ocupado"):
+            self.make_sensor(4, setup_error=RuntimeError("GPIO ocupado"))
 
     def test_delayed_callback_uses_edge_timestamps_not_delivery_time(self):
         sensor, gpio = self.make_sensor()
