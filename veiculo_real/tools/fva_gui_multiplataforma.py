@@ -12,10 +12,13 @@
 # com senha SSH padrão (DEFAULT_PASS) pré-preenchida no campo.
 
 import os
+import codecs
 import queue
 import re
 import posixpath
 import platform
+import shlex
+import socket
 import subprocess
 import threading
 import stat
@@ -49,6 +52,57 @@ COLORS = {
 CAR_ICON = "🚗 "
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+STREAM_READY_MARKER = "__FVA_STREAM_READY__"
+
+
+def build_remote_command(raw_cmd, remote_workdir):
+	"""Prepara o comando sem deixar o Python acumular a saída."""
+	# O padrão original também casa com a linha do shell que executa pkill.
+	if shlex.split(raw_cmd) == ["pkill", "-f", "python3.*main.py"]:
+		raw_cmd = "pkill -f '[p]ython3.*main.py'"
+
+	raw_cmd = re.sub(
+		r"^((?:[^\s]+/)?python(?:[23](?:\.\d+)?)?)(?=\s|$)(?!\s+-u(?:\s|$))",
+		r"\1 -u",
+		raw_cmd,
+		count=1,
+	)
+	return (
+		f"export PYTHONUNBUFFERED=1; cd {shlex.quote(remote_workdir)} "
+		f"&& {{ printf '{STREAM_READY_MARKER}\\n'; {raw_cmd}\n}}"
+	)
+
+
+def iter_channel_lines(channel, on_chunk=None, on_idle=None):
+	"""Consome bytes disponíveis imediatamente e remonta linhas fragmentadas."""
+	decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+	pending = ""
+	channel.settimeout(0.1)
+	while True:
+		try:
+			chunk = channel.recv(32768)
+		except socket.timeout:
+			if on_idle is not None:
+				on_idle(len(pending))
+			continue
+
+		if not chunk:
+			pending += decoder.decode(b"", final=True)
+			if pending.strip():
+				yield pending
+			return
+
+		if on_chunk is not None:
+			on_chunk(len(chunk))
+		pending += decoder.decode(chunk)
+		# Aceita LF, CRLF e saída de terminal delimitada apenas por CR.
+		lines = re.split(r"\r\n|[\r\n]", pending)
+		pending = lines.pop()
+		for line in lines:
+			if line.strip():
+				yield line
+		if on_idle is not None:
+			on_idle(len(pending))
 
 
 def parse_telemetry_line(line: str):
@@ -184,6 +238,7 @@ class RsyncGUI(tk.Tk):
 		self._plot_no_data_warned = False
 		self._plot_stale_warned = False
 		self._plot_last_error = None
+		self._active_stream = None
 		self._plot_stats = self._new_plot_stats()
 		self._build_ui()
 		# preenche a senha padrão (se houver)
@@ -428,8 +483,8 @@ class RsyncGUI(tk.Tk):
 		self.cmd_text = scrolledtext.ScrolledText(cmds_frame, height=6)
 		self.cmd_text.insert(
 								"end",
-								'pkill -f "python3.*main.py"\n'
-								'python3 main.py\n'
+								"pkill -f '[p]ython3.*main.py'\n"
+								'python3 -u main.py\n'
 							)
 		self.cmd_text.pack(fill="x", pady=4)
 
@@ -506,6 +561,10 @@ class RsyncGUI(tk.Tk):
 			fg="#555555",
 		)
 		self.plot_status_label.pack(fill="x", padx=5, pady=(3, 1))
+		self.plot_status_label.bind(
+			"<Configure>",
+			lambda event: self.plot_status_label.configure(wraplength=max(100, event.width - 10)),
+		)
 
 		self.plot_diagnostics = scrolledtext.ScrolledText(
 			diagnostic_frame,
@@ -651,19 +710,21 @@ class RsyncGUI(tk.Tk):
 	@staticmethod
 	def _new_plot_stats():
 		return {
+			"ssh_bytes": 0,
 			"raw_lines": 0,
 			"valid_samples": 0,
 			"invalid_samples": 0,
 			"rendered_frames": 0,
+			"live_frames": 0,
 			"render_errors": 0,
 			"last_sample_at": None,
 			"samples_by_car": {},
 		}
 
 	########################################
-	def _plot_diag_write(self, level, text):
+	def _plot_diag_write(self, level, text, event_time=None):
 		level = level if level in {"INFO", "AVISO", "ERRO"} else "INFO"
-		timestamp = time.strftime("%H:%M:%S")
+		timestamp = time.strftime("%H:%M:%S", time.localtime(event_time))
 		self.plot_diagnostics.configure(state="normal")
 		self.plot_diagnostics.insert(
 			"end",
@@ -701,17 +762,61 @@ class RsyncGUI(tk.Tk):
 		self._plot_no_data_warned = False
 		self._plot_stale_warned = False
 		self._plot_last_error = None
+		self._active_stream = None
 		self._plot_dirty = True
 		self.run_cmds_button.configure(state="disabled")
 
 		cars = ", ".join(name.upper() for name, _ in targets)
 		self._set_plot_status("Aguardando linhas DATA da Raspberry...", "INFO")
-		self._plot_diag_write("INFO", f"Nova execução iniciada para: {cars}.")
+		self._plot_diag_write(
+			"INFO",
+			f"Nova execução iniciada para: {cars}. Leitor SSH direto v2, sem PTY.",
+		)
+
+	########################################
+	def _record_stream_chunk(self, byte_count):
+		with self.telemetry_lock:
+			stream = self._active_stream
+			first_chunk = stream["bytes"] == 0
+			stream["bytes"] += byte_count
+			self._plot_stats["ssh_bytes"] += byte_count
+			elapsed = time.monotonic() - stream["started_at"]
+			name = stream["name"]
+
+		if first_chunk:
+			self.ui(
+				self._plot_diag_write, "INFO",
+				f"[{name.upper()}] Primeiros bytes SSH após {elapsed:.2f} s "
+				f"({byte_count} bytes).",
+				time.time(),
+			)
+
+	########################################
+	def _record_stream_progress(self, pending_chars):
+		now = time.monotonic()
+		with self.telemetry_lock:
+			stream = self._active_stream
+			stream["pending_chars"] = pending_chars
+			if now - stream["reported_at"] < 5.0:
+				return
+			stream["reported_at"] = now
+			stream = dict(stream)
+			rendered = self._plot_stats["live_frames"]
+
+		self.ui(
+			self._plot_diag_write, "INFO",
+			f"[{stream['name'].upper()}] Comando ativo há "
+			f"{now - stream['started_at']:.1f} s: {stream['bytes']} bytes SSH, "
+			f"{stream['samples']} amostras, {rendered} quadros durante a execução, "
+			f"{pending_chars} caracteres aguardando fim de linha.",
+			time.time(),
+		)
 
 	########################################
 	def _store_telemetry_sample(self, name, sample):
 		with self.telemetry_lock:
-			first_sample = self._plot_stats["valid_samples"] == 0
+			stream = self._active_stream
+			first_sample = stream is not None and stream["samples"] == 0
 			if name not in self.telemetry:
 				self.telemetry[name] = {
 					"t": [], "x": [], "y": [], "v": [], "vref": [],
@@ -728,12 +833,22 @@ class RsyncGUI(tk.Tk):
 			by_car = self._plot_stats["samples_by_car"]
 			by_car[name] = by_car.get(name, 0) + 1
 			self._plot_dirty = True
+			if stream is not None:
+				stream["samples"] += 1
+				stream["last_sample_at"] = time.monotonic()
+				stream["last_sample_t"] = sample["t"]
+				if first_sample:
+					stream["first_sample_at"] = stream["last_sample_at"]
+					stream["first_sample_t"] = sample["t"]
+					elapsed = stream["first_sample_at"] - stream["started_at"]
 
 		if first_sample:
 			self.ui(
 				self._plot_diag_write,
 				"INFO",
-				f"Primeira amostra válida recebida de {name.upper()}.",
+				f"Primeira amostra válida de {name.upper()} após {elapsed:.2f} s "
+				f"do comando (t do experimento = {sample['t']:.3f} s).",
+				time.time(),
 			)
 
 	########################################
@@ -749,14 +864,21 @@ class RsyncGUI(tk.Tk):
 		if valid:
 			self._set_plot_status(
 				f"Execução concluída: {valid} amostras, "
-				f"{stats['rendered_frames']} quadros renderizados.",
-				"SUCESSO",
+				f"{stats['live_frames']} quadros em tempo real.",
+				"SUCESSO" if stats["live_frames"] else "AVISO",
 			)
 			self._plot_diag_write(
 				"INFO",
 				f"Execução concluída com {valid} amostras válidas e "
-				f"{invalid} inválidas.",
+				f"{invalid} inválidas; {stats['ssh_bytes']} bytes SSH; "
+				f"{stats['live_frames']} quadros desenhados enquanto o comando estava ativo.",
 			)
+			if not stats["live_frames"]:
+				self._plot_diag_write(
+					"AVISO",
+					"Os dados chegaram, mas nenhum quadro com amostras foi desenhado "
+					"antes do fim do comando. Consulte os tempos de recepção acima.",
+				)
 		else:
 			if raw_lines == 0:
 				reason = "nenhuma linha foi recebida pela conexão SSH"
@@ -975,6 +1097,8 @@ class RsyncGUI(tk.Tk):
 	# Execução remota (aba 2)
 	########################################
 	def run_cmds_on_selected(self):
+		if self._plot_session_active:
+			return
 		targets = self.get_selected_devices()
 		if not targets:
 			messagebox.showinfo("Nenhum alvo", "Selecione ao menos uma Raspberry com IP.")
@@ -997,65 +1121,127 @@ class RsyncGUI(tk.Tk):
 
 	########################################
 	def _run_remote_cmds(self, targets, cmds, remote_workdir, username, password):
-		for name, ip in targets:
-			self.ui(self.cmdlog_write, "\n" + "=" * 60)
-			self.ui(self.cmdlog_write, f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
-			client = None
-			try:
-				client = self._connect_ssh(ip, username, password)
-				for raw_cmd in cmds:
-					wrapped = (
-						f'export PYTHONUNBUFFERED=1; cd "{remote_workdir}" '
-						f'&& {raw_cmd}'
+		try:
+			for name, ip in targets:
+				self.ui(self.cmdlog_write, "\n" + "=" * 60)
+				self.ui(self.cmdlog_write, f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
+				client = None
+				try:
+					client = self._connect_ssh(ip, username, password)
+					for raw_cmd in cmds:
+						rc = self._execute_remote_command(client, name, raw_cmd, remote_workdir)
+						if rc == 1 and shlex.split(raw_cmd)[:2] == ["pkill", "-f"]:
+							self.ui(self._plot_diag_write, "INFO", "Nenhum processo anterior para encerrar.")
+						elif rc != 0:
+							message = f"Retorno {rc} para comando: {raw_cmd}"
+							if rc == -1:
+								message += " (canal fechado sem status de saída do servidor)"
+							self.ui(self.cmdlog_write, f"⚠️ {message}")
+							self.ui(self._plot_diag_write, "ERRO", message)
+
+					self.ui(self.cmdlog_write, f"✅ Carro {name.upper()} finalizado")
+				except Exception as e:
+					self.ui(self.cmdlog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+					self.ui(
+						self._plot_diag_write, "ERRO",
+						f"Falha na execução de {name.upper()} ({ip}): {type(e).__name__}: {e}",
+						time.time(),
 					)
-					self.ui(self.cmdlog_write, f"$ {wrapped}")
+				finally:
+					if client:
+						client.close()
+		finally:
+			self.ui(self._finish_plot_session)
 
-					stdin, stdout, stderr = client.exec_command(wrapped, get_pty=True)
-					for line in iter(stdout.readline, ""):
-						line = line.rstrip("\r\n")
-						if not line:
-							continue
-
-						with self.telemetry_lock:
-							self._plot_stats["raw_lines"] += 1
-
-						if ANSI_ESCAPE_RE.sub("", line).lstrip().startswith("DATA,"):
-							try:
-								sample = parse_telemetry_line(line)
-								self._store_telemetry_sample(name, sample)
-							except ValueError as exc:
-								with self.telemetry_lock:
-									self._plot_stats["invalid_samples"] += 1
-									invalid_count = self._plot_stats["invalid_samples"]
-								message = (
-									f"[{name.upper()}] Telemetria inválida ({exc}): {line}"
-								)
-								self.ui(self.cmdlog_write, message)
-								if invalid_count <= 5 or invalid_count % 25 == 0:
-									self.ui(self._plot_diag_write, "ERRO", message)
-						else:
-							self.ui(self.cmdlog_write, f"[{name.upper()}] {line}")
-
-					rc = stdout.channel.recv_exit_status()
-					if rc != 0:
-						message = f"Retorno {rc} para comando: {raw_cmd}"
-						self.ui(self.cmdlog_write, f"⚠️ {message}")
-						self.ui(self._plot_diag_write, "ERRO", message)
-
-				self.ui(self.cmdlog_write, f"✅ Carro {name.upper()} finalizado")
-			except Exception as e:
-				self.ui(self.cmdlog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+	########################################
+	def _execute_remote_command(self, client, name, raw_cmd, remote_workdir):
+		wrapped = build_remote_command(raw_cmd, remote_workdir)
+		now = time.monotonic()
+		with self.telemetry_lock:
+			self._active_stream = {
+				"name": name, "started_at": now, "reported_at": now,
+				"bytes": 0, "samples": 0, "pending_chars": 0,
+				"ready": False, "finished": False, "lines": 0,
+			}
+		self._plot_no_data_warned = False
+		self.ui(self.cmdlog_write, f"$ {wrapped}")
+		self.ui(self._plot_diag_write, "INFO", f"[{name.upper()}] Abrindo canal: {raw_cmd}", time.time())
+		channel = None
+		try:
+			transport = client.get_transport()
+			if transport is None or not transport.is_active():
+				raise RuntimeError("Conexão SSH inativa")
+			channel = transport.open_session(timeout=10)
+			channel.set_combine_stderr(True)
+			channel.settimeout(10)
+			channel.exec_command(wrapped)
+			channel.shutdown_write()
+			self.ui(
+				self._plot_diag_write, "INFO",
+				f"[{name.upper()}] Canal aberto; lendo stdout/stderr diretamente, sem PTY.",
+				time.time(),
+			)
+			for line in iter_channel_lines(
+				channel, self._record_stream_chunk, self._record_stream_progress,
+			):
+				self._handle_remote_line(name, line)
+			# Só consulta o status depois de consumir a saída até EOF.
+			return channel.recv_exit_status()
+		finally:
+			with self.telemetry_lock:
+				self._active_stream["finished"] = True
+				stream = dict(self._active_stream)
+			if channel is not None:
+				channel.close()
+			if stream["samples"] > 1:
+				received_span = stream["last_sample_at"] - stream["first_sample_at"]
+				experiment_span = stream["last_sample_t"] - stream["first_sample_t"]
 				self.ui(
-					self._plot_diag_write,
-					"ERRO",
-					f"Falha na execução de {name.upper()} ({ip}): "
-					f"{type(e).__name__}: {e}",
+					self._plot_diag_write, "INFO",
+					f"[{name.upper()}] {stream['samples']} amostras recebidas ao longo de "
+					f"{received_span:.2f} s, cobrindo {experiment_span:.2f} s do experimento.",
+					time.time(),
 				)
-			finally:
-				if client:
-					client.close()
+				if experiment_span > 5 and received_span < experiment_span * 0.2:
+					self.ui(
+						self._plot_diag_write, "AVISO",
+						"Telemetria recebida em lote: a saída remota ou um intermediário "
+						"reteve os dados antes de chegarem à GUI.",
+						time.time(),
+					)
 
-		self.ui(self._finish_plot_session)
+	########################################
+	def _handle_remote_line(self, name, line):
+		clean_line = ANSI_ESCAPE_RE.sub("", line).strip()
+		if clean_line == STREAM_READY_MARKER:
+			with self.telemetry_lock:
+				self._active_stream["ready"] = True
+			self.ui(
+				self._plot_diag_write, "INFO",
+				f"[{name.upper()}] Marcador de início recebido; shell remoto está transmitindo.",
+				time.time(),
+			)
+			return
+
+		with self.telemetry_lock:
+			self._plot_stats["raw_lines"] += 1
+			self._active_stream["lines"] += 1
+			line_count = self._active_stream["lines"]
+		if clean_line.startswith("DATA,"):
+			try:
+				self._store_telemetry_sample(name, parse_telemetry_line(clean_line))
+			except ValueError as exc:
+				with self.telemetry_lock:
+					self._plot_stats["invalid_samples"] += 1
+					invalid_count = self._plot_stats["invalid_samples"]
+				message = f"[{name.upper()}] Telemetria inválida ({exc}): {line}"
+				if invalid_count <= 5 or invalid_count % 25 == 0:
+					self.ui(self.cmdlog_write, message)
+					self.ui(self._plot_diag_write, "ERRO", message, time.time())
+		else:
+			self.ui(self.cmdlog_write, f"[{name.upper()}] {line}")
+			if line_count <= 3:
+				self.ui(self._plot_diag_write, "INFO", f"[{name.upper()}] Saída remota: {line[:300]}", time.time())
 
 	########################################
 	# Execução remota (aba 3)
@@ -1207,6 +1393,8 @@ class RsyncGUI(tk.Tk):
 			invalid = self._plot_stats["invalid_samples"]
 			raw_lines = self._plot_stats["raw_lines"]
 			last_sample_at = self._plot_stats["last_sample_at"]
+			ssh_bytes = self._plot_stats["ssh_bytes"]
+			stream = dict(self._active_stream) if self._active_stream else None
 
 		if valid:
 			stale_for = now - last_sample_at
@@ -1235,8 +1423,17 @@ class RsyncGUI(tk.Tk):
 			reason = f"{invalid} linha(s) DATA foram rejeitadas pelo parser"
 		elif raw_lines:
 			reason = f"há {raw_lines} linha(s) no terminal, mas nenhuma telemetria DATA"
+		elif stream and stream["pending_chars"]:
+			reason = (
+				f"chegaram {ssh_bytes} bytes SSH, mas há "
+				f"{stream['pending_chars']} caracteres sem fim de linha"
+			)
+		elif stream and stream["ready"]:
+			reason = "o shell transmitiu o início, mas o programa ainda não enviou linhas DATA"
+		elif ssh_bytes:
+			reason = f"chegaram {ssh_bytes} bytes SSH, mas nenhuma linha DATA válida"
 		else:
-			reason = "a conexão SSH ainda não produziu nenhuma linha"
+			reason = "nenhum byte SSH chegou; confira a abertura do canal nos diagnósticos"
 
 		self._plot_no_data_warned = True
 		self._set_plot_status(f"Sem dados para o gráfico: {reason}.", "AVISO")
@@ -1351,15 +1548,22 @@ class RsyncGUI(tk.Tk):
 
 		with self.telemetry_lock:
 			self._plot_stats["rendered_frames"] += 1
-			valid = self._plot_stats["valid_samples"]
+			valid = sum(len(data["t"]) for data in telemetry_snapshot.values())
 			rendered = self._plot_stats["rendered_frames"]
-			by_car = dict(self._plot_stats["samples_by_car"])
+			by_car = {name: len(data["t"]) for name, data in telemetry_snapshot.items()}
+			stream = self._active_stream
+			live = valid and stream is not None and stream["samples"] > 0 and not stream["finished"]
+			first_live_frame = live and self._plot_stats["live_frames"] == 0
+			if live:
+				self._plot_stats["live_frames"] += 1
+		if first_live_frame:
+			self._plot_diag_write("INFO", f"Primeiro quadro em tempo real desenhado com {valid} amostras.")
 
 		if valid:
 			counts = ", ".join(
 				f"{name.upper()}: {count}" for name, count in sorted(by_car.items())
 			)
-			mode = "Tempo real ativo" if self._plot_session_active else "Dados finais exibidos"
+			mode = "Tempo real ativo" if live else "Dados finais exibidos"
 			self._set_plot_status(
 				f"{mode} | amostras: {valid} ({counts}) | quadros: {rendered}",
 				"SUCESSO",
