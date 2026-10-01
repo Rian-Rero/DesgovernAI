@@ -12,12 +12,14 @@
 # com senha SSH padrão (DEFAULT_PASS) pré-preenchida no campo.
 
 import os
+import queue
 import re
 import posixpath
 import platform
 import subprocess
 import threading
 import stat
+import time
 
 import paramiko
 import tkinter as tk
@@ -160,6 +162,9 @@ def find_ip_by_mac_arptable(target_mac: str):
 class RsyncGUI(tk.Tk):
 	# taxa fixa de redesenho do grafico (Hz != taxa de amostragem da telemetria)
 	PLOT_REFRESH_MS = 66  # ~15 Hz, fluido sem sobrecarregar o mainloop do Tk
+	UI_QUEUE_REFRESH_MS = 25
+	NO_TELEMETRY_WARNING_SECONDS = 3.0
+	TELEMETRY_STALE_WARNING_SECONDS = 3.0
 
 	def __init__(self):
 		super().__init__()
@@ -172,6 +177,14 @@ class RsyncGUI(tk.Tk):
 		self.telemetry = {}
 		self.telemetry_lock = threading.Lock()
 		self._plot_dirty = False
+		self._ui_thread_id = threading.get_ident()
+		self._ui_queue = queue.Queue()
+		self._plot_session_active = False
+		self._plot_session_started_at = None
+		self._plot_no_data_warned = False
+		self._plot_stale_warned = False
+		self._plot_last_error = None
+		self._plot_stats = self._new_plot_stats()
 		self._build_ui()
 		# preenche a senha padrão (se houver)
 		if DEFAULT_PASS:
@@ -187,6 +200,7 @@ class RsyncGUI(tk.Tk):
 		# redesenha o grafico em uma taxa fixa, independente da taxa de
 		# chegada da telemetria (que pode ser bem mais rapida, ~50 Hz),
 		# evitando que os redraws se acumulem numa fila crescente.
+		self.after(self.UI_QUEUE_REFRESH_MS, self._process_ui_queue)
 		self.after(self.PLOT_REFRESH_MS, self._plot_tick)
 
 		# aumenta fontes
@@ -257,7 +271,36 @@ class RsyncGUI(tk.Tk):
 
 	########################################
 	def ui(self, func, *args, **kwargs):
-		self.after(0, lambda: func(*args, **kwargs))
+		"""Executa callbacks do Tk somente na thread que criou a interface."""
+		if threading.get_ident() == self._ui_thread_id:
+			func(*args, **kwargs)
+		else:
+			self._ui_queue.put((func, args, kwargs))
+
+	########################################
+	def _process_ui_queue(self):
+		"""Consome callbacks produzidos pelas threads SSH/SFTP."""
+		try:
+			for _ in range(500):
+				try:
+					func, args, kwargs = self._ui_queue.get_nowait()
+				except queue.Empty:
+					break
+
+				try:
+					func(*args, **kwargs)
+				except Exception as exc:
+					func_name = getattr(func, "__name__", type(func).__name__)
+					self._plot_diag_write(
+						"ERRO",
+						f"Falha ao atualizar a interface em {func_name}: "
+						f"{type(exc).__name__}: {exc}",
+					)
+		finally:
+			try:
+				self.after(self.UI_QUEUE_REFRESH_MS, self._process_ui_queue)
+			except tk.TclError:
+				pass
 	
 	########################################
 	def _build_tab_home(self, parent):
@@ -390,7 +433,12 @@ class RsyncGUI(tk.Tk):
 							)
 		self.cmd_text.pack(fill="x", pady=4)
 
-		ttk.Button(parent, text="Executar nos selecionados", command=self.run_cmds_on_selected).pack(pady=6)
+		self.run_cmds_button = ttk.Button(
+			parent,
+			text="Executar nos selecionados",
+			command=self.run_cmds_on_selected,
+		)
+		self.run_cmds_button.pack(pady=6)
 
 		# area inferior: grafico e terminal lado a lado
 		bottom = ttk.PanedWindow(parent, orient="horizontal")
@@ -434,7 +482,7 @@ class RsyncGUI(tk.Tk):
 		
 		self.plot_combo.bind(
 			"<<ComboboxSelected>>",
-			lambda event: self.update_plot()
+			lambda event: setattr(self, "_plot_dirty", True)
 		)
 
 		self.fig = Figure(figsize=(6, 4), dpi=100)
@@ -443,6 +491,33 @@ class RsyncGUI(tk.Tk):
 		self.ax.set_xlabel("Tempo [s]")
 		self.ax.set_ylabel("Velocidade [m/s]")
 		self.ax.grid(True)
+
+		diagnostic_frame = ttk.LabelFrame(
+			plot_frame,
+			text="Diagnóstico do gráfico",
+		)
+		diagnostic_frame.pack(side="bottom", fill="x", pady=(5, 0))
+
+		self.plot_status_var = tk.StringVar(value="Aguardando execução")
+		self.plot_status_label = tk.Label(
+			diagnostic_frame,
+			textvariable=self.plot_status_var,
+			anchor="w",
+			fg="#555555",
+		)
+		self.plot_status_label.pack(fill="x", padx=5, pady=(3, 1))
+
+		self.plot_diagnostics = scrolledtext.ScrolledText(
+			diagnostic_frame,
+			height=4,
+			font=("TkFixedFont", 9),
+			wrap="word",
+		)
+		self.plot_diagnostics.pack(fill="x", padx=5, pady=(1, 5))
+		self.plot_diagnostics.tag_configure("INFO", foreground="#1f5f99")
+		self.plot_diagnostics.tag_configure("AVISO", foreground="#9a6700")
+		self.plot_diagnostics.tag_configure("ERRO", foreground="#b42318")
+		self.plot_diagnostics.configure(state="disabled")
 
 		self.canvas = FigureCanvasTkAgg(
 			self.fig,
@@ -573,6 +648,126 @@ class RsyncGUI(tk.Tk):
 		self.cmd_log.configure(state="disabled")
 
 	########################################
+	@staticmethod
+	def _new_plot_stats():
+		return {
+			"raw_lines": 0,
+			"valid_samples": 0,
+			"invalid_samples": 0,
+			"rendered_frames": 0,
+			"render_errors": 0,
+			"last_sample_at": None,
+			"samples_by_car": {},
+		}
+
+	########################################
+	def _plot_diag_write(self, level, text):
+		level = level if level in {"INFO", "AVISO", "ERRO"} else "INFO"
+		timestamp = time.strftime("%H:%M:%S")
+		self.plot_diagnostics.configure(state="normal")
+		self.plot_diagnostics.insert(
+			"end",
+			f"{timestamp} [{level}] {text}\n",
+			level,
+		)
+
+		# Evita crescimento ilimitado durante várias execuções na mesma sessão.
+		line_count = int(self.plot_diagnostics.index("end-1c").split(".")[0])
+		if line_count > 300:
+			self.plot_diagnostics.delete("1.0", "51.0")
+
+		self.plot_diagnostics.see("end")
+		self.plot_diagnostics.configure(state="disabled")
+
+	########################################
+	def _set_plot_status(self, text, level="INFO"):
+		colors = {
+			"INFO": "#1f5f99",
+			"SUCESSO": "#067647",
+			"AVISO": "#9a6700",
+			"ERRO": "#b42318",
+		}
+		self.plot_status_var.set(text)
+		self.plot_status_label.configure(fg=colors.get(level, colors["INFO"]))
+
+	########################################
+	def _start_plot_session(self, targets):
+		with self.telemetry_lock:
+			self.telemetry = {}
+			self._plot_stats = self._new_plot_stats()
+
+		self._plot_session_active = True
+		self._plot_session_started_at = time.monotonic()
+		self._plot_no_data_warned = False
+		self._plot_stale_warned = False
+		self._plot_last_error = None
+		self._plot_dirty = True
+		self.run_cmds_button.configure(state="disabled")
+
+		cars = ", ".join(name.upper() for name, _ in targets)
+		self._set_plot_status("Aguardando linhas DATA da Raspberry...", "INFO")
+		self._plot_diag_write("INFO", f"Nova execução iniciada para: {cars}.")
+
+	########################################
+	def _store_telemetry_sample(self, name, sample):
+		with self.telemetry_lock:
+			first_sample = self._plot_stats["valid_samples"] == 0
+			if name not in self.telemetry:
+				self.telemetry[name] = {
+					"t": [], "x": [], "y": [], "v": [], "vref": [],
+					"a": [], "u": [], "control_percent": [],
+					"motor_pwm_percent": [], "w": [], "th": []
+				}
+
+			data = self.telemetry[name]
+			for key, value in sample.items():
+				data[key].append(value)
+
+			self._plot_stats["valid_samples"] += 1
+			self._plot_stats["last_sample_at"] = time.monotonic()
+			by_car = self._plot_stats["samples_by_car"]
+			by_car[name] = by_car.get(name, 0) + 1
+			self._plot_dirty = True
+
+		if first_sample:
+			self.ui(
+				self._plot_diag_write,
+				"INFO",
+				f"Primeira amostra válida recebida de {name.upper()}.",
+			)
+
+	########################################
+	def _finish_plot_session(self):
+		self._plot_session_active = False
+		self.run_cmds_button.configure(state="normal")
+		with self.telemetry_lock:
+			stats = dict(self._plot_stats)
+
+		valid = stats["valid_samples"]
+		invalid = stats["invalid_samples"]
+		raw_lines = stats["raw_lines"]
+		if valid:
+			self._set_plot_status(
+				f"Execução concluída: {valid} amostras, "
+				f"{stats['rendered_frames']} quadros renderizados.",
+				"SUCESSO",
+			)
+			self._plot_diag_write(
+				"INFO",
+				f"Execução concluída com {valid} amostras válidas e "
+				f"{invalid} inválidas.",
+			)
+		else:
+			if raw_lines == 0:
+				reason = "nenhuma linha foi recebida pela conexão SSH"
+			elif invalid:
+				reason = f"as {invalid} linhas DATA recebidas eram inválidas"
+			else:
+				reason = f"foram recebidas {raw_lines} linhas, mas nenhuma começou com DATA"
+			self._set_plot_status(f"Gráfico não gerado: {reason}.", "ERRO")
+			self._plot_diag_write("ERRO", f"Gráfico não gerado porque {reason}.")
+
+	########################################
 	def select_files(self):
 		# raiz do projeto: um nível acima da pasta tools
 		project_dir = os.path.dirname(
@@ -679,13 +874,17 @@ class RsyncGUI(tk.Tk):
 		threading.Thread(target=self._run_sftp_for_targets, args=(targets,), daemon=True).start()
 
 	########################################
-	def _connect_ssh(self, ip):
+	def _connect_ssh(self, ip, username=None, password=None):
+		if username is None:
+			username = self.user_entry.get().strip() or SSH_USER
+			password = self.pass_entry.get().strip() or None
+
 		client = paramiko.SSHClient()
 		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 		client.connect(
 			ip,
-			username=self.user_entry.get().strip() or SSH_USER,
-			password=self.pass_entry.get().strip() or None,
+			username=username,
+			password=password,
 			timeout=8,
 			auth_timeout=8,
 			banner_timeout=8,
@@ -784,25 +983,31 @@ class RsyncGUI(tk.Tk):
 		if not cmds:
 			messagebox.showinfo("Nenhum comando", "Digite ao menos um comando.")
 			return
-			
-		with self.telemetry_lock:
-			self.telemetry = {}
-		self.update_plot()
 
-		threading.Thread(target=self._run_remote_cmds, args=(targets, cmds), daemon=True).start()
-		
-	########################################
-	def _run_remote_cmds(self, targets, cmds):
 		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		username = self.user_entry.get().strip() or SSH_USER
+		password = self.pass_entry.get().strip() or None
+		self._start_plot_session(targets)
 
+		threading.Thread(
+			target=self._run_remote_cmds,
+			args=(targets, cmds, remote_workdir, username, password),
+			daemon=True,
+		).start()
+
+	########################################
+	def _run_remote_cmds(self, targets, cmds, remote_workdir, username, password):
 		for name, ip in targets:
 			self.ui(self.cmdlog_write, "\n" + "=" * 60)
 			self.ui(self.cmdlog_write, f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
 			client = None
 			try:
-				client = self._connect_ssh(ip)
+				client = self._connect_ssh(ip, username, password)
 				for raw_cmd in cmds:
-					wrapped = f'cd "{remote_workdir}" && {raw_cmd}'
+					wrapped = (
+						f'export PYTHONUNBUFFERED=1; cd "{remote_workdir}" '
+						f'&& {raw_cmd}'
+					)
 					self.ui(self.cmdlog_write, f"$ {wrapped}")
 
 					stdin, stdout, stderr = client.exec_command(wrapped, get_pty=True)
@@ -811,35 +1016,46 @@ class RsyncGUI(tk.Tk):
 						if not line:
 							continue
 
+						with self.telemetry_lock:
+							self._plot_stats["raw_lines"] += 1
+
 						if ANSI_ESCAPE_RE.sub("", line).lstrip().startswith("DATA,"):
 							try:
 								sample = parse_telemetry_line(line)
+								self._store_telemetry_sample(name, sample)
+							except ValueError as exc:
 								with self.telemetry_lock:
-									if name not in self.telemetry:
-										self.telemetry[name] = {
-											"t": [], "x": [], "y": [], "v": [], "vref": [],
-											"a": [], "u": [], "control_percent": [],
-											"motor_pwm_percent": [], "w": [], "th": []
-										}
-									data = self.telemetry[name]
-									for key, value in sample.items():
-										data[key].append(value)
-									self._plot_dirty = True
-							except ValueError:
-								self.ui(self.cmdlog_write, f"[{name.upper()}] Telemetria inválida: {line}")
+									self._plot_stats["invalid_samples"] += 1
+									invalid_count = self._plot_stats["invalid_samples"]
+								message = (
+									f"[{name.upper()}] Telemetria inválida ({exc}): {line}"
+								)
+								self.ui(self.cmdlog_write, message)
+								if invalid_count <= 5 or invalid_count % 25 == 0:
+									self.ui(self._plot_diag_write, "ERRO", message)
 						else:
 							self.ui(self.cmdlog_write, f"[{name.upper()}] {line}")
 
 					rc = stdout.channel.recv_exit_status()
 					if rc != 0:
-						self.ui(self.cmdlog_write, f"⚠️ Retorno {rc} para comando: {raw_cmd}")
+						message = f"Retorno {rc} para comando: {raw_cmd}"
+						self.ui(self.cmdlog_write, f"⚠️ {message}")
+						self.ui(self._plot_diag_write, "ERRO", message)
 
 				self.ui(self.cmdlog_write, f"✅ Carro {name.upper()} finalizado")
 			except Exception as e:
 				self.ui(self.cmdlog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+				self.ui(
+					self._plot_diag_write,
+					"ERRO",
+					f"Falha na execução de {name.upper()} ({ip}): "
+					f"{type(e).__name__}: {e}",
+				)
 			finally:
 				if client:
 					client.close()
+
+		self.ui(self._finish_plot_session)
 
 	########################################
 	# Execução remota (aba 3)
@@ -931,14 +1147,103 @@ class RsyncGUI(tk.Tk):
 
 	########################################
 	def _plot_tick(self):
-		"""Redesenha o grafico numa cadencia fixa (PLOT_REFRESH_MS), somente
-		quando ha dado novo. Isso desacopla a taxa de redraw da taxa de
-		chegada da telemetria (~50 Hz), que e rapida demais para redesenhar
-		a figura inteira a cada amostra sem acumular atraso."""
-		if self._plot_dirty:
-			self._plot_dirty = False
-			self.update_plot()
-		self.after(self.PLOT_REFRESH_MS, self._plot_tick)
+		"""Redesenha quando necessário e sempre rearma o temporizador."""
+		try:
+			if self._plot_dirty:
+				# Limpar antes do desenho preserva um novo dirty produzido enquanto
+				# o Matplotlib estiver renderizando.
+				self._plot_dirty = False
+				try:
+					self.update_plot()
+					if self._plot_last_error is not None:
+						self._plot_diag_write(
+							"INFO",
+							"Renderização recuperada após o erro anterior.",
+						)
+						self._plot_last_error = None
+				except Exception as exc:
+					self._plot_dirty = True
+					self._handle_plot_error(exc)
+
+			self._check_plot_health()
+		except Exception as exc:
+			# Também protege falhas nos diagnósticos/estado, não só no Matplotlib.
+			self._plot_dirty = True
+			self._handle_plot_error(exc)
+		finally:
+			# Sem o finally, uma única exceção encerra os gráficos para sempre.
+			try:
+				self.after(self.PLOT_REFRESH_MS, self._plot_tick)
+			except tk.TclError:
+				pass
+
+	########################################
+	def _handle_plot_error(self, exc):
+		signature = f"{type(exc).__name__}: {exc}"
+		with self.telemetry_lock:
+			self._plot_stats["render_errors"] += 1
+			valid = self._plot_stats["valid_samples"]
+
+		self._set_plot_status(f"Erro ao renderizar: {signature}", "ERRO")
+		if signature != self._plot_last_error:
+			self._plot_diag_write(
+				"ERRO",
+				f"Falha ao desenhar '{self.plot_var.get()}' após {valid} amostras: "
+				f"{signature}. O gráfico tentará novamente automaticamente.",
+			)
+			self.cmdlog_write(f"[GRÁFICO] {signature}")
+			self._plot_last_error = signature
+
+	########################################
+	def _check_plot_health(self):
+		if not self._plot_session_active or self._plot_session_started_at is None:
+			return
+
+		now = time.monotonic()
+		elapsed = now - self._plot_session_started_at
+
+		with self.telemetry_lock:
+			valid = self._plot_stats["valid_samples"]
+			invalid = self._plot_stats["invalid_samples"]
+			raw_lines = self._plot_stats["raw_lines"]
+			last_sample_at = self._plot_stats["last_sample_at"]
+
+		if valid:
+			stale_for = now - last_sample_at
+			if stale_for >= self.TELEMETRY_STALE_WARNING_SECONDS:
+				if not self._plot_stale_warned:
+					self._plot_stale_warned = True
+					self._set_plot_status(
+						f"Telemetria interrompida há {stale_for:.1f} s; "
+						"o último gráfico continua visível.",
+						"AVISO",
+					)
+					self._plot_diag_write(
+						"AVISO",
+						f"Nenhuma nova linha DATA válida há {stale_for:.1f} s. "
+						"Verifique o terminal e a execução na Raspberry.",
+					)
+			elif self._plot_stale_warned:
+				self._plot_stale_warned = False
+				self._plot_diag_write("INFO", "Fluxo de telemetria restabelecido.")
+			return
+
+		if elapsed < self.NO_TELEMETRY_WARNING_SECONDS or self._plot_no_data_warned:
+			return
+
+		if invalid:
+			reason = f"{invalid} linha(s) DATA foram rejeitadas pelo parser"
+		elif raw_lines:
+			reason = f"há {raw_lines} linha(s) no terminal, mas nenhuma telemetria DATA"
+		else:
+			reason = "a conexão SSH ainda não produziu nenhuma linha"
+
+		self._plot_no_data_warned = True
+		self._set_plot_status(f"Sem dados para o gráfico: {reason}.", "AVISO")
+		self._plot_diag_write(
+			"AVISO",
+			f"Nenhuma amostra válida após {elapsed:.1f} s: {reason}.",
+		)
 
 	########################################
 	def update_plot(self):
@@ -1043,6 +1348,22 @@ class RsyncGUI(tk.Tk):
 		# renderizado agora evita atrasos de renderizacao observados no
 		# backend TkAgg do macOS com draw_idle() sob certas condicoes.
 		self.canvas.draw()
+
+		with self.telemetry_lock:
+			self._plot_stats["rendered_frames"] += 1
+			valid = self._plot_stats["valid_samples"]
+			rendered = self._plot_stats["rendered_frames"]
+			by_car = dict(self._plot_stats["samples_by_car"])
+
+		if valid:
+			counts = ", ".join(
+				f"{name.upper()}: {count}" for name, count in sorted(by_car.items())
+			)
+			mode = "Tempo real ativo" if self._plot_session_active else "Dados finais exibidos"
+			self._set_plot_status(
+				f"{mode} | amostras: {valid} ({counts}) | quadros: {rendered}",
+				"SUCESSO",
+			)
 	
 ########################################
 # Execução
