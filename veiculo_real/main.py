@@ -49,12 +49,18 @@ def vision_func(car, vision_data, stop_event):
 if __name__ == "__main__":
 
     parameters = {
-        "ts": 50.0,
+        "ts": 20.0,
         "save": True,
         "logfile": "logs/",
         "camera": False,
         "ultrasonic_steering": False,
         "us_buzzer": False,
+        "adas": {
+            "clearance": 0.20,
+            "reaction_time": 0.40,
+            "anticipation_time": 0.30,
+            "max_brake": 1.0,
+        },
         "initial_position": [0, 0, np.deg2rad(0)],
     }
 
@@ -98,11 +104,7 @@ if __name__ == "__main__":
             # ultrassom
             dist, valid = car.get_distance()
 
-            if (not valid) or (dist < 0.20):
-                print(f"Colisao: distance {dist:.2f} [m]")
-                car.set_vel(0.0)
-            else:
-                car.set_vel(MAIN_VEL)
+            car.set_adas_vel(MAIN_VEL, dist, valid)
 
             # telemetria para plots remotos
             print(

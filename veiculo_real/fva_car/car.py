@@ -13,8 +13,10 @@ from datetime import datetime
 
 try:
     from . import encoder, servos, buzzer, ultrasonic, imu, filter
+    from .adas import BrakingADAS, BrakingConfig, BrakingDecision, BrakingMode
 except ImportError:
     import encoder, servos, buzzer, ultrasonic, imu, filter
+    from adas import BrakingADAS, BrakingConfig, BrakingDecision, BrakingMode
 
 
 # QUESTAO DA ORIENTACAO DO CARRINHO NA FUSAO DE POSICAO (COMECA SEMPRE PARA O LESTE)
@@ -65,6 +67,16 @@ class Car:
 
         self.parameters = parameters
 
+        adas_parameters = {"coast_deceleration": 0.5 * CAR["MI"] * CAR["GRAV"]}
+        adas_parameters.update(parameters.get("adas", {}))
+        self.adas = BrakingADAS(BrakingConfig(**adas_parameters))
+        self.adas_decision = BrakingDecision(BrakingMode.CRUISE, "inicial", 0.0, 0.0, 0.0)
+        self.adas_distance = float("nan")
+        self.adas_distance_valid = False
+        self._adas_log_key = None
+        self._adas_last_beep = float("-inf")
+        self._control_mode = "drive"
+
         # detecta carrinho pronto
         self.color = self.get_car_color()
 
@@ -87,6 +99,8 @@ class Car:
         self.th = parameters["initial_position"][2]
         self.w = 0.0
         self.v = 0.0
+        self.v_raw = 0.0
+        self.velocity_valid = False
         self.a = 0.0
         self.p_gps = None
 
@@ -369,9 +383,11 @@ class Car:
 
         # le velocidade do encoder
         v, valid = self.odometer.get_vel()
+        self.velocity_valid = bool(valid and np.isfinite(v))
 
         # somente atualiza velocidade se a medida for valida
-        if valid:
+        if self.velocity_valid:
+            self.v_raw = float(v)
             vf = self.v_filt.filter(v)
         else:
             vf = self.v
@@ -439,18 +455,24 @@ class Car:
     # seta torque do veiculo
     def set_vel(self, vref):
 
+        if self._control_mode != "drive":
+            self.vel_error_integral = 0.0
+            self._control_mode = "drive"
         # define referencia e marcha
         self._set_ref(vref)
 
         # erro usando a velocidade medida com filtro de media
-        vref_abs = abs(self.vref)
-        v_abs = abs(self.v)
-        error = vref_abs - v_abs
+        u = self._velocity_pi(abs(self.vref), abs(self.v), 0.0, 1.0)
+        self.set_u(u)
+
+    ########################################
+    def _velocity_pi(self, reference, measured, lower, upper):
+        error = reference - measured
 
         # feedforward fornece o throttle de regime; o PI faz a correcao
-        feedforward = THROTTLE_FF_GAIN * vref_abs
+        feedforward = THROTTLE_FF_GAIN * reference
         u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
-        u_sat = np.clip(u, 0.0, 1.0)
+        u_sat = np.clip(u, lower, upper)
 
         # anti-windup: integra apenas fora da saturacao ou para sair dela
         if (u == u_sat) or (u > u_sat and error < 0.0) or (u < u_sat and error > 0.0):
@@ -458,7 +480,77 @@ class Car:
             self.vel_error_integral += error * dt_control
             u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
 
-        self.set_u(u)
+        return float(np.clip(u, lower, upper))
+
+    ########################################
+    def coast(self):
+        """Neutro real: nao deixa o integral do PI manter tracao residual."""
+        self.vref = 0.0
+        self.u = 0.0
+        self.vel_error_integral = 0.0
+        self._control_mode = "coast"
+        self.atuador.set_neutral()
+
+    ########################################
+    def brake(self):
+        """Mesmo PI, referencia zero e saturacao no lado de frenagem."""
+        # A velocidade sem filtro corta o freio antes que o filtro indique
+        # a parada, evitando continuar aplicando reverso com as rodas paradas.
+        if (
+            self.emergencia or not self.velocity_valid
+            or self.v_raw <= self.adas.config.stop_speed
+        ):
+            self.coast()
+            return
+        if self._control_mode != "brake":
+            self.vel_error_integral = 0.0
+            self._control_mode = "brake"
+        self.vref = 0.0
+        speed = max(self.v, self.v_raw, 0.0)
+        self.u = self._velocity_pi(0.0, speed, -self.adas.config.max_brake, 0.0)
+        self.atuador.set_brake(-self.u)
+
+    ########################################
+    def set_adas_vel(self, vref, distance, valid):
+        """Seleciona roda livre/freio e aplica o controlador de velocidade."""
+        if not np.isfinite(vref) or vref < 0:
+            self.coast()
+            raise ValueError("O ADAS frontal exige referencia de velocidade >= 0")
+        self.adas_distance = float(distance)
+        self.adas_distance_valid = bool(valid and np.isfinite(distance) and distance >= 0)
+        speed = max(self.v, self.v_raw, 0.0)
+        if self.v_raw < -self.adas.config.stop_speed:
+            speed = self.v_raw
+        now = self.get_time()
+        decision = self.adas.update(
+            speed, self.adas_distance, self.adas_distance_valid,
+            float(np.clip(vref, 0.0, CAR["VELMAX"])), now,
+            speed_valid=self.velocity_valid,
+        )
+        self.adas_decision = decision
+        if decision.mode == BrakingMode.CRUISE:
+            self.set_vel(vref)
+        elif decision.mode == BrakingMode.BRAKE:
+            self.brake()
+        else:
+            self.coast()
+
+        if decision.mode != BrakingMode.CRUISE and now - self._adas_last_beep >= 0.5:
+            pattern = 0.1 if decision.mode == BrakingMode.COAST else [0.1, 0.1]
+            if self.bz.beep(pattern, silence=0.1):
+                self._adas_last_beep = now
+
+        log_key = (decision.mode, self.adas_distance_valid, self.velocity_valid)
+        if log_key != self._adas_log_key:
+            print(
+                f"ADAS,{decision.mode.name},v={speed:.3f},d={distance:.3f},"
+                f"d_coast={decision.coast_stop_distance:.3f},"
+                f"a_req={decision.required_deceleration:.3f},u={self.u:.3f},"
+                f"{decision.reason}", flush=True,
+            )
+            self._adas_log_key = log_key
+        self.save_traj()
+        return decision
 
     ########################################
     # seta throttle dos motores do veiculo
@@ -538,11 +630,18 @@ class Car:
             "x": self.p[0],
             "y": self.p[1],
             "v": self.v,
+            "v_raw": self.v_raw,
+            "velocity_valid": int(self.velocity_valid),
             "a": self.a,
             "vref": self.vref,
             "th": self.th,
             "w": self.w,
             "u": self.u,
+            "adas_mode": int(self.adas_decision.mode),
+            "obstacle_distance": self.adas_distance,
+            "obstacle_valid": int(self.adas_distance_valid),
+            "coast_stop_distance": self.adas_decision.coast_stop_distance,
+            "adas_required_deceleration": self.adas_decision.required_deceleration,
             "a_model": self.a_model,
             "a_x": self.a_x,
             "w_model": self.w_model,
@@ -550,12 +649,14 @@ class Car:
             "yaw_mag": self.yaw_mag,
         }
 
-        # se ja iniciou as trajetorias
-        try:
+        if not hasattr(self, "traj"):
+            self.traj = []
+        # step() coleta os sensores; ADAS completa a mesma amostra com
+        # a decisao e o comando, sem deslocar os logs em um ciclo.
+        if self.traj and self.traj[-1]["t"] == self.t:
+            self.traj[-1] = data
+        else:
             self.traj.append(data)
-        # se for a primeira vez
-        except:
-            self.traj = [data]
 
     ########################################
     # salva trajetoria em csv

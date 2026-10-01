@@ -86,6 +86,7 @@ class Servos:
 		
 		# derivada do pwm
 		self.dth_pwm = 0.0
+		self.braking = False
 		# inicializa tracao
 		self.th_pwm = np.clip(float(throttle), 0.0, self.max_throttle)
 		self._set_pwm(self.th_pwm)
@@ -112,6 +113,7 @@ class Servos:
 			with self.lock:
 				self.th_pwm = 0.0
 				self.dth_pwm = 0.0
+				self.braking = False
 			
 			# espera o carro parar
 			self._set_pwm(0.0)
@@ -138,6 +140,7 @@ class Servos:
 			with self.lock:
 				self.th_pwm = 0.0
 				self.dth_pwm = 0.0
+				self.braking = False
 			
 			# espera o carro parar
 			self._set_pwm(0.0)
@@ -173,25 +176,20 @@ class Servos:
 			# envia comando de pan da camera/ultrasom
 			self._set_servo(SERVO_ULTRASONIC, pan_pwm)
 			
-			with self.lock:
-				if self.gear == Gear.FORWARD:
-					# envia comando de tracao (integra pwm)
-					self.th_pwm += self.dth_pwm * self.dt
-					# limita tracao com anti-windup
-					self.th_pwm = np.clip(self.th_pwm, 0.0, self.max_throttle)
-				#
-				elif self.gear == Gear.REVERSE:
-					# envia comando de tracao (integra pwm)
-					self.th_pwm -= self.dth_pwm * self.dt
-					# limita tracao com anti-windup
-					self.th_pwm = np.clip(self.th_pwm, -ZERO_THROTTLE_ANGLE, 0.0)
-				
-				# pwm final	
-				th_pwm = self.th_pwm
-			
-			# seta commando
+			# Snapshot e escrita no mesmo lock impedem reaplicar freio antigo
+			# depois que o controle ja colocou o motor em neutro.
 			with self.throttle_lock:
-				self._set_pwm(th_pwm)
+				with self.lock:
+					if not self.braking:
+						if self.gear == Gear.FORWARD:
+							self.th_pwm += self.dth_pwm * self.dt
+							self.th_pwm = np.clip(self.th_pwm, 0.0, self.max_throttle)
+						elif self.gear == Gear.REVERSE:
+							self.th_pwm -= self.dth_pwm * self.dt
+							self.th_pwm = np.clip(self.th_pwm, -ZERO_THROTTLE_ANGLE, 0.0)
+					th_pwm = self.th_pwm
+					braking = self.braking
+				self._set_pwm(th_pwm, braking=braking)
 			
 			# espera terminar o periodo
 			elapsed_time = time.monotonic() - start_time
@@ -199,13 +197,15 @@ class Servos:
 	
 	########################################
 	# seta PWM do motor
-	def _set_pwm(self, pwm):
+	def _set_pwm(self, pwm, braking=False):
 		
 		# aplica calibracao devido a reducoes do eixo
 		pwm += self.trim_throttle + ZERO_THROTTLE_ANGLE
 		
 		# envia comando
-		if self.gear == Gear.FORWARD:
+		if braking:
+			self.pwm = np.clip(pwm, self.min_pwm_throttle, ZERO_THROTTLE_ANGLE)
+		elif self.gear == Gear.FORWARD:
 			self.pwm = np.clip(pwm, self.min_pwm_throttle, self.max_pwm_throttle)
 		elif self.gear == Gear.REVERSE:
 			self.pwm = np.clip(pwm, np.deg2rad(0), ZERO_THROTTLE_ANGLE)
@@ -220,6 +220,7 @@ class Servos:
 		
 		# transforma torque para rad
 		with self.lock:
+			self.braking = False
 			self.dth_pwm = self.gain_torque * T
 
 	########################################
@@ -229,11 +230,29 @@ class Servos:
 		command = float(np.clip(command, 0.0, 1.0))
 
 		with self.lock:
+			self.braking = False
 			self.dth_pwm = 0.0
 			if self.gear == Gear.FORWARD:
 				self.th_pwm = command * self.max_throttle
 			else:
 				self.th_pwm = -command * self.max_throttle
+
+	########################################
+	def set_brake(self, command):
+		"""Comando reverso de frenagem frontal, sem armar a marcha re."""
+		command = float(np.clip(command, 0.0, 1.0))
+		with self.throttle_lock:
+			with self.lock:
+				self.braking = command > 0.0
+				self.dth_pwm = 0.0
+				self.th_pwm = -command * self.max_throttle
+				pwm = self.th_pwm
+			self._set_pwm(pwm, braking=command > 0.0)
+
+	########################################
+	def set_neutral(self):
+		# Mesmo caminho sincronizado: nenhum PWM de freio pendente sobrevive.
+		self.set_brake(0.0)
 	
 	########################################
 	# seta steer do veiculo (st in rad)		
