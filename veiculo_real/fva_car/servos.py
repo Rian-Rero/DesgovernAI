@@ -191,6 +191,9 @@ class Servos:
 			
 			# seta commando
 			with self.throttle_lock:
+				# rele sob o lock de escrita para nao reenviar throttle antigo apos parada
+				with self.lock:
+					th_pwm = self.th_pwm
 				self._set_pwm(th_pwm)
 			
 			# espera terminar o periodo
@@ -227,6 +230,15 @@ class Servos:
 	def set_throttle(self, command):
 
 		command = float(np.clip(command, 0.0, 1.0))
+
+		if command == 0.0:
+			# envia neutro imediatamente, sem esperar o proximo ciclo do atuador
+			with self.throttle_lock:
+				with self.lock:
+					self.dth_pwm = 0.0
+					self.th_pwm = 0.0
+				self._set_pwm(0.0)
+			return
 
 		with self.lock:
 			self.dth_pwm = 0.0

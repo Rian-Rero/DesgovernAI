@@ -53,8 +53,8 @@ class Ultrasonic:
 		self.min_range = min_range
 		self.max_range = max_range
 		
-		# ultima leitura valida
-		self.dist = 0.0
+		# distancia inicial ate receber a primeira leitura valida
+		self.dist = 0.5
 		self.valid = False
 		self.last_measurement = time.monotonic()
 

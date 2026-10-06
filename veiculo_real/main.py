@@ -14,7 +14,25 @@ import matplotlib.pyplot as plt
 import threading
 import time
 
-MAIN_VEL = 1.0  # m/s
+MAIN_VEL = 1.5  # m/s
+OBSTACLE_DISTANCE = 0.20  # m: margem desejada entre o carro parado e o obstaculo
+STOP_REACTION_TIME = 0.30  # s: atraso de leitura e atuacao
+STOP_DECELERATION = 1.75  # m/s²: ajuste experimental, calibrar com a parada real
+
+
+def stopping_distance(velocity):
+    """Distancia de parada [m] para velocidade [m/s].
+
+    De v_final² = v² - 2*a*d, com v_final = 0:
+    d = margem + |v|*tempo_reacao + v²/(2*a).
+    a representa a desaceleracao efetiva ao cortar o throttle.
+    """
+    speed = abs(velocity)
+    return (
+        OBSTACLE_DISTANCE
+        + speed * STOP_REACTION_TIME
+        + speed ** 2 / (2.0 * STOP_DECELERATION)
+    )
 
 
 ########################################
@@ -49,7 +67,7 @@ def vision_func(car, vision_data, stop_event):
 if __name__ == "__main__":
 
     parameters = {
-        "ts": 50.0,
+        "ts": 20.0,
         "save": True,
         "logfile": "logs/",
         "camera": False,
@@ -84,6 +102,8 @@ if __name__ == "__main__":
             plt.figure(1)
 
         t_plot = time.monotonic()
+        obstacle_detected = False
+        next_stop_beep = 0.0
 
         # controle fica na thread principal
         while car.t < parameters["ts"]:
@@ -98,9 +118,29 @@ if __name__ == "__main__":
             # ultrassom
             dist, valid = car.get_distance()
 
-            if (not valid) or (dist < 0.20):
-                print(f"Colisao: distance {dist:.2f} [m]")
-                car.set_vel(0.0)
+            # margem fixa + percurso durante o atraso + distancia de desaceleracao
+            speed = abs(car.v)
+            stop_distance = stopping_distance(car.v)
+
+            # uma deteccao valida trava a parada ate o fim do ensaio
+            if not obstacle_detected and valid and dist <= stop_distance:
+                obstacle_detected = True
+                print(
+                    f"Obstaculo a {dist:.2f} m | velocidade {speed:.2f} m/s | "
+                    f"limiar {stop_distance:.2f} m: parada travada ate o fim do ensaio.",
+                    flush=True,
+                )
+
+            if obstacle_detected:
+                car._set_ref(0.0)
+                car.vel_error_integral = 0.0
+                # corta o throttle mesmo se o PI tiver erro acumulado
+                car.set_u(0.0)
+                # aviso periodico em thread, sem bloquear o controle de parada
+                now = time.monotonic()
+                if now >= next_stop_beep:
+                    if car.bz.beep([0.15, 0.15], silence=0.15):
+                        next_stop_beep = now + 1.0
             else:
                 car.set_vel(MAIN_VEL)
 
