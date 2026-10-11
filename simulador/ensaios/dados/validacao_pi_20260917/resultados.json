@@ -1,0 +1,57 @@
+{
+  "kp": 4.0,
+  "ki": 4.0,
+  "sample_time_s": 0.05,
+  "velocity_filter_time_s": 0.03,
+  "reference_m_s": 1.5,
+  "validation": "CoppeliaSim 4.10.0, Bullet 2.78; trechos retos e planos; 10 s por pista",
+  "display_timing": {
+    "sim_seconds": 6.05,
+    "wall_seconds": 6.0240587519999735,
+    "backend": "Matplotlib Agg, com aquisicao de camera e renderizacao do painel"
+  },
+  "trials": [
+    {
+      "scene": "cones",
+      "reference_m_s": 1.5,
+      "settling_2percent_s": 2.3,
+      "steady_mean_error_m_s": 0.0001565972603719379,
+      "steady_raw_rmse_m_s": 0.00026006815457004683,
+      "steady_filtered_rmse_m_s": 0.0002509234856577735,
+      "steady_speed_range": [
+        1.4994057578545126,
+        1.500528040867028
+      ],
+      "steady_command_std": 0.0010854013382534742,
+      "overshoot_percent": 2.041632159946438,
+      "wall_seconds_without_plot_or_pacing": 4.174440202000028,
+      "rpc_per_step": 3.0,
+      "command_range": [
+        0.08956414658263612,
+        0.9999999999999999
+      ],
+      "scene_sha256": "3df2a88005e86a300e2fd2c7fada5abbd74c984a38472f398ef4c719a154040e"
+    },
+    {
+      "scene": "rampa",
+      "reference_m_s": 1.5,
+      "settling_2percent_s": 1.800000000000001,
+      "steady_mean_error_m_s": 2.9417708872425673e-05,
+      "steady_raw_rmse_m_s": 6.697739602329587e-05,
+      "steady_filtered_rmse_m_s": 5.7174127682257825e-05,
+      "steady_speed_range": [
+        1.4998046079638363,
+        1.5000685522857171
+      ],
+      "steady_command_std": 0.00020277403187167825,
+      "overshoot_percent": 1.5232141467785398,
+      "wall_seconds_without_plot_or_pacing": 4.314019675999987,
+      "rpc_per_step": 3.0,
+      "command_range": [
+        0.09974483331225026,
+        0.9999999999999999
+      ],
+      "scene_sha256": "bcc77fba3bc05c67e8b958e28af2c2d3d28d5ad24588c526d53857580505417b"
+    }
+  ]
+}
