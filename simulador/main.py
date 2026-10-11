@@ -104,8 +104,10 @@ class TelemetryPlot:
         self.figure.canvas.flush_events()
 
 
-def run_mission(settings=None, display=True):
+def run_mission(settings=None, display=True, control=None):
+    """Executa a missao; control(car) roda a cada passo (padrao: control_func)."""
     config = dict(parameters if settings is None else settings)
+    control = control_func if control is None else control
     car = Car(config)
     try:
         car.start_mission()
@@ -116,7 +118,7 @@ def run_mission(settings=None, display=True):
         while car.t < config["ts"]:
             if not car.step():
                 break
-            control_func(car)
+            control(car)
             now = time.perf_counter()
             if telemetry is not None and now >= next_display:
                 telemetry.update(car, now - wall_start)

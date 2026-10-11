@@ -81,7 +81,10 @@ class Car:
 		
 		# comando de esterçamento
 		self.st = 0.0
-		
+
+		# ultima leitura do ultrassom [m] (nan enquanto nao for lida)
+		self.dist = np.nan
+
 		# trhead do beep
 		self.thread = None
 
@@ -503,6 +506,9 @@ class Car:
 		else:
 			dist = max_dist
 		valid = True # sempre eh valido
+		self.dist = dist
+		# registra a leitura na amostra atual do car.csv
+		self.log(dist=dist)
 		return dist, valid
 	
 	########################################
@@ -525,7 +531,8 @@ class Car:
 					'motor_pwm_percent' : self.motor_pwm_percent,
 					'coasting' : int(self.coasting),
 				}
-				
+
+
 		# se ja iniciou as trajetorias
 		try:
 			self.traj.append(data)
@@ -534,14 +541,23 @@ class Car:
 			self.traj = [data]
 		
 	########################################
+	# acrescenta colunas (escalares) a amostra atual do car.csv;
+	# amostras sem a coluna ficam com nan
+	def log(self, **values):
+		if getattr(self, 'traj', None):
+			self.traj[-1].update(values)
+
+	########################################
 	# salva trajetoria em csv
 	def save(self):
 
 		filename = os.path.join(self.logfile, 'car.csv')
 
-		header = ','.join(self.traj[0].keys())
+		# colunas extras podem surgir depois da primeira amostra: preenche com nan
+		keys = list(dict.fromkeys(k for traj in self.traj for k in traj))
+		header = ','.join(keys)
 
-		data = np.array([list(traj.values()) for traj in self.traj])
+		data = np.array([[traj.get(k, np.nan) for k in keys] for traj in self.traj], dtype=float)
 
 		np.savetxt(filename, data, delimiter=',', header=header, comments='')
 			

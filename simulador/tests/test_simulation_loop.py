@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -58,6 +59,19 @@ class SimulationLoopTests(unittest.TestCase):
         self.assertEqual(car.v, 1.5)
         self.assertAlmostEqual(car.a, 30)
         np.testing.assert_array_equal(car.p, [1, 2])
+
+    def test_logged_columns_go_to_current_sample_and_missing_are_nan(self):
+        car = Car.__new__(Car)
+        car.traj = [{'t': 0.0}, {'t': 0.05}]
+        car.log(dist=1.5, aeb=1)
+        with tempfile.TemporaryDirectory() as folder:
+            car.logfile = folder
+            car.save()
+            lines = Path(folder, 'car.csv').read_text().splitlines()
+        self.assertEqual(lines[0], 't,dist,aeb')
+        first, second = (np.array(line.split(','), dtype=float) for line in lines[1:])
+        self.assertTrue(np.isnan(first[1:]).all())
+        np.testing.assert_array_equal(second, [0.05, 1.5, 1])
 
     def test_first_step_initializes_script_before_reading_state(self):
         car = Car.__new__(Car)
