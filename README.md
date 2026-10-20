@@ -11,6 +11,10 @@
 
 #### Veículo no simulador CoppeliaSim
 
+O ensaio de seguimento da linha amarela com Stanley lateral e PI longitudinal
+esta documentado em [simulador/STANLEY.md](simulador/STANLEY.md), incluindo
+execucao, calibracao da camera e etapas para a futura transferencia ao carro real.
+
 <p align="center">
   <img src="https://github.com/GTI-UFMG/fundamentos_veiculos_autonomos/assets/64908110/b34f42c4-b19c-490e-b646-385c06bc5b52" alt="Alt text" width="400">
 </p>

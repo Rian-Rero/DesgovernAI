@@ -19,7 +19,7 @@ DISPLAY_RATE = 10.0  # Hz
 TELEMETRY_RESOLUTION = (2304, 1344)  # pixels
 TELEMETRY_DPI = 100
 parameters = {
-    "ts": 20.0,
+    "ts": 3.0,
     "save": True,
     "logfile": "logs/",
     "beep": True,
@@ -35,6 +35,8 @@ def control_func(car):
 
 
 def vision_func(car):
+    if getattr(car, "vision_frame", None) is not None:
+        return car.vision_frame
     return car.get_image(gray=False)
 
 
@@ -45,10 +47,14 @@ class TelemetryPlot:
         self.figure = plt.figure(
             figsize=(width / TELEMETRY_DPI, height / TELEMETRY_DPI), dpi=TELEMETRY_DPI
         )
-        grid = self.figure.add_gridspec(2, 2, height_ratios=(1.2, 1))
+        lateral = car.parameters.get("lateral_telemetry", False)
+        rows = (1.2, 1, 1) if lateral else (1.2, 1)
+        grid = self.figure.add_gridspec(len(rows), 2, height_ratios=rows)
         camera = self.figure.add_subplot(grid[0, :])
         self.velocity_axis = self.figure.add_subplot(grid[1, 0])
-        self.control_axis = self.figure.add_subplot(grid[1, 1], sharex=self.velocity_axis)
+        self.control_axis = self.figure.add_subplot(
+            grid[1, 1], sharex=self.velocity_axis
+        )
         self.image = camera.imshow(vision_func(car))
         camera.axis("off")
         (self.measured,) = self.velocity_axis.plot([], [], label="Velocidade medida")
@@ -76,6 +82,26 @@ class TelemetryPlot:
         self.control_axis.axhline(0, color="gray", linewidth=0.8)
         self.control_axis.grid(True)
         self.control_axis.legend()
+        self.lateral_lines = None
+        if lateral:
+            error_axis = self.figure.add_subplot(grid[2, 0], sharex=self.velocity_axis)
+            steer_axis = self.figure.add_subplot(grid[2, 1], sharex=self.velocity_axis)
+            (error_line,) = error_axis.plot(
+                [], [], color="tab:red", label="Erro lateral estimado"
+            )
+            (steer_line,) = steer_axis.plot(
+                [], [], color="tab:purple", label="Stanley (esquerda +)"
+            )
+            error_axis.set(
+                xlabel="Tempo (s)", ylabel="Erro lateral (m)", ylim=(-0.5, 0.5)
+            )
+            steer_axis.set(
+                xlabel="Tempo (s)", ylabel="Estercamento (graus)", ylim=(-22, 22)
+            )
+            for axis in (error_axis, steer_axis):
+                axis.grid(True)
+                axis.legend()
+            self.lateral_lines = (error_line, steer_line)
         for axis in (self.velocity_axis, self.control_axis):
             axis.tick_params(labelsize=12)
             axis.xaxis.label.set_size(14)
@@ -97,6 +123,19 @@ class TelemetryPlot:
         self.measured.set_data(t, [state["v"] for state in trajectory])
         self.reference.set_data(t, [state["vref"] for state in trajectory])
         self.pwm.set_data(t, [state["motor_pwm_percent"] for state in trajectory])
+        if self.lateral_lines is not None:
+            import math
+
+            self.lateral_lines[0].set_data(
+                t, [state.get("cross_track_m", math.nan) for state in trajectory]
+            )
+            self.lateral_lines[1].set_data(
+                t,
+                [
+                    math.degrees(state.get("stanley_delta_rad", math.nan))
+                    for state in trajectory
+                ],
+            )
         self.title.set_text(
             f"t = {car.t:.2f} s | ritmo = {car.t/max(elapsed, 1e-9):.2f}x"
         )
