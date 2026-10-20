@@ -1,0 +1,247 @@
+{
+  "scene": "cones",
+  "speeds": [
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5
+  ],
+  "repetitions": 3,
+  "car_parameters": {
+    "VELMAX": 2.5,
+    "ACCELMAX": 1.0,
+    "STEERMAX": 0.3490658503988659,
+    "MASS": 6.3,
+    "L": 0.302,
+    "RW": 0.08,
+    "MI": 0.05,
+    "GRAV": 9.81
+  },
+  "track": {
+    "file": "simulador_cones.ttt",
+    "start": [
+      -24.0,
+      -8.45
+    ],
+    "end_x": 21.0
+  },
+  "input_alignment": "u(t) held on [t, t_next)",
+  "speed_measurement": "signed projection on Car local Z; no filter",
+  "trials": [
+    {
+      "file": "banguela_0.50ms_rep01.csv",
+      "target": 0.5,
+      "release": {
+        "t": 3.149999999999997,
+        "v": 0.48895256289288647,
+        "x": -22.870769014621196
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 4.149999999999993,
+      "repetition": 1
+    },
+    {
+      "file": "banguela_0.50ms_rep02.csv",
+      "target": 0.5,
+      "release": {
+        "t": 3.149999999999997,
+        "v": 0.48946930749238665,
+        "x": -22.870486579375918
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 4.149999999999993,
+      "repetition": 2
+    },
+    {
+      "file": "banguela_0.50ms_rep03.csv",
+      "target": 0.5,
+      "release": {
+        "t": 3.149999999999997,
+        "v": 0.4890337030863764,
+        "x": -22.870477356248568
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 4.149999999999993,
+      "repetition": 3
+    },
+    {
+      "file": "banguela_1.00ms_rep01.csv",
+      "target": 1.0,
+      "release": {
+        "t": 4.199999999999993,
+        "v": 0.9992340942058815,
+        "x": -20.670807885287733
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 6.0499999999999865,
+      "repetition": 1
+    },
+    {
+      "file": "banguela_1.00ms_rep02.csv",
+      "target": 1.0,
+      "release": {
+        "t": 4.149999999999993,
+        "v": 1.0000406408618125,
+        "x": -20.720994041921468
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 5.999999999999987,
+      "repetition": 2
+    },
+    {
+      "file": "banguela_1.00ms_rep03.csv",
+      "target": 1.0,
+      "release": {
+        "t": 4.199999999999993,
+        "v": 0.9993383057710611,
+        "x": -20.670228912047673
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 6.0499999999999865,
+      "repetition": 3
+    },
+    {
+      "file": "banguela_1.50ms_rep01.csv",
+      "target": 1.5,
+      "release": {
+        "t": 4.449999999999992,
+        "v": 1.5001440423435404,
+        "x": -18.880959437134322
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 7.099999999999983,
+      "repetition": 1
+    },
+    {
+      "file": "banguela_1.50ms_rep02.csv",
+      "target": 1.5,
+      "release": {
+        "t": 4.449999999999992,
+        "v": 1.5004016517816745,
+        "x": -18.882908713213222
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 7.099999999999983,
+      "repetition": 2
+    },
+    {
+      "file": "banguela_1.50ms_rep03.csv",
+      "target": 1.5,
+      "release": {
+        "t": 4.449999999999992,
+        "v": 1.4999683895388336,
+        "x": -18.88355239736942
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 7.099999999999983,
+      "repetition": 3
+    },
+    {
+      "file": "banguela_2.00ms_rep01.csv",
+      "target": 2.0,
+      "release": {
+        "t": 4.799999999999991,
+        "v": 2.000723180754859,
+        "x": -16.92897532228908
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 8.249999999999982,
+      "repetition": 1
+    },
+    {
+      "file": "banguela_2.00ms_rep02.csv",
+      "target": 2.0,
+      "release": {
+        "t": 4.799999999999991,
+        "v": 2.0006732227617614,
+        "x": -16.938525686297098
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 8.249999999999982,
+      "repetition": 2
+    },
+    {
+      "file": "banguela_2.00ms_rep03.csv",
+      "target": 2.0,
+      "release": {
+        "t": 4.799999999999991,
+        "v": 2.000962867144681,
+        "x": -16.932639604381688
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 8.249999999999982,
+      "repetition": 3
+    },
+    {
+      "file": "banguela_2.50ms_rep01.csv",
+      "target": 2.5,
+      "release": {
+        "t": 5.09999999999999,
+        "v": 2.499302118204868,
+        "x": -15.035815104320696
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 9.349999999999998,
+      "repetition": 1
+    },
+    {
+      "file": "banguela_2.50ms_rep02.csv",
+      "target": 2.5,
+      "release": {
+        "t": 5.09999999999999,
+        "v": 2.499325111530091,
+        "x": -15.053188824460118
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 9.349999999999998,
+      "repetition": 2
+    },
+    {
+      "file": "banguela_2.50ms_rep03.csv",
+      "target": 2.5,
+      "release": {
+        "t": 5.09999999999999,
+        "v": 2.4991531925137034,
+        "x": -15.044320011200375
+      },
+      "complete": true,
+      "reason": "parou_em_banguela",
+      "end_time": 9.399999999999999,
+      "repetition": 3
+    }
+  ],
+  "failed_attempts": [
+    {
+      "file": "banguela_2.50ms_rep02_incompleto_191729_308148.csv",
+      "target": 2.5,
+      "release": {
+        "t": 5.09999999999999,
+        "v": 2.499325111530091,
+        "x": -15.053188824460118
+      },
+      "complete": false,
+      "reason": "desvio_lateral",
+      "end_time": 7.94999999999998,
+      "repetition": 2
+    }
+  ],
+  "lateral_limit_m": 1.4,
+  "scene_sha256": "a4efe9e6530f733a65cdb76d0685b887222fc0d407616ea68905bb8cec952a7f",
+  "simulator": "CoppeliaSim 4.10.0 rev 0; Bullet 2.78",
+  "sample_time_s": 0.05
+}

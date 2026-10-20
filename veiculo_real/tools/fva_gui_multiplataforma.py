@@ -1,0 +1,1577 @@
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+########################################
+# Disciplina: Topicos em Engenharia de Controle e Automacao IV (ENG075): 
+# Fundamentos de Veiculos Autonomos - 2026/2
+# Professores: Armando Alves Neto e Leonardo A. Mozelli
+# Cursos: Engenharia de Controle e Automacao
+# DELT - Escola de Engenharia
+# Universidade Federal de Minas Gerais
+########################################
+# GUI Tkinter para envio de arquivos e execução remota em múltiplas Raspberry Pis,
+# com senha SSH padrão (DEFAULT_PASS) pré-preenchida no campo.
+
+import os
+import codecs
+import queue
+import re
+import posixpath
+import platform
+import shlex
+import socket
+import subprocess
+import threading
+import stat
+import time
+
+import paramiko
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+########################################
+# Configurações (ajuste aqui)
+########################################
+SSH_USER = "alunos"
+DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp123"
+DEFAULT_DEST = "/home/alunos/Desktop/fva"
+
+MACS_CARS = {
+	'verde':    '2c:cf:67:1c:29:4a',
+	'vermelho': 'd8:3a:dd:f1:8a:4f',
+	'roxo':     '2c:cf:67:1c:29:07'
+}
+
+COLORS = {
+	'verde':    '#00cc00',
+	'vermelho': '#cc0000',
+	'roxo':     '#8000cc'
+}
+
+CAR_ICON = "🚗 "
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+STREAM_READY_MARKER = "__FVA_STREAM_READY__"
+
+
+def build_remote_command(raw_cmd, remote_workdir):
+	"""Prepara o comando sem deixar o Python acumular a saída."""
+	# O padrão original também casa com a linha do shell que executa pkill.
+	if shlex.split(raw_cmd) == ["pkill", "-f", "python3.*main.py"]:
+		raw_cmd = "pkill -f '[p]ython3.*main.py'"
+
+	raw_cmd = re.sub(
+		r"^((?:[^\s]+/)?python(?:[23](?:\.\d+)?)?)(?=\s|$)(?!\s+-u(?:\s|$))",
+		r"\1 -u",
+		raw_cmd,
+		count=1,
+	)
+	return (
+		f"export PYTHONUNBUFFERED=1; cd {shlex.quote(remote_workdir)} "
+		f"&& {{ printf '{STREAM_READY_MARKER}\\n'; {raw_cmd}\n}}"
+	)
+
+
+def iter_channel_lines(channel, on_chunk=None, on_idle=None):
+	"""Consome bytes disponíveis imediatamente e remonta linhas fragmentadas."""
+	decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+	pending = ""
+	channel.settimeout(0.1)
+	while True:
+		try:
+			chunk = channel.recv(32768)
+		except socket.timeout:
+			if on_idle is not None:
+				on_idle(len(pending))
+			continue
+
+		if not chunk:
+			pending += decoder.decode(b"", final=True)
+			if pending.strip():
+				yield pending
+			return
+
+		if on_chunk is not None:
+			on_chunk(len(chunk))
+		pending += decoder.decode(chunk)
+		# Aceita LF, CRLF e saída de terminal delimitada apenas por CR.
+		lines = re.split(r"\r\n|[\r\n]", pending)
+		pending = lines.pop()
+		for line in lines:
+			if line.strip():
+				yield line
+		if on_idle is not None:
+			on_idle(len(pending))
+
+
+def parse_telemetry_line(line: str):
+	"""Converte uma linha DATA nos campos usados pelos gráficos.
+
+	Aceita tanto o formato atual, que inclui os percentuais do controle e do
+	PWM, quanto o formato antigo sem esses dois campos.
+	"""
+	clean_line = ANSI_ESCAPE_RE.sub("", line).strip()
+	parts = clean_line.split(",")
+
+	if not parts or parts[0] != "DATA":
+		raise ValueError("linha não é de telemetria")
+
+	if len(parts) == 12:
+		(
+			_, t, x, y, v, vref, a, u,
+			control_percent, motor_pwm_percent, w, th,
+		) = parts
+	elif len(parts) == 10:
+		_, t, x, y, v, vref, a, u, w, th = parts
+		control_percent = motor_pwm_percent = "nan"
+	else:
+		raise ValueError(
+			f"quantidade de campos inesperada: {len(parts) - 1}"
+		)
+
+	return {
+		"t": float(t),
+		"x": float(x),
+		"y": float(y),
+		"v": float(v),
+		"vref": float(vref),
+		"a": float(a),
+		"u": float(u),
+		"control_percent": float(control_percent),
+		"motor_pwm_percent": float(motor_pwm_percent),
+		"w": float(w),
+		"th": float(th),
+	}
+
+########################################
+# Utilitários de rede multiplataforma
+########################################
+def normalize_mac(mac: str) -> str:
+	mac = mac.strip().lower()
+	mac = re.sub(r'[^0-9a-f]', '', mac)
+	if len(mac) != 12:
+		raise ValueError(f"MAC inválido: {mac}")
+	return ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+
+########################################
+def ping_host(host: str) -> bool:
+	"""Envia um ping curto em Windows, Linux ou macOS."""
+	if platform.system() == "Windows":
+		cmd = ["ping", "-n", "1", "-w", "700", host]
+	else:
+		cmd = ["ping", "-c", "1", "-W", "1", host]
+	try:
+		return subprocess.run(
+			cmd,
+			stdout=subprocess.DEVNULL,
+			stderr=subprocess.DEVNULL,
+			check=False,
+		).returncode == 0
+	except Exception:
+		return False
+
+########################################
+def parse_arp_table():
+	"""Retorna pares (IP, MAC) usando as tabelas ARP disponíveis no SO."""
+	entries = []
+	commands = []
+	if platform.system() == "Windows":
+		commands.append(["arp", "-a"])
+	else:
+		commands.extend([["ip", "neigh"], ["arp", "-n"], ["arp", "-a"]])
+
+	for cmd in commands:
+		try:
+			out = subprocess.check_output(cmd, text=True, errors="ignore")
+		except Exception:
+			continue
+
+		for line in out.splitlines():
+			ip_match = re.search(r'(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])', line)
+			mac_match = re.search(r'([0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5})', line)
+			if ip_match and mac_match:
+				try:
+					entries.append((ip_match.group(1), normalize_mac(mac_match.group(1))))
+				except ValueError:
+					pass
+
+	return list(dict.fromkeys(entries))
+
+########################################
+def find_ip_by_mac_arptable(target_mac: str):
+	try:
+		target_mac = normalize_mac(target_mac)
+	except Exception:
+		return None
+
+	for ip, mac in parse_arp_table():
+		if mac == target_mac:
+			return ip
+	return None
+
+########################################
+# Interface Principal
+########################################
+class RsyncGUI(tk.Tk):
+	# taxa fixa de redesenho do grafico (Hz != taxa de amostragem da telemetria)
+	PLOT_REFRESH_MS = 66  # ~15 Hz, fluido sem sobrecarregar o mainloop do Tk
+	UI_QUEUE_REFRESH_MS = 25
+	NO_TELEMETRY_WARNING_SECONDS = 3.0
+	TELEMETRY_STALE_WARNING_SECONDS = 3.0
+
+	def __init__(self):
+		super().__init__()
+		self.title("FVA - gerenciador de controle")
+		self.geometry("1024x720")
+		#self.attributes("-fullscreen", True)
+		#self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
+		self.devices = {}
+		self.selected_files = []
+		self.telemetry = {}
+		self.telemetry_lock = threading.Lock()
+		self._plot_dirty = False
+		self._ui_thread_id = threading.get_ident()
+		self._ui_queue = queue.Queue()
+		self._plot_session_active = False
+		self._plot_session_started_at = None
+		self._plot_no_data_warned = False
+		self._plot_stale_warned = False
+		self._plot_last_error = None
+		self._active_stream = None
+		self._plot_stats = self._new_plot_stats()
+		self._build_ui()
+		# preenche a senha padrão (se houver)
+		if DEFAULT_PASS:
+			self.pass_entry.insert(0, DEFAULT_PASS)
+		self.after(
+					200,
+					lambda: threading.Thread(
+						target=self.refresh_ips,
+						daemon=True
+					).start()
+				)
+
+		# redesenha o grafico em uma taxa fixa, independente da taxa de
+		# chegada da telemetria (que pode ser bem mais rapida, ~50 Hz),
+		# evitando que os redraws se acumulem numa fila crescente.
+		self.after(self.UI_QUEUE_REFRESH_MS, self._process_ui_queue)
+		self.after(self.PLOT_REFRESH_MS, self._plot_tick)
+
+		# aumenta fontes
+		style = ttk.Style()
+		style.configure(".", font=("Arial", 14))
+		style.configure("TButton", font=("Arial", 14))
+		style.configure("TLabel", font=("Arial", 14))
+		style.configure("TCheckbutton", font=("Arial", 14))
+		style.configure("TNotebook.Tab", font=("Arial", 14, "bold"), padding=[12, 8])
+
+	########################################
+	def _build_ui(self):
+
+		########################################
+		# Cabecalho
+		########################################
+		header = ttk.Frame(self)
+		header.pack(fill="x", padx=15, pady=(10, 5))
+
+		# titulo
+		title_frame = ttk.Frame(header)
+		title_frame.pack(side="left")
+
+		ttk.Label(
+			title_frame,
+			text="FVA — Fundamentos de Veículos Autônomos",
+			font=("Arial", 18, "bold")
+		).pack(anchor="w")
+
+		ttk.Label(
+			title_frame,
+			text="Gerenciador dos Veículos Experimentais",
+			font=("Arial", 12)
+		).pack(anchor="w")
+
+		# logo UFMG
+		BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+		logo_path = os.path.join(BASE_DIR, "assets", "ufmg_logo.png")
+		self.ufmg_logo = tk.PhotoImage(file=logo_path)
+		# reduz a imagem pela metade
+		self.ufmg_logo = self.ufmg_logo.subsample(6, 6)
+
+		ttk.Label(
+			header,
+			image=self.ufmg_logo
+		).pack(side="right")
+
+		########################################
+		# Abas
+		########################################	
+		notebook = ttk.Notebook(self)
+		notebook.pack(fill="both", expand=True)
+
+		self.tab_home = tk.Frame(notebook, bg="black")
+		self.tab_files = ttk.Frame(notebook)
+		self.tab_cmds = ttk.Frame(notebook)
+		self.tab_data = ttk.Frame(notebook)
+
+		notebook.add(self.tab_home, text="🏠 Início")
+		notebook.add(self.tab_files, text="📂 Enviar Arquivos")
+		notebook.add(self.tab_cmds, text="💻 Executar Comandos")
+		notebook.add(self.tab_data, text="📊 Coletar Dados")
+
+		self._build_tab_home(self.tab_home)
+		self._build_tab_files(self.tab_files)
+		self._build_tab_cmds(self.tab_cmds)
+		self._build_tab_data(self.tab_data)
+
+	########################################
+	def ui(self, func, *args, **kwargs):
+		"""Executa callbacks do Tk somente na thread que criou a interface."""
+		if threading.get_ident() == self._ui_thread_id:
+			func(*args, **kwargs)
+		else:
+			self._ui_queue.put((func, args, kwargs))
+
+	########################################
+	def _process_ui_queue(self):
+		"""Consome callbacks produzidos pelas threads SSH/SFTP."""
+		try:
+			for _ in range(500):
+				try:
+					func, args, kwargs = self._ui_queue.get_nowait()
+				except queue.Empty:
+					break
+
+				try:
+					func(*args, **kwargs)
+				except Exception as exc:
+					func_name = getattr(func, "__name__", type(func).__name__)
+					self._plot_diag_write(
+						"ERRO",
+						f"Falha ao atualizar a interface em {func_name}: "
+						f"{type(exc).__name__}: {exc}",
+					)
+		finally:
+			try:
+				self.after(self.UI_QUEUE_REFRESH_MS, self._process_ui_queue)
+			except tk.TclError:
+				pass
+	
+	########################################
+	def _build_tab_home(self, parent):
+
+		BASE_DIR = os.path.dirname(
+			os.path.dirname(os.path.abspath(__file__))
+		)
+
+		image_path = os.path.join(
+			BASE_DIR,
+			"assets",
+			"wallpaper_fva.png"
+		)
+
+		# carrega a imagem
+		self.home_image = tk.PhotoImage(file=image_path)
+
+		# label com fundo preto
+		label = tk.Label(
+			parent,
+			image=self.home_image,
+			bg="black",
+			borderwidth=0,
+			highlightthickness=0
+		)
+
+		# centraliza horizontal e verticalmente
+		label.place(
+			relx=0.5,
+			rely=0.5,
+			anchor="center"
+		)
+	
+	########################################
+	def _build_tab_files(self, parent):
+		top = ttk.Frame(parent)
+		top.pack(fill="x", padx=10, pady=8)
+		ttk.Label(top, text="Dispositivos detectados (cor quando encontrados):").pack(anchor="w")
+		self.devices_frame = ttk.Frame(top)
+		self.devices_frame.pack(fill="x", padx=4, pady=6)
+
+		# Linhas de dispositivos (cor apenas quando IP é encontrado)
+		for i, (name, mac) in enumerate(MACS_CARS.items()):
+			var = tk.IntVar(value=0)
+			cb = ttk.Checkbutton(self.devices_frame, text=f"{CAR_ICON}{name.upper()} — {mac}",
+								 variable=var, style="Default.TCheckbutton")
+			cb.grid(row=i, column=0, sticky="w", padx=4, pady=2)
+			ip_label = tk.Label(self.devices_frame, text="... buscando ...", width=22,
+								fg="white", font=("Arial", 10, "bold"))
+			ip_label.grid(row=i, column=1, sticky="w", pady=2)
+			self.devices[name] = {"mac": mac, "ip_label": ip_label, "cb": cb, "var": var, "ip": None}
+
+		# Botões de ação
+		btns = ttk.Frame(parent)
+		btns.pack(fill="x", padx=6, pady=6)
+		ttk.Button(
+					btns,
+					text="Atualizar IPs",
+					command=lambda: threading.Thread(
+						target=self.refresh_ips,
+						daemon=True
+					).start()
+				).pack(side="left", padx=4)
+		ttk.Button(btns, text="Selecionar arquivos…", command=self.select_files).pack(side="left", padx=4)
+		ttk.Button(btns, text="Adicionar pasta…", command=self.add_directory).pack(side="left", padx=4)
+		ttk.Button(btns, text="Remover selecionado(s)", command=self.remove_selected).pack(side="left", padx=4)
+		ttk.Button(btns, text="Limpar seleção", command=self.clear_files).pack(side="left", padx=4)
+
+		# Lista de arquivos/pastas
+		ttk.Label(parent, text="Arquivos/Pastas selecionados:").pack(anchor="w", padx=10)
+		self.files_listbox = tk.Listbox(parent, height=6, selectmode="extended")
+		self.files_listbox.pack(fill="x", padx=10, pady=(2, 6))
+
+		# Destino remoto (USADO TAMBÉM NA ABA DE COMANDOS)
+		dest_frame = ttk.Frame(parent)
+		dest_frame.pack(fill="x", padx=10, pady=6)
+		ttk.Label(dest_frame, text="Destino na Raspberry (também será o diretório de trabalho dos comandos):").pack(side="left")
+		self.dest_entry = ttk.Entry(dest_frame)
+		self.dest_entry.insert(0, DEFAULT_DEST)
+		self.dest_entry.pack(side="left", fill="x", expand=True, padx=8)
+
+		# SSH / SFTP (Paramiko)
+		opt = ttk.Frame(parent)
+		opt.pack(fill="x", padx=10, pady=6)
+		ttk.Label(opt, text="Usuário:").pack(side="left")
+		self.user_entry = ttk.Entry(opt, width=14)
+		self.user_entry.insert(0, SSH_USER)
+		self.user_entry.pack(side="left", padx=4)
+		ttk.Label(opt, text="Senha:").pack(side="left", padx=(8, 0))
+		self.pass_entry = ttk.Entry(opt, width=14, show="*")
+		self.pass_entry.pack(side="left", padx=4)
+		ttk.Label(opt, text="Transferência: SFTP (multiplataforma)").pack(side="left", padx=(12, 0))
+
+		# Envio
+		send = ttk.Frame(parent)
+		send.pack(fill="x", padx=10, pady=6)
+		ttk.Button(send, text="Enviar para selecionados", command=self.send_to_selected).pack(side="left", padx=4)
+		ttk.Button(send, text="Enviar para todos (com IP)", command=self.send_to_all).pack(side="left", padx=4)
+
+		# Log
+		log_frame = ttk.Frame(parent)
+		log_frame.pack(fill="both", expand=True, padx=10, pady=8)
+		ttk.Label(log_frame, text="Log:").pack(anchor="w")
+		self.log = scrolledtext.ScrolledText(log_frame, height=10)
+		self.log.pack(fill="both", expand=True)
+		self.log.configure(state="disabled")
+
+		# estilos
+		style = ttk.Style()
+		style.configure("Default.TCheckbutton", foreground="white", font=("Arial", 10))
+		for n, c in COLORS.items():
+			style.configure(f"{n}.TCheckbutton", foreground=c, font=("Arial", 10, "bold"))
+
+	########################################
+	def _build_tab_cmds(self, parent):
+		ttk.Label(parent, text="Executar comandos remotos nas Raspberries selecionadas").pack(anchor="w", padx=10, pady=(10, 4))
+
+		hint = ttk.Label(parent, text="Obs.: os comandos serão executados dentro de: (aba Enviar Arquivos) → campo 'Destino na Raspberry'",
+						 foreground="#888")
+		hint.pack(anchor="w", padx=10, pady=(0, 6))
+
+		cmds_frame = ttk.Frame(parent)
+		cmds_frame.pack(fill="x", padx=10, pady=4)
+		ttk.Label(cmds_frame, text="Comandos (1 por linha):").pack(anchor="w")
+		self.cmd_text = scrolledtext.ScrolledText(cmds_frame, height=6)
+		self.cmd_text.insert(
+								"end",
+								"pkill -f '[p]ython3.*main.py'\n"
+								'python3 -u main.py\n'
+							)
+		self.cmd_text.pack(fill="x", pady=4)
+
+		self.run_cmds_button = ttk.Button(
+			parent,
+			text="Executar nos selecionados",
+			command=self.run_cmds_on_selected,
+		)
+		self.run_cmds_button.pack(pady=6)
+
+		# area inferior: grafico e terminal lado a lado
+		bottom = ttk.PanedWindow(parent, orient="horizontal")
+		bottom.pack(
+			fill="both",
+			expand=True,
+			padx=10,
+			pady=6
+		)
+
+		########################################
+		# painel do grafico
+		plot_frame = ttk.Frame(bottom)
+		
+		# seletor do grafico
+		plot_select = ttk.Frame(plot_frame)
+		plot_select.pack(fill="x", pady=(0, 5))
+
+		ttk.Label(
+			plot_select,
+			text="Gráfico:"
+		).pack(side="left", padx=(0, 5))
+
+		self.plot_var = tk.StringVar(value="Velocidade")
+
+		self.plot_combo = ttk.Combobox(
+			plot_select,
+			textvariable=self.plot_var,
+			state="readonly",
+			values=[
+				"Velocidade",
+				"Aceleração / Controle",
+				"Velocidade angular",
+				"Orientação",
+				"Trajetória XY"
+			],
+			width=24
+		)
+
+		self.plot_combo.pack(side="left")
+		
+		self.plot_combo.bind(
+			"<<ComboboxSelected>>",
+			lambda event: setattr(self, "_plot_dirty", True)
+		)
+
+		self.fig = Figure(figsize=(6, 4), dpi=100)
+		self.ax = self.fig.add_subplot(111)
+
+		self.ax.set_xlabel("Tempo [s]")
+		self.ax.set_ylabel("Velocidade [m/s]")
+		self.ax.grid(True)
+
+		diagnostic_frame = ttk.LabelFrame(
+			plot_frame,
+			text="Diagnóstico do gráfico",
+		)
+		diagnostic_frame.pack(side="bottom", fill="x", pady=(5, 0))
+
+		self.plot_status_var = tk.StringVar(value="Aguardando execução")
+		self.plot_status_label = tk.Label(
+			diagnostic_frame,
+			textvariable=self.plot_status_var,
+			anchor="w",
+			fg="#555555",
+		)
+		self.plot_status_label.pack(fill="x", padx=5, pady=(3, 1))
+		self.plot_status_label.bind(
+			"<Configure>",
+			lambda event: self.plot_status_label.configure(wraplength=max(100, event.width - 10)),
+		)
+
+		self.plot_diagnostics = scrolledtext.ScrolledText(
+			diagnostic_frame,
+			height=4,
+			font=("TkFixedFont", 9),
+			wrap="word",
+		)
+		self.plot_diagnostics.pack(fill="x", padx=5, pady=(1, 5))
+		self.plot_diagnostics.tag_configure("INFO", foreground="#1f5f99")
+		self.plot_diagnostics.tag_configure("AVISO", foreground="#9a6700")
+		self.plot_diagnostics.tag_configure("ERRO", foreground="#b42318")
+		self.plot_diagnostics.configure(state="disabled")
+
+		self.canvas = FigureCanvasTkAgg(
+			self.fig,
+			master=plot_frame
+		)
+		self.canvas.get_tk_widget().pack(
+			fill="both",
+			expand=True
+		)
+
+		########################################
+		# painel do terminal
+		terminal_frame = ttk.Frame(bottom)
+
+		ttk.Label(
+			terminal_frame,
+			text="Terminal:"
+		).pack(anchor="w")
+
+		self.cmd_log = scrolledtext.ScrolledText(
+			terminal_frame
+		)
+		self.cmd_log.pack(
+			fill="both",
+			expand=True
+		)
+		self.cmd_log.configure(state="disabled")
+
+		# adiciona os dois lados
+		bottom.add(plot_frame, weight=1)
+		bottom.add(terminal_frame, weight=1)
+
+	########################################
+	def _build_tab_data(self, parent):
+
+		ttk.Label(
+			parent,
+			text="Coletar dados dos experimentos armazenados nas Raspberries"
+		).pack(
+			anchor="w",
+			padx=10,
+			pady=(10, 6)
+		)
+
+		# dispositivos
+		devices_frame = ttk.Frame(parent)
+		devices_frame.pack(fill="x", padx=10, pady=6)
+
+		ttk.Label(
+			devices_frame,
+			text="Os carrinhos selecionados na aba 'Enviar Arquivos' serão utilizados."
+		).pack(anchor="w")
+
+		# pasta local
+		local_frame = ttk.Frame(parent)
+		local_frame.pack(fill="x", padx=10, pady=10)
+
+		ttk.Label(
+			local_frame,
+			text="Destino no computador:"
+		).pack(side="left")
+
+		self.data_dest_entry = ttk.Entry(local_frame)
+		self.data_dest_entry.insert(
+			0,
+			os.path.join(os.getcwd(), "experimentos")
+		)
+		self.data_dest_entry.pack(
+			side="left",
+			fill="x",
+			expand=True,
+			padx=8
+		)
+
+		ttk.Button(
+			local_frame,
+			text="Selecionar...",
+			command=self.select_data_destination
+		).pack(side="left")
+
+		# botao de coleta
+		ttk.Button(
+			parent,
+			text="📥 Coletar dados dos selecionados",
+			command=self.collect_data
+		).pack(
+			anchor="w",
+			padx=10,
+			pady=6
+		)
+
+		# log
+		ttk.Label(
+			parent,
+			text="Transferências:"
+		).pack(
+			anchor="w",
+			padx=10,
+			pady=(10, 2)
+		)
+
+		self.data_log = scrolledtext.ScrolledText(
+			parent,
+			height=16
+		)
+		self.data_log.pack(
+			fill="both",
+			expand=True,
+			padx=10,
+			pady=(0, 10)
+		)
+		self.data_log.configure(state="disabled")
+		
+	########################################
+	# Funções utilitárias comuns
+	########################################
+	def log_write(self, text):
+		self.log.configure(state="normal")
+		self.log.insert("end", text + "\n")
+		self.log.see("end")
+		self.log.configure(state="disabled")
+
+	########################################
+	def cmdlog_write(self, text):
+		self.cmd_log.configure(state="normal")
+		self.cmd_log.insert("end", text + "\n")
+		self.cmd_log.see("end")
+		self.cmd_log.configure(state="disabled")
+
+	########################################
+	@staticmethod
+	def _new_plot_stats():
+		return {
+			"ssh_bytes": 0,
+			"raw_lines": 0,
+			"valid_samples": 0,
+			"invalid_samples": 0,
+			"rendered_frames": 0,
+			"live_frames": 0,
+			"render_errors": 0,
+			"last_sample_at": None,
+			"samples_by_car": {},
+		}
+
+	########################################
+	def _plot_diag_write(self, level, text, event_time=None):
+		level = level if level in {"INFO", "AVISO", "ERRO"} else "INFO"
+		timestamp = time.strftime("%H:%M:%S", time.localtime(event_time))
+		self.plot_diagnostics.configure(state="normal")
+		self.plot_diagnostics.insert(
+			"end",
+			f"{timestamp} [{level}] {text}\n",
+			level,
+		)
+
+		# Evita crescimento ilimitado durante várias execuções na mesma sessão.
+		line_count = int(self.plot_diagnostics.index("end-1c").split(".")[0])
+		if line_count > 300:
+			self.plot_diagnostics.delete("1.0", "51.0")
+
+		self.plot_diagnostics.see("end")
+		self.plot_diagnostics.configure(state="disabled")
+
+	########################################
+	def _set_plot_status(self, text, level="INFO"):
+		colors = {
+			"INFO": "#1f5f99",
+			"SUCESSO": "#067647",
+			"AVISO": "#9a6700",
+			"ERRO": "#b42318",
+		}
+		self.plot_status_var.set(text)
+		self.plot_status_label.configure(fg=colors.get(level, colors["INFO"]))
+
+	########################################
+	def _start_plot_session(self, targets):
+		with self.telemetry_lock:
+			self.telemetry = {}
+			self._plot_stats = self._new_plot_stats()
+
+		self._plot_session_active = True
+		self._plot_session_started_at = time.monotonic()
+		self._plot_no_data_warned = False
+		self._plot_stale_warned = False
+		self._plot_last_error = None
+		self._active_stream = None
+		self._plot_dirty = True
+		self.run_cmds_button.configure(state="disabled")
+
+		cars = ", ".join(name.upper() for name, _ in targets)
+		self._set_plot_status("Aguardando linhas DATA da Raspberry...", "INFO")
+		self._plot_diag_write(
+			"INFO",
+			f"Nova execução iniciada para: {cars}. Leitor SSH direto v2, sem PTY.",
+		)
+
+	########################################
+	def _record_stream_chunk(self, byte_count):
+		with self.telemetry_lock:
+			stream = self._active_stream
+			first_chunk = stream["bytes"] == 0
+			stream["bytes"] += byte_count
+			self._plot_stats["ssh_bytes"] += byte_count
+			elapsed = time.monotonic() - stream["started_at"]
+			name = stream["name"]
+
+		if first_chunk:
+			self.ui(
+				self._plot_diag_write, "INFO",
+				f"[{name.upper()}] Primeiros bytes SSH após {elapsed:.2f} s "
+				f"({byte_count} bytes).",
+				time.time(),
+			)
+
+	########################################
+	def _record_stream_progress(self, pending_chars):
+		now = time.monotonic()
+		with self.telemetry_lock:
+			stream = self._active_stream
+			stream["pending_chars"] = pending_chars
+			if now - stream["reported_at"] < 5.0:
+				return
+			stream["reported_at"] = now
+			stream = dict(stream)
+			rendered = self._plot_stats["live_frames"]
+
+		self.ui(
+			self._plot_diag_write, "INFO",
+			f"[{stream['name'].upper()}] Comando ativo há "
+			f"{now - stream['started_at']:.1f} s: {stream['bytes']} bytes SSH, "
+			f"{stream['samples']} amostras, {rendered} quadros durante a execução, "
+			f"{pending_chars} caracteres aguardando fim de linha.",
+			time.time(),
+		)
+
+	########################################
+	def _store_telemetry_sample(self, name, sample):
+		with self.telemetry_lock:
+			stream = self._active_stream
+			first_sample = stream is not None and stream["samples"] == 0
+			if name not in self.telemetry:
+				self.telemetry[name] = {
+					"t": [], "x": [], "y": [], "v": [], "vref": [],
+					"a": [], "u": [], "control_percent": [],
+					"motor_pwm_percent": [], "w": [], "th": []
+				}
+
+			data = self.telemetry[name]
+			for key, value in sample.items():
+				data[key].append(value)
+
+			self._plot_stats["valid_samples"] += 1
+			self._plot_stats["last_sample_at"] = time.monotonic()
+			by_car = self._plot_stats["samples_by_car"]
+			by_car[name] = by_car.get(name, 0) + 1
+			self._plot_dirty = True
+			if stream is not None:
+				stream["samples"] += 1
+				stream["last_sample_at"] = time.monotonic()
+				stream["last_sample_t"] = sample["t"]
+				if first_sample:
+					stream["first_sample_at"] = stream["last_sample_at"]
+					stream["first_sample_t"] = sample["t"]
+					elapsed = stream["first_sample_at"] - stream["started_at"]
+
+		if first_sample:
+			self.ui(
+				self._plot_diag_write,
+				"INFO",
+				f"Primeira amostra válida de {name.upper()} após {elapsed:.2f} s "
+				f"do comando (t do experimento = {sample['t']:.3f} s).",
+				time.time(),
+			)
+
+	########################################
+	def _finish_plot_session(self):
+		self._plot_session_active = False
+		self.run_cmds_button.configure(state="normal")
+		with self.telemetry_lock:
+			stats = dict(self._plot_stats)
+
+		valid = stats["valid_samples"]
+		invalid = stats["invalid_samples"]
+		raw_lines = stats["raw_lines"]
+		if valid:
+			self._set_plot_status(
+				f"Execução concluída: {valid} amostras, "
+				f"{stats['live_frames']} quadros em tempo real.",
+				"SUCESSO" if stats["live_frames"] else "AVISO",
+			)
+			self._plot_diag_write(
+				"INFO",
+				f"Execução concluída com {valid} amostras válidas e "
+				f"{invalid} inválidas; {stats['ssh_bytes']} bytes SSH; "
+				f"{stats['live_frames']} quadros desenhados enquanto o comando estava ativo.",
+			)
+			if not stats["live_frames"]:
+				self._plot_diag_write(
+					"AVISO",
+					"Os dados chegaram, mas nenhum quadro com amostras foi desenhado "
+					"antes do fim do comando. Consulte os tempos de recepção acima.",
+				)
+		else:
+			if raw_lines == 0:
+				reason = "nenhuma linha foi recebida pela conexão SSH"
+			elif invalid:
+				reason = f"as {invalid} linhas DATA recebidas eram inválidas"
+			else:
+				reason = f"foram recebidas {raw_lines} linhas, mas nenhuma começou com DATA"
+			self._set_plot_status(f"Gráfico não gerado: {reason}.", "ERRO")
+			self._plot_diag_write("ERRO", f"Gráfico não gerado porque {reason}.")
+
+	########################################
+	def select_files(self):
+		# raiz do projeto: um nível acima da pasta tools
+		project_dir = os.path.dirname(
+			os.path.dirname(os.path.abspath(__file__))
+		)
+
+		files = filedialog.askopenfilenames(
+			title="Selecione arquivos (Ctrl/Shift para múltiplos)",
+			initialdir=project_dir
+		)
+
+		for f in files:
+			if f not in self.selected_files:
+				self.selected_files.append(f)
+				self.files_listbox.insert("end", f)
+
+	########################################
+	def add_directory(self):
+		# raiz do projeto: um nível acima da pasta tools
+		project_dir = os.path.dirname(
+			os.path.dirname(os.path.abspath(__file__))
+		)
+
+		d = filedialog.askdirectory(
+			title="Selecione uma pasta",
+			initialdir=project_dir
+		)
+
+		if d:
+			path = os.path.join(d, "")
+			if path not in self.selected_files:
+				self.selected_files.append(path)
+				self.files_listbox.insert("end", path)
+
+	########################################
+	def remove_selected(self):
+		sel = list(self.files_listbox.curselection())
+		for idx in reversed(sel):
+			val = self.files_listbox.get(idx)
+			self.files_listbox.delete(idx)
+			try:
+				self.selected_files.remove(val)
+			except ValueError:
+				pass
+
+	########################################
+	def clear_files(self):
+		self.files_listbox.delete(0, "end")
+		self.selected_files = []
+
+	########################################
+	def refresh_ips(self):
+		"""Atualiza IPs pelos MACs usando ping + tabela ARP do sistema."""
+		self.ui(self.log_write, "🔍 Atualizando IPs ...")
+
+		# Gera algum tráfego antes de consultar a tabela ARP.
+		possible_hosts = ["raspberrypi.local", "raspberrypi"]
+		for info in self.devices.values():
+			if info.get("ip"):
+				ping_host(info["ip"])
+		for host in possible_hosts:
+			ping_host(host)
+
+		arp_entries = parse_arp_table()
+		arp_by_mac = {mac: ip for ip, mac in arp_entries}
+
+		for name, info in self.devices.items():
+			try:
+				mac = normalize_mac(info["mac"])
+			except ValueError:
+				mac = ""
+			ip = arp_by_mac.get(mac)
+			info["ip"] = ip
+
+			if ip:
+				self.ui(info["ip_label"].config, text=ip, fg=COLORS.get(name, "#00ff00"))
+				self.ui(info["cb"].configure, style=f"{name}.TCheckbutton")
+				self.ui(info["var"].set, 1)
+			else:
+				self.ui(info["ip_label"].config, text="não encontrado", fg="white")
+				self.ui(info["cb"].configure, style="Default.TCheckbutton")
+
+			self.ui(self.log_write, f"{name}: {ip if ip else 'não encontrado'}")
+
+		self.ui(self.log_write, "✅ Atualização concluída.")
+
+	########################################
+	def get_selected_devices(self):
+		return [(n, i["ip"]) for n, i in self.devices.items() if i["var"].get() and i["ip"]]
+
+	########################################
+	# Envio de arquivos (aba 1)
+	########################################
+	def send_to_selected(self):
+		targets = self.get_selected_devices()
+		if not targets:
+			messagebox.showinfo("Nenhum alvo", "Selecione pelo menos uma Raspberry com IP.")
+			return
+		threading.Thread(target=self._run_sftp_for_targets, args=(targets,), daemon=True).start()
+
+	########################################
+	def send_to_all(self):
+		targets = [(n, i["ip"]) for n, i in self.devices.items() if i["ip"]]
+		threading.Thread(target=self._run_sftp_for_targets, args=(targets,), daemon=True).start()
+
+	########################################
+	def _connect_ssh(self, ip, username=None, password=None):
+		if username is None:
+			username = self.user_entry.get().strip() or SSH_USER
+			password = self.pass_entry.get().strip() or None
+
+		client = paramiko.SSHClient()
+		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+		client.connect(
+			ip,
+			username=username,
+			password=password,
+			timeout=8,
+			auth_timeout=8,
+			banner_timeout=8,
+		)
+		return client
+
+	########################################
+	def _sftp_mkdir_p(self, sftp, remote_dir):
+		remote_dir = posixpath.normpath(remote_dir)
+		parts = remote_dir.strip("/").split("/") if remote_dir != "/" else []
+		current = "/" if remote_dir.startswith("/") else ""
+		for part in parts:
+			current = posixpath.join(current, part)
+			try:
+				sftp.stat(current)
+			except IOError:
+				sftp.mkdir(current)
+
+	########################################
+	def _sftp_upload_file(self, sftp, local_path, remote_path):
+		self._sftp_mkdir_p(sftp, posixpath.dirname(remote_path))
+		sftp.put(local_path, remote_path)
+
+	########################################
+	def _sftp_upload_directory_contents(self, sftp, local_dir, remote_dir):
+		self._sftp_mkdir_p(sftp, remote_dir)
+		for root, dirs, files in os.walk(local_dir):
+			rel = os.path.relpath(root, local_dir)
+			remote_root = remote_dir if rel == "." else posixpath.join(remote_dir, *rel.split(os.sep))
+			self._sftp_mkdir_p(sftp, remote_root)
+			for dirname in dirs:
+				self._sftp_mkdir_p(sftp, posixpath.join(remote_root, dirname))
+			for filename in files:
+				self._sftp_upload_file(
+					sftp,
+					os.path.join(root, filename),
+					posixpath.join(remote_root, filename),
+				)
+
+	########################################
+	def _run_sftp_for_targets(self, targets):
+		dest = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+
+		if not self.selected_files:
+			self.ui(self.log_write, "⚠️ Nenhum arquivo ou pasta selecionado.")
+			return
+
+		missing = [p for p in self.selected_files if not os.path.exists(p)]
+		if missing:
+			self.ui(self.log_write, "❌ Itens inexistentes:")
+			for item in missing:
+				self.ui(self.log_write, "   - " + item)
+			return
+
+		for name, ip in targets:
+			self.ui(self.log_write, "=" * 60)
+			self.ui(self.log_write, f"🚀 Enviando via SFTP para {name.upper()} ({ip})")
+			client = None
+			sftp = None
+			try:
+				client = self._connect_ssh(ip)
+				sftp = client.open_sftp()
+				self._sftp_mkdir_p(sftp, dest)
+
+				for path in self.selected_files:
+					if os.path.isdir(path):
+						# Mesmo comportamento do antigo rsync com barra final:
+						# envia o CONTEÚDO da pasta para o destino.
+						self.ui(self.log_write, f"📁 {path} -> {dest}/")
+						self._sftp_upload_directory_contents(sftp, path, dest)
+					else:
+						remote_path = posixpath.join(dest, os.path.basename(path))
+						self.ui(self.log_write, f"📄 {path} -> {remote_path}")
+						self._sftp_upload_file(sftp, path, remote_path)
+
+				self.ui(self.log_write, f"✅ Sucesso: {name.upper()} ({ip})")
+			except Exception as e:
+				self.ui(self.log_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+			finally:
+				if sftp:
+					sftp.close()
+				if client:
+					client.close()
+
+		self.ui(self.log_write, "🏁 Todas as transferências finalizadas.")
+
+	########################################
+	# Execução remota (aba 2)
+	########################################
+	def run_cmds_on_selected(self):
+		if self._plot_session_active:
+			return
+		targets = self.get_selected_devices()
+		if not targets:
+			messagebox.showinfo("Nenhum alvo", "Selecione ao menos uma Raspberry com IP.")
+			return
+		cmds = [c.strip() for c in self.cmd_text.get("1.0", "end").splitlines() if c.strip()]
+		if not cmds:
+			messagebox.showinfo("Nenhum comando", "Digite ao menos um comando.")
+			return
+
+		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		username = self.user_entry.get().strip() or SSH_USER
+		password = self.pass_entry.get().strip() or None
+		self._start_plot_session(targets)
+
+		threading.Thread(
+			target=self._run_remote_cmds,
+			args=(targets, cmds, remote_workdir, username, password),
+			daemon=True,
+		).start()
+
+	########################################
+	def _run_remote_cmds(self, targets, cmds, remote_workdir, username, password):
+		try:
+			for name, ip in targets:
+				self.ui(self.cmdlog_write, "\n" + "=" * 60)
+				self.ui(self.cmdlog_write, f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
+				client = None
+				try:
+					client = self._connect_ssh(ip, username, password)
+					for raw_cmd in cmds:
+						rc = self._execute_remote_command(client, name, raw_cmd, remote_workdir)
+						if rc == 1 and shlex.split(raw_cmd)[:2] == ["pkill", "-f"]:
+							self.ui(self._plot_diag_write, "INFO", "Nenhum processo anterior para encerrar.")
+						elif rc != 0:
+							message = f"Retorno {rc} para comando: {raw_cmd}"
+							if rc == -1:
+								message += " (canal fechado sem status de saída do servidor)"
+							self.ui(self.cmdlog_write, f"⚠️ {message}")
+							self.ui(self._plot_diag_write, "ERRO", message)
+
+					self.ui(self.cmdlog_write, f"✅ Carro {name.upper()} finalizado")
+				except Exception as e:
+					self.ui(self.cmdlog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+					self.ui(
+						self._plot_diag_write, "ERRO",
+						f"Falha na execução de {name.upper()} ({ip}): {type(e).__name__}: {e}",
+						time.time(),
+					)
+				finally:
+					if client:
+						client.close()
+		finally:
+			self.ui(self._finish_plot_session)
+
+	########################################
+	def _execute_remote_command(self, client, name, raw_cmd, remote_workdir):
+		wrapped = build_remote_command(raw_cmd, remote_workdir)
+		now = time.monotonic()
+		with self.telemetry_lock:
+			self._active_stream = {
+				"name": name, "started_at": now, "reported_at": now,
+				"bytes": 0, "samples": 0, "pending_chars": 0,
+				"ready": False, "finished": False, "lines": 0,
+			}
+		self._plot_no_data_warned = False
+		self.ui(self.cmdlog_write, f"$ {wrapped}")
+		self.ui(self._plot_diag_write, "INFO", f"[{name.upper()}] Abrindo canal: {raw_cmd}", time.time())
+		channel = None
+		try:
+			transport = client.get_transport()
+			if transport is None or not transport.is_active():
+				raise RuntimeError("Conexão SSH inativa")
+			channel = transport.open_session(timeout=10)
+			channel.set_combine_stderr(True)
+			channel.settimeout(10)
+			channel.exec_command(wrapped)
+			channel.shutdown_write()
+			self.ui(
+				self._plot_diag_write, "INFO",
+				f"[{name.upper()}] Canal aberto; lendo stdout/stderr diretamente, sem PTY.",
+				time.time(),
+			)
+			for line in iter_channel_lines(
+				channel, self._record_stream_chunk, self._record_stream_progress,
+			):
+				self._handle_remote_line(name, line)
+			# Só consulta o status depois de consumir a saída até EOF.
+			return channel.recv_exit_status()
+		finally:
+			with self.telemetry_lock:
+				self._active_stream["finished"] = True
+				stream = dict(self._active_stream)
+			if channel is not None:
+				channel.close()
+			if stream["samples"] > 1:
+				received_span = stream["last_sample_at"] - stream["first_sample_at"]
+				experiment_span = stream["last_sample_t"] - stream["first_sample_t"]
+				self.ui(
+					self._plot_diag_write, "INFO",
+					f"[{name.upper()}] {stream['samples']} amostras recebidas ao longo de "
+					f"{received_span:.2f} s, cobrindo {experiment_span:.2f} s do experimento.",
+					time.time(),
+				)
+				if experiment_span > 5 and received_span < experiment_span * 0.2:
+					self.ui(
+						self._plot_diag_write, "AVISO",
+						"Telemetria recebida em lote: a saída remota ou um intermediário "
+						"reteve os dados antes de chegarem à GUI.",
+						time.time(),
+					)
+
+	########################################
+	def _handle_remote_line(self, name, line):
+		clean_line = ANSI_ESCAPE_RE.sub("", line).strip()
+		if clean_line == STREAM_READY_MARKER:
+			with self.telemetry_lock:
+				self._active_stream["ready"] = True
+			self.ui(
+				self._plot_diag_write, "INFO",
+				f"[{name.upper()}] Marcador de início recebido; shell remoto está transmitindo.",
+				time.time(),
+			)
+			return
+
+		with self.telemetry_lock:
+			self._plot_stats["raw_lines"] += 1
+			self._active_stream["lines"] += 1
+			line_count = self._active_stream["lines"]
+		if clean_line.startswith("DATA,"):
+			try:
+				self._store_telemetry_sample(name, parse_telemetry_line(clean_line))
+			except ValueError as exc:
+				with self.telemetry_lock:
+					self._plot_stats["invalid_samples"] += 1
+					invalid_count = self._plot_stats["invalid_samples"]
+				message = f"[{name.upper()}] Telemetria inválida ({exc}): {line}"
+				if invalid_count <= 5 or invalid_count % 25 == 0:
+					self.ui(self.cmdlog_write, message)
+					self.ui(self._plot_diag_write, "ERRO", message, time.time())
+		else:
+			self.ui(self.cmdlog_write, f"[{name.upper()}] {line}")
+			if line_count <= 3:
+				self.ui(self._plot_diag_write, "INFO", f"[{name.upper()}] Saída remota: {line[:300]}", time.time())
+
+	########################################
+	# Execução remota (aba 3)
+	########################################
+	def select_data_destination(self):
+		directory = filedialog.askdirectory(
+			title="Selecione onde salvar os dados dos experimentos"
+		)
+
+		if directory:
+			self.data_dest_entry.delete(0, "end")
+			self.data_dest_entry.insert(0, directory)
+
+	########################################
+	def collect_data(self):
+
+		targets = self.get_selected_devices()
+
+		if not targets:
+			messagebox.showinfo(
+				"Nenhum alvo",
+				"Selecione pelo menos uma Raspberry com IP."
+			)
+			return
+
+		local_base = self.data_dest_entry.get().strip()
+
+		if not local_base:
+			messagebox.showinfo(
+				"Destino inválido",
+				"Selecione uma pasta para salvar os dados."
+			)
+			return
+
+		os.makedirs(local_base, exist_ok=True)
+
+		threading.Thread(
+			target=self._collect_data,
+			args=(targets, local_base),
+			daemon=True
+		).start()
+	
+	########################################
+	def _sftp_download_directory_contents(self, sftp, remote_dir, local_dir):
+		os.makedirs(local_dir, exist_ok=True)
+		for entry in sftp.listdir_attr(remote_dir):
+			remote_path = posixpath.join(remote_dir, entry.filename)
+			local_path = os.path.join(local_dir, entry.filename)
+			if stat.S_ISDIR(entry.st_mode):
+				self._sftp_download_directory_contents(sftp, remote_path, local_path)
+			else:
+				sftp.get(remote_path, local_path)
+
+	########################################
+	def _collect_data(self, targets, local_base):
+		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		remote_logs = posixpath.join(remote_workdir, "logs")
+
+		for name, ip in targets:
+			local_dest = os.path.join(local_base, name)
+			os.makedirs(local_dest, exist_ok=True)
+			self.ui(self.datalog_write, f"📥 Coletando dados de {name.upper()} ({ip})...")
+
+			client = None
+			sftp = None
+			try:
+				client = self._connect_ssh(ip)
+				sftp = client.open_sftp()
+				self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
+				self.ui(self.datalog_write, f"✅ Dados de {name.upper()} coletados.")
+			except FileNotFoundError:
+				self.ui(self.datalog_write, f"❌ Pasta remota não encontrada: {remote_logs}")
+			except Exception as e:
+				self.ui(self.datalog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+			finally:
+				if sftp:
+					sftp.close()
+				if client:
+					client.close()
+
+		self.ui(self.datalog_write, "🏁 Coleta finalizada.")
+	
+	########################################
+	def datalog_write(self, text):
+		self.data_log.configure(state="normal")
+		self.data_log.insert("end", text + "\n")
+		self.data_log.see("end")
+		self.data_log.configure(state="disabled")
+
+	########################################
+	def _plot_tick(self):
+		"""Redesenha quando necessário e sempre rearma o temporizador."""
+		try:
+			if self._plot_dirty:
+				# Limpar antes do desenho preserva um novo dirty produzido enquanto
+				# o Matplotlib estiver renderizando.
+				self._plot_dirty = False
+				try:
+					self.update_plot()
+					if self._plot_last_error is not None:
+						self._plot_diag_write(
+							"INFO",
+							"Renderização recuperada após o erro anterior.",
+						)
+						self._plot_last_error = None
+				except Exception as exc:
+					self._plot_dirty = True
+					self._handle_plot_error(exc)
+
+			self._check_plot_health()
+		except Exception as exc:
+			# Também protege falhas nos diagnósticos/estado, não só no Matplotlib.
+			self._plot_dirty = True
+			self._handle_plot_error(exc)
+		finally:
+			# Sem o finally, uma única exceção encerra os gráficos para sempre.
+			try:
+				self.after(self.PLOT_REFRESH_MS, self._plot_tick)
+			except tk.TclError:
+				pass
+
+	########################################
+	def _handle_plot_error(self, exc):
+		signature = f"{type(exc).__name__}: {exc}"
+		with self.telemetry_lock:
+			self._plot_stats["render_errors"] += 1
+			valid = self._plot_stats["valid_samples"]
+
+		self._set_plot_status(f"Erro ao renderizar: {signature}", "ERRO")
+		if signature != self._plot_last_error:
+			self._plot_diag_write(
+				"ERRO",
+				f"Falha ao desenhar '{self.plot_var.get()}' após {valid} amostras: "
+				f"{signature}. O gráfico tentará novamente automaticamente.",
+			)
+			self.cmdlog_write(f"[GRÁFICO] {signature}")
+			self._plot_last_error = signature
+
+	########################################
+	def _check_plot_health(self):
+		if not self._plot_session_active or self._plot_session_started_at is None:
+			return
+
+		now = time.monotonic()
+		elapsed = now - self._plot_session_started_at
+
+		with self.telemetry_lock:
+			valid = self._plot_stats["valid_samples"]
+			invalid = self._plot_stats["invalid_samples"]
+			raw_lines = self._plot_stats["raw_lines"]
+			last_sample_at = self._plot_stats["last_sample_at"]
+			ssh_bytes = self._plot_stats["ssh_bytes"]
+			stream = dict(self._active_stream) if self._active_stream else None
+
+		if valid:
+			stale_for = now - last_sample_at
+			if stale_for >= self.TELEMETRY_STALE_WARNING_SECONDS:
+				if not self._plot_stale_warned:
+					self._plot_stale_warned = True
+					self._set_plot_status(
+						f"Telemetria interrompida há {stale_for:.1f} s; "
+						"o último gráfico continua visível.",
+						"AVISO",
+					)
+					self._plot_diag_write(
+						"AVISO",
+						f"Nenhuma nova linha DATA válida há {stale_for:.1f} s. "
+						"Verifique o terminal e a execução na Raspberry.",
+					)
+			elif self._plot_stale_warned:
+				self._plot_stale_warned = False
+				self._plot_diag_write("INFO", "Fluxo de telemetria restabelecido.")
+			return
+
+		if elapsed < self.NO_TELEMETRY_WARNING_SECONDS or self._plot_no_data_warned:
+			return
+
+		if invalid:
+			reason = f"{invalid} linha(s) DATA foram rejeitadas pelo parser"
+		elif raw_lines:
+			reason = f"há {raw_lines} linha(s) no terminal, mas nenhuma telemetria DATA"
+		elif stream and stream["pending_chars"]:
+			reason = (
+				f"chegaram {ssh_bytes} bytes SSH, mas há "
+				f"{stream['pending_chars']} caracteres sem fim de linha"
+			)
+		elif stream and stream["ready"]:
+			reason = "o shell transmitiu o início, mas o programa ainda não enviou linhas DATA"
+		elif ssh_bytes:
+			reason = f"chegaram {ssh_bytes} bytes SSH, mas nenhuma linha DATA válida"
+		else:
+			reason = "nenhum byte SSH chegou; confira a abertura do canal nos diagnósticos"
+
+		self._plot_no_data_warned = True
+		self._set_plot_status(f"Sem dados para o gráfico: {reason}.", "AVISO")
+		self._plot_diag_write(
+			"AVISO",
+			f"Nenhuma amostra válida após {elapsed:.1f} s: {reason}.",
+		)
+
+	########################################
+	def update_plot(self):
+
+		# snapshot sob lock: evita ler listas com tamanhos inconsistentes
+		# enquanto a thread SSH esta no meio de um append de amostra.
+		with self.telemetry_lock:
+			telemetry_snapshot = {
+				name: {key: list(values) for key, values in data.items()}
+				for name, data in self.telemetry.items()
+			}
+
+		self.ax.clear()
+
+		plot_type = self.plot_var.get()
+
+		# configura os eixos mesmo sem dados
+		if plot_type == "Velocidade":
+			self.ax.set_xlabel("Tempo [s]")
+			self.ax.set_ylabel("Velocidade [m/s]")
+
+		elif plot_type == "Aceleração / Controle":
+			self.ax.set_xlabel("Tempo [s]")
+			self.ax.set_ylabel("a / u [m/s²]")
+
+		elif plot_type == "Velocidade angular":
+			self.ax.set_xlabel("Tempo [s]")
+			self.ax.set_ylabel("Velocidade angular [rad/s]")
+
+		elif plot_type == "Orientação":
+			self.ax.set_xlabel("Tempo [s]")
+			self.ax.set_ylabel("Orientação [rad]")
+
+		elif plot_type == "Trajetória XY":
+			self.ax.set_xlabel("x [m]")
+			self.ax.set_ylabel("y [m]")
+			self.ax.set_aspect("equal", adjustable="datalim")
+
+		# plota os dados, caso existam
+		for name, data in telemetry_snapshot.items():
+
+			if plot_type == "Velocidade":
+
+				self.ax.plot(
+					data["t"],
+					data["v"],
+					label=f"{name.upper()} - v"
+				)
+
+				self.ax.plot(
+					data["t"],
+					data["vref"],
+					"--",
+					label=f"{name.upper()} - vref"
+				)
+
+			elif plot_type == "Aceleração / Controle":
+
+				self.ax.plot(
+					data["t"],
+					data["a"],
+					label=f"{name.upper()} - a"
+				)
+
+				self.ax.plot(
+					data["t"],
+					data["u"],
+					"--",
+					label=f"{name.upper()} - u"
+				)
+
+			elif plot_type == "Velocidade angular":
+
+				self.ax.plot(
+					data["t"],
+					data["w"],
+					label=f"{name.upper()} - w"
+				)
+
+			elif plot_type == "Orientação":
+
+				self.ax.plot(
+					data["t"],
+					data["th"],
+					label=f"{name.upper()} - θ"
+				)
+
+			elif plot_type == "Trajetória XY":
+
+				self.ax.plot(
+					data["x"],
+					data["y"],
+					label=name.upper()
+				)
+
+		if telemetry_snapshot:
+			self.ax.legend()
+
+		self.ax.grid(True)
+		# draw() (sincrono) em vez de draw_idle(): como o redraw agora e
+		# limitado a PLOT_REFRESH_MS, garantir que o frame seja de fato
+		# renderizado agora evita atrasos de renderizacao observados no
+		# backend TkAgg do macOS com draw_idle() sob certas condicoes.
+		self.canvas.draw()
+
+		with self.telemetry_lock:
+			self._plot_stats["rendered_frames"] += 1
+			valid = sum(len(data["t"]) for data in telemetry_snapshot.values())
+			rendered = self._plot_stats["rendered_frames"]
+			by_car = {name: len(data["t"]) for name, data in telemetry_snapshot.items()}
+			stream = self._active_stream
+			live = valid and stream is not None and stream["samples"] > 0 and not stream["finished"]
+			first_live_frame = live and self._plot_stats["live_frames"] == 0
+			if live:
+				self._plot_stats["live_frames"] += 1
+		if first_live_frame:
+			self._plot_diag_write("INFO", f"Primeiro quadro em tempo real desenhado com {valid} amostras.")
+
+		if valid:
+			counts = ", ".join(
+				f"{name.upper()}: {count}" for name, count in sorted(by_car.items())
+			)
+			mode = "Tempo real ativo" if live else "Dados finais exibidos"
+			self._set_plot_status(
+				f"{mode} | amostras: {valid} ({counts}) | quadros: {rendered}",
+				"SUCESSO",
+			)
+	
+########################################
+# Execução
+########################################
+if __name__ == "__main__":
+	app = RsyncGUI()
+	app.mainloop()
