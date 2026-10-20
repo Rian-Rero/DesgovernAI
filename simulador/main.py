@@ -7,35 +7,45 @@
 # Universidade Federal de Minas Gerais
 ########################################
 import os
+import math
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 import matplotlib.pyplot as plt
 from fva_car import Car
 from fva_car.speed_controller import CONTROL_SAMPLE_TIME
+from fva_car.lateral import YellowLineFollower
 
 VELOCITY_REFERENCE = 1.5  # m/s
 DISPLAY_RATE = 10.0  # Hz
 TELEMETRY_RESOLUTION = (2304, 1344)  # pixels
 TELEMETRY_DPI = 100
 parameters = {
-    "ts": 20.0,
+    "ts": 100.0,
     "save": True,
     "logfile": "logs/",
     "beep": True,
     "sample_time": CONTROL_SAMPLE_TIME,
     "explicit_vision": True,
     "real_time": True,
+    "velocity_reference": VELOCITY_REFERENCE,
+    "stanley_gain": 1.5,
+    "curve_min_speed": 0.5,  # m/s durante recuperacao de erro/curvas
+    "curve_lateral_accel": 0.6,  # m/s^2: limite nominal v^2*|curvatura|
+    "steering_sign": -1.0,  # juntas positivas da cena Car viram para a direita
+    "line_ground_z": 0.005,  # altura da pintura da pista no mundo, em metros
 }
 
 
 def control_func(car):
-    car.set_steer(0.0)
-    car.set_vel(VELOCITY_REFERENCE)
+    if not hasattr(car, 'line_follower'):
+        car.line_follower = YellowLineFollower(car)
+    car.line_follower(car)
 
 
 def vision_func(car):
-    return car.get_image(gray=False)
+    image = getattr(car, 'line_image', None)
+    return image if image is not None else car.get_image(gray=False)
 
 
 class TelemetryPlot:
@@ -45,23 +55,38 @@ class TelemetryPlot:
         self.figure = plt.figure(
             figsize=(width / TELEMETRY_DPI, height / TELEMETRY_DPI), dpi=TELEMETRY_DPI
         )
-        grid = self.figure.add_gridspec(2, 2, height_ratios=(1.2, 1))
+        grid = self.figure.add_gridspec(3, 2, height_ratios=(1.2, 1, 1))
         camera = self.figure.add_subplot(grid[0, :])
-        self.velocity_axis = self.figure.add_subplot(grid[1, 0])
-        self.control_axis = self.figure.add_subplot(grid[1, 1], sharex=self.velocity_axis)
+        self.lateral_axis = self.figure.add_subplot(grid[1, 0])
+        self.velocity_axis = self.figure.add_subplot(grid[1, 1], sharex=self.lateral_axis)
+        self.control_axis = self.figure.add_subplot(grid[2, 0], sharex=self.lateral_axis)
+        self.steering_axis = self.figure.add_subplot(grid[2, 1], sharex=self.lateral_axis)
         self.image = camera.imshow(vision_func(car))
         camera.axis("off")
+        (self.lateral_error,) = self.lateral_axis.plot([], [], label="Erro lateral")
+        self.lateral_axis.axhline(0, color="gray", linestyle="--", label="Erro zero")
+        self.lateral_axis.set(
+            xlabel="Tempo de simulacao (s)", ylabel="Erro lateral (m)",
+            xlim=(0, duration), ylim=(-0.5, 0.5),
+            title="Erro lateral (+ linha a esquerda)",
+        )
+        self.lateral_axis.grid(True)
+        self.lateral_axis.legend()
         (self.measured,) = self.velocity_axis.plot([], [], label="Velocidade medida")
-        (self.reference,) = self.velocity_axis.plot([], [], "--", label="Referencia")
+        self.velocity_axis.axhline(
+            car.parameters.get("velocity_reference", VELOCITY_REFERENCE),
+            color="tab:red", linestyle="--", linewidth=1.5, label="Referencia nominal",
+        )
+        (self.reference,) = self.velocity_axis.plot(
+            [], [], color="tab:orange", linestyle=":", drawstyle="steps-post",
+            label="Referencia ajustada (curvas/erro)",
+        )
         self.velocity_axis.set(
-            xlabel="Tempo de simulacao (s)",
-            ylabel="Velocidade (m/s)",
-            xlim=(0, duration),
-            ylim=(-0.1, 2.7),
+            xlabel="Tempo de simulacao (s)", ylabel="Velocidade (m/s)",
+            xlim=(0, duration), ylim=(-0.1, 2.7), title="Velocidade e referencia",
         )
         self.velocity_axis.grid(True)
         self.velocity_axis.legend()
-        self.velocity_axis.set_title("Velocidade e referencia", fontsize=16)
         (self.pwm,) = self.control_axis.plot(
             [], [], drawstyle="steps-pre", color="tab:green", label="PWM equivalente"
         )
@@ -76,13 +101,26 @@ class TelemetryPlot:
         self.control_axis.axhline(0, color="gray", linewidth=0.8)
         self.control_axis.grid(True)
         self.control_axis.legend()
-        for axis in (self.velocity_axis, self.control_axis):
+        (self.steering_command,) = self.steering_axis.plot(
+            [], [], drawstyle="steps-post", label="Comando equivalente"
+        )
+        (self.steering_left,) = self.steering_axis.plot([], [], "--", label="Roda esquerda")
+        (self.steering_right,) = self.steering_axis.plot([], [], ":", label="Roda direita")
+        self.steering_axis.set(
+            xlabel="Tempo de simulacao (s)", ylabel="Esterçamento (graus)",
+            xlim=(0, duration), ylim=(-30, 30), title="Esterçamento (sinal das juntas)",
+        )
+        self.steering_axis.axhline(0, color="gray", linewidth=0.8)
+        self.steering_axis.grid(True)
+        self.steering_axis.legend()
+        for axis in (self.lateral_axis, self.velocity_axis, self.control_axis, self.steering_axis):
+            axis.title.set_fontsize(16)
             axis.tick_params(labelsize=12)
             axis.xaxis.label.set_size(14)
             axis.yaxis.label.set_size(14)
         self.title = self.figure.suptitle("Telemetria")
         self.figure.subplots_adjust(
-            left=0.07, right=0.97, bottom=0.07, top=0.94, wspace=0.25, hspace=0.25
+            left=0.07, right=0.97, bottom=0.06, top=0.94, wspace=0.25, hspace=0.55
         )
         plt.show(block=False)
         window = getattr(self.figure.canvas.manager, "window", None)
@@ -94,11 +132,27 @@ class TelemetryPlot:
         stride = max(1, len(car.traj) // 2000)
         trajectory = car.traj[::stride]
         t = [state["t"] for state in trajectory]
+        # NaN interrompe a curva quando a linha nao foi detectada.
+        errors = [state.get("cross_track_m", float("nan"))
+                  if state.get("line_valid") == 1 else float("nan")
+                  for state in trajectory]
+        self.lateral_error.set_data(t, errors)
+        finite = [abs(error) for error in errors if math.isfinite(error)]
+        limit = max(0.5, 1.15 * max(finite, default=0.0))
+        self.lateral_axis.set_ylim(-limit, limit)
         self.measured.set_data(t, [state["v"] for state in trajectory])
         self.reference.set_data(t, [state["vref"] for state in trajectory])
         self.pwm.set_data(t, [state["motor_pwm_percent"] for state in trajectory])
+        for line, column in ((self.steering_command, "steer_cmd_rad"),
+                             (self.steering_left, "steer_left_rad"),
+                             (self.steering_right, "steer_right_rad")):
+            line.set_data(t, [math.degrees(state.get(column, float("nan")))
+                              for state in trajectory])
         self.title.set_text(
             f"t = {car.t:.2f} s | ritmo = {car.t/max(elapsed, 1e-9):.2f}x"
+            + (f" | linha: {'OK' if car.traj[-1].get('line_valid') else 'PERDIDA - PARANDO'}"
+               f" | erro = {car.traj[-1].get('cross_track_m', float('nan')):.3f} m"
+               if 'line_valid' in car.traj[-1] else '')
         )
         self.figure.canvas.draw_idle()
         self.figure.canvas.flush_events()

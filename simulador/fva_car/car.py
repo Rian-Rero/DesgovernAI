@@ -306,6 +306,8 @@ class Car:
 		# A projecao exclui a queda vertical inicial e preserva o sinal real.
 		forward = np.array([matrix[2], matrix[6], matrix[10]])
 		self.v_raw = float(np.dot(lin, forward))
+		self.heading_forward = float(np.arctan2(forward[1], forward[0]))
+		self.w_raw = float(ang[2])
 		v = self.v_raw
 
 		# filtros
@@ -526,6 +528,9 @@ class Car:
 					'vref'  : self.vref,
 					'th'    : self.th,
 					'w'     : self.w,
+					'w_raw' : getattr(self, 'w_raw', self.w),
+					'heading_forward_rad': getattr(self, 'heading_forward', self.th),
+					'steer_cmd_rad': self.st,
 					'u'     : self.u,
 					'torque_motor' : self.motor_torque,
 					'motor_pwm_percent' : self.motor_pwm_percent,
