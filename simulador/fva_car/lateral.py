@@ -5,6 +5,12 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+from matplotlib.colors import rgb_to_hsv
+
+
+# H em graus (0 a 360), S e V entre 0 e 1.
+YELLOW_HSV_LOWER = (40., .4, .2)
+YELLOW_HSV_UPPER = (75., 1., 1.)
 
 
 @dataclass
@@ -59,11 +65,21 @@ class StanleyController:
         return self.steer
 
 
-def yellow_centers(image):
-    """Centros de segmentos amarelos RGB por linha, sem dependencia OpenCV."""
-    rgb = np.asarray(image, dtype=float) / 255.
-    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
-    mask = (r > .35) & (g > .30) & (b < .65 * np.minimum(r, g)) & (np.abs(r-g) < .45)
+def yellow_centers(image, hsv_lower=YELLOW_HSV_LOWER, hsv_upper=YELLOW_HSV_UPPER):
+    """Segmenta amarelo em HSV e retorna centros por linha da imagem.
+
+    Entrada RGB uint8 da camera; H em graus (0..360), S e V em 0..1.
+    Os limites HSV sao inclusivos; nao usam a escala H=0..179 do OpenCV.
+    """
+    lower, upper = np.asarray(hsv_lower, dtype=float), np.asarray(hsv_upper, dtype=float)
+    scale = np.array([360., 1., 1.])
+    if (lower.shape != (3,) or upper.shape != (3,)
+            or not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper))
+            or np.any(lower < 0) or np.any(upper > scale) or np.any(lower > upper)):
+        raise ValueError('Limites HSV: H em 0..360 graus, S/V em 0..1 e minimo <= maximo.')
+    hsv = rgb_to_hsv(np.asarray(image, dtype=float) / 255.)
+    hsv[..., 0] *= 360.
+    mask = np.all((hsv >= lower) & (hsv <= upper), axis=-1)
     centers = []
     previous = image.shape[1] / 2
     # Caminha de baixo para cima para manter continuidade e evitar juntar ramos.
@@ -225,6 +241,8 @@ class YellowLineFollower:
             raise ValueError('Seguidor requer camera em perspectiva.')
         self.angle = sim.getObjectFloatParam(car.cam, sim.visionfloatparam_perspective_angle)
         self.ground_z = car.parameters.get('line_ground_z', .005)
+        self.yellow_hsv_lower = car.parameters.get('yellow_hsv_lower', YELLOW_HSV_LOWER)
+        self.yellow_hsv_upper = car.parameters.get('yellow_hsv_upper', YELLOW_HSV_UPPER)
         # Centro entre juntas de direcao: evita assumir a origem de /Car no eixo traseiro.
         left = np.asarray(sim.getObjectPosition(car.steerL, car.robot))
         right = np.asarray(sim.getObjectPosition(car.steerR, car.robot))
@@ -237,7 +255,7 @@ class YellowLineFollower:
 
     def __call__(self, car):
         car.line_image = car.get_image(gray=False)
-        pixels = yellow_centers(car.line_image)
+        pixels = yellow_centers(car.line_image, self.yellow_hsv_lower, self.yellow_hsv_upper)
         sim = car.sim
         matrix = np.asarray(sim.getObjectMatrix(car.robot, -1)).reshape(3, 4)
         front = matrix[:, :3] @ self.front_local + matrix[:, 3]

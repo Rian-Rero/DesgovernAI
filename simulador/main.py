@@ -37,6 +37,9 @@ parameters = {
     "curve_lateral_accel": 0.6,  # m/s^2: limite nominal v^2*|curvatura|
     "steering_sign": -1.0,  # juntas positivas da cena Car viram para a direita
     "line_ground_z": 0.005,  # altura da pintura da pista no mundo, em metros
+    # Segmentacao amarela em HSV: H em graus (0..360), S/V entre 0 e 1.
+    "yellow_hsv_lower": (40.0, 0.4, 0.2),
+    "yellow_hsv_upper": (75.0, 1.0, 1.0),
 }
 
 
