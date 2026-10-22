@@ -249,6 +249,7 @@ class Car:
         self.save_traj()
 
         # aviso sonoro de inicio
+        print("[BUZZER] Inicio da missao: tres bipes.", flush=True)
         self.bz.beep([0.2] * 3)
         time.sleep(1.0)
 
@@ -265,9 +266,9 @@ class Car:
         self.v, self.w = self.get_vel()
 
         # O firmware RC publica os cinco campos na mesma mensagem serial.
-        self.rc_direcao, self.rc_acelerador = self.odometer.get_rc()
         previous_traction_mode = self.sel_tracao
-        self.sel_direcao, self.sel_tracao = self.odometer.get_control_mode()
+        (self.rc_direcao, self.rc_acelerador,
+         self.sel_direcao, self.sel_tracao) = self.odometer.get_control_inputs()
         if self.sel_tracao != previous_traction_mode:
             self.vel_error_integral = 0.0
 
@@ -305,7 +306,9 @@ class Car:
 
             # se esta dando re, avise
             if self.gear == servos.Gear.REVERSE:
-                self.bz.beep(0.3, silence=0.5)
+                if self.bz.beep(0.3, silence=0.5):
+                    print(f"[BUZZER] Marcha a re ativa | RC acelerador={self.rc_acelerador:+.2f} | "
+                          f"seletor tracao={'RC' if self.sel_tracao == 0 else 'AUTO'}", flush=True)
 
             # salva trajetoria
             self.save_traj()
@@ -453,6 +456,12 @@ class Car:
         # Em RC, o receptor escolhe a referencia; em AUTO, preserva o PI local.
         if self.sel_tracao == 0:
             vref = self.rc_acelerador * CAR["VELMAX"]
+            if vref == 0.0:
+                # Radio neutro/sem sinal corta a tracao mesmo com PI acumulado.
+                self._set_ref(0.0)
+                self.vel_error_integral = 0.0
+                self.set_u(0.0)
+                return
 
         # define referencia e marcha
         self._set_ref(vref)

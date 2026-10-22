@@ -39,6 +39,9 @@ RC_ACEL_MAX     = 1780
 # Zona morta do comando normalizado
 # +/- 5% em torno do centro
 RC_DEADZONE     = 0.05
+# Mesmos limites de pulso fisicamente valido usados pelo firmware do Nano.
+RC_MIN_VALID    = 800
+RC_MAX_VALID    = 2200
 
 ########################################
 # Classe para leitura do Arduino Nano
@@ -187,8 +190,7 @@ class Encoder:
 	########################################
 	def get_control_mode(self):
 
-		with self.lock:
-			return self.sel_direcao, self.sel_tracao
+		return self.get_control_inputs()[2:]
 
 	########################################
 	# normaliza um canal RC para [-1, +1]
@@ -202,6 +204,10 @@ class Encoder:
 	# toda a faixa [-1, +1].
 	########################################
 	def normalize_rc(self, value, minimum, center, maximum):
+
+		# Zero significa ausencia de pulso, nao uma solicitacao de re maxima.
+		if not np.isfinite(value) or not RC_MIN_VALID <= value <= RC_MAX_VALID:
+			return 0.0
 
 		# Normalizacao em dois trechos
 		if value <= center:
@@ -236,10 +242,13 @@ class Encoder:
 	# +1.0 = maximo
 	########################################
 	def get_rc(self):
+		return self.get_control_inputs()[:2]
 
-		with self.lock:
-			rc_direcao = self.rc_direcao
-			rc_acelerador = self.rc_acelerador
+	def get_control_inputs(self):
+		"""Comandos e seletores do mesmo pacote; sem pacote atual, RC em neutro."""
+		_, rc_direcao, rc_acelerador, sel_direcao, sel_tracao, valid = self.get_data()
+		if not valid:
+			return 0.0, 0.0, 0, 0
 
 		direcao = self.normalize_rc(
 			rc_direcao,
@@ -255,7 +264,7 @@ class Encoder:
 			RC_ACEL_MAX
 		)
 
-		return direcao, acelerador
+		return direcao, acelerador, sel_direcao, sel_tracao
 
 	########################################
 	# retorna todos os dados crus
