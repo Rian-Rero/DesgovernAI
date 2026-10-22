@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interface de camera USB para acompanhar uma faixa amarela em retas e curvas.
+"""Interface USB para acompanhar faixas amarelas em retas, curvas e pontilhados.
 
 Execute: venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py
 Dependencias: numpy, pillow, opencv-python OU opencv-python-headless, tkinter.
@@ -225,23 +225,36 @@ class CameraApp:
         self.canvas.bind("<Button-1>", self.select_path)
         ttk.Label(visual, text="Clique perto da base da faixa desejada para selecionar o caminho.",
                   foreground="#9bb1c9", wraplength=650).pack(anchor="w", pady=(9, 3))
-        ttk.Label(visual, text="Verde: cor observada   •   Laranja: falha reconstruida   •   Branco: centro",
+        ttk.Label(visual, text="Verde: observado   •   Azul: entre tracos   •   Laranja: buracos   •   Branco: centro",
                   foreground="#9bb1c9", wraplength=650).pack(anchor="w")
         sidebar = ttk.Frame(body, width=300)
         sidebar.grid(row=0, column=1, sticky="ns")
         notebook = ttk.Notebook(sidebar, width=300)
         notebook.pack(fill="both", expand=True)
         geometry, color = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
+        dashed = ttk.Frame(notebook, padding=12)
         notebook.add(geometry, text="Caminho")
         notebook.add(color, text="Cor e luz")
+        notebook.add(dashed, text="Gaps")
         self.slider(geometry, "roi_top", "Ignorar topo", 0, 65, "%", "Recorta objetos fora da pista.")
         self.slider(geometry, "max_gap", "Conectar falhas", 0, 90, "px", "Limite vertical em imagem de 480 px.")
         self.slider(geometry, "max_width", "Largura maxima", 3, 40, "%", "Reduza para rejeitar objetos largos.")
         self.slider(geometry, "min_span", "Extensao minima", 12, 50, "%", "Aumente para rejeitar manchas curtas.")
         self.slider(geometry, "smoothing", "Estabilidade temporal", 0, 80, "%", "Suaviza somente uma faixa observada.")
         ttk.Button(geometry, text="Rebuscar no centro", command=self.recenter).pack(fill="x", pady=(12, 4))
-        ttk.Label(geometry, text="Falhas longas interrompem a deteccao. O caminho acompanha curvas sem exigir uma reta.",
+        ttk.Label(geometry, text="Para faixas pontilhadas, ajuste a conexao azul na aba Gaps. O caminho acompanha retas e curvas.",
                   wraplength=270, foreground="#9bb1c9").pack(anchor="w", pady=8)
+        ttk.Checkbutton(dashed, text="Conectar faixas pontilhadas", variable=self.variables["dashed"],
+                        command=self.changed).pack(anchor="w", pady=(10, 8))
+        self.slider(dashed, "dash_gap", "Gap pontilhado maximo", 40, 220, "px",
+                    "Limite extra entre tracos, na escala de 480 px.")
+        ttk.Label(dashed, text="AZUL = conexao estimada", foreground="#73b4ff",
+                  font=("DejaVu Sans", 11, "bold")).pack(anchor="w", pady=(22, 8))
+        ttk.Label(dashed, text="Os tracos precisam ter largura, posicao e orientacao compativeis nos dois lados do gap. "
+                  "A linha central continua tambem dentro da conexao azul.\n\n"
+                  "Comece com 120 px. Aumente aos poucos se os espacos da sua pista forem maiores.\n\n"
+                  "Sem tracos suficientes no frame atual, a conexao e interrompida.",
+                  wraplength=270, foreground="#9bb1c9").pack(anchor="w")
         self.slider(color, "h_min", "Matiz minimo (H)", 0, 179, "")
         self.slider(color, "h_max", "Matiz maximo (H)", 0, 179, "")
         self.slider(color, "s_min", "Saturacao minima (S)", 25, 255, "")
@@ -406,6 +419,8 @@ class CameraApp:
             bgr = np.zeros_like(self.last_frame)
             bgr[result.path_mask > 0] = (0, 165, 255)
             bgr[result.observed_mask > 0] = (70, 245, 30)
+            if result.dash_mask is not None:
+                bgr[result.dash_mask > 0] = (255, 95, 25)
             if result.valid:
                 cv2.polylines(bgr, [result.center], False, (255, 255, 255), 2)
         else:

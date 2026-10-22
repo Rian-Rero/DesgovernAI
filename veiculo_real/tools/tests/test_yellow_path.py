@@ -27,6 +27,16 @@ def scene(kind="straight", x=320, thickness=16):
     return frame
 
 
+def dashed_scene(curved=False, sparse=False):
+    frame = np.full((480, 640, 3), 35, np.uint8)
+    intervals = ((180, 204), (294, 318), (408, 432)) if sparse else ((155, 205), (275, 325), (395, 479))
+    for start, end in intervals:
+        ys = np.arange(start, end + 1)
+        xs = 320 + (.0012 * (ys - 460) ** 2 if curved else np.zeros(len(ys)))
+        cv2.polylines(frame, [np.c_[xs, ys].astype(np.int32)], False, (0, 220, 240), 16)
+    return frame
+
+
 class YellowPathTests(unittest.TestCase):
     def test_straight_curve_and_s_curve(self):
         for kind in ("straight", "curve", "s_curve"):
@@ -54,11 +64,11 @@ class YellowPathTests(unittest.TestCase):
         frame[245:277] = 35
         frame[340:372] = 35
         self.assertTrue(YellowPathDetector().process(frame).valid)
-        self.assertFalse(YellowPathDetector().process(frame, PathSettings(max_gap=0)).valid)
+        self.assertFalse(YellowPathDetector().process(frame, PathSettings(max_gap=0, dashed=False)).valid)
 
     def test_long_gap_does_not_create_a_path_across_missing_evidence(self):
         frame = scene()
-        frame[275:375] = 35
+        frame[240:405] = 35
         result = YellowPathDetector().process(frame)
         self.assertFalse(result.valid)
         self.assertEqual(cv2.countNonZero(result.path_mask), 0)
@@ -127,7 +137,7 @@ class YellowPathTests(unittest.TestCase):
         frame = scene()
         frame[280:304] = 35
         original = frame.copy()
-        settings = PathSettings()
+        settings = PathSettings(dashed=False)
         result = YellowPathDetector().process(frame, settings)
         output = render_path(frame, result, settings)
         np.testing.assert_array_equal(frame, original)
@@ -146,6 +156,71 @@ class YellowPathTests(unittest.TestCase):
             with self.subTest(seed=seed):
                 frame = np.random.default_rng(seed).integers(0, 256, (480, 640, 3), dtype=np.uint8)
                 self.assertFalse(YellowPathDetector().process(frame).valid)
+
+    def test_dashes_form_one_continuous_center_and_blue_mask(self):
+        result = YellowPathDetector().process(dashed_scene())
+        self.assertTrue(result.valid)
+        self.assertGreater(np.ptp(result.center[:, 1]), 290)
+        np.testing.assert_array_equal(np.diff(result.center[:, 1]), 1)
+        for y in (240, 360):
+            self.assertEqual(result.path_mask[y, 320], 255)
+            self.assertEqual(result.observed_mask[y, 320], 0)
+            self.assertEqual(result.dash_mask[y, 320], 255)
+        self.assertEqual(result.dash_mask[300, 320], 0)
+
+    def test_curved_dashes_are_interpolated_within_current_endpoints(self):
+        result = YellowPathDetector().process(dashed_scene(curved=True))
+        self.assertTrue(result.valid)
+        for y in (240, 360):
+            expected = round(320 + .0012 * (y - 460) ** 2)
+            self.assertEqual(result.dash_mask[y, expected], 255)
+            center_x = result.center[result.center[:, 1] == y, 0][0]
+            self.assertLess(abs(center_x - expected), 4)
+        self.assertEqual(cv2.countNonZero(result.dash_mask[:144]), 0)
+
+    def test_sparse_dashes_can_have_less_than_half_the_corridor_painted(self):
+        result = YellowPathDetector().process(dashed_scene(sparse=True))
+        self.assertTrue(result.valid)
+        self.assertLess(result.support, .5)
+        self.assertGreater(result.support, .28)
+        self.assertGreater(cv2.countNonZero(result.dash_mask), 0)
+
+    def test_dashed_mode_can_be_disabled_or_limited(self):
+        frame = dashed_scene()
+        for settings in (PathSettings(dashed=False), PathSettings(dash_gap=40)):
+            with self.subTest(settings=settings):
+                result = YellowPathDetector().process(frame, settings)
+                self.assertFalse(result.valid)
+                self.assertEqual(cv2.countNonZero(result.dash_mask), 0)
+
+    def test_displaced_or_differently_oriented_dashes_are_not_joined(self):
+        for kind in ("displaced", "opposite_tangent"):
+            frame = np.full((480, 640, 3), 35, np.uint8)
+            cv2.line(frame, (320, 390), (320, 479), (0, 220, 240), 16)
+            if kind == "displaced":
+                cv2.line(frame, (430, 180), (430, 260), (0, 220, 240), 16)
+            else:
+                cv2.line(frame, (215, 180), (320, 260), (0, 220, 240), 16)
+            result = YellowPathDetector().process(frame, PathSettings(dash_gap=160))
+            with self.subTest(kind=kind):
+                self.assertFalse(result.valid)
+
+    def test_blue_is_rendered_and_does_not_modify_the_camera_frame(self):
+        frame = dashed_scene()
+        original = frame.copy()
+        settings = PathSettings()
+        result = YellowPathDetector().process(frame, settings)
+        output = render_path(frame, result, settings)
+        self.assertGreater(output[240, 325, 0], output[240, 325, 1])
+        self.assertGreater(output[240, 325, 0], output[240, 325, 2])
+        np.testing.assert_array_equal(frame, original)
+
+    def test_dash_history_never_draws_a_bridge_on_an_empty_frame(self):
+        detector = YellowPathDetector()
+        self.assertTrue(detector.process(dashed_scene(), timestamp=1.).valid)
+        result = detector.process(np.full((480, 640, 3), 35, np.uint8), timestamp=1.05)
+        self.assertFalse(result.valid)
+        self.assertEqual(cv2.countNonZero(result.dash_mask), 0)
 
 
 class FakeCapture:

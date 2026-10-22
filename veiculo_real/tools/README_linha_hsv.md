@@ -45,15 +45,23 @@ sistema. Mantenha `yellow_path.py` na mesma pasta do programa principal.
    a segmentacao forte antes da selecao geometrica. A visualizacao HSV pode
    mostrar outros objetos amarelos; eles nao sao todos selecionados como caminho.
 5. Verde representa suporte de cor, inclusive tinta desbotada aceita pelo
-   limiar tolerante. Laranja representa preenchimento estimado pela geometria.
+   limiar tolerante. **Azul conecta tracos separados de uma faixa pontilhada**;
+   laranja representa pequenos buracos restantes na faixa.
    A linha branca marca o centro da faixa. A porcentagem de suporte mede pixels
    com evidencia de cor dentro do caminho, nao uma probabilidade de acerto.
+6. Na aba **Gaps**, **Conectar faixas pontilhadas** vem ligado. Ajuste o
+   **Gap pontilhado maximo**, inicialmente 120 px. O valor usa a escala de uma
+   imagem com 480 px de altura. A conexao so acontece entre observacoes atuais,
+   com posicao, largura e tangentes compativeis dos dois lados. O limite extra
+   complementa o ajuste **Conectar falhas** da aba Caminho.
 
 ## Ajustes principais
 
 | Ajuste | Efeito |
 |---|---|
 | Conectar falhas | Distancia vertical maxima entre observacoes; comece em 36 px e experimente 45–60 para tinta interrompida. O valor e escalado para altura de 480 px. Valores altos podem unir trechos diferentes. |
+| Conectar faixas pontilhadas | Ativa a ligacao azul entre tracos separados, inclusive em curvas. Desligar restaura apenas a recuperacao de falhas curtas. |
+| Gap pontilhado maximo | Limite extra para os espacos do pontilhado, inicialmente 120 px. Aumente aos poucos para gaps maiores; conexoes com mudancas abruptas de orientacao sao rejeitadas. |
 | Largura maxima | Limita a largura de cada trecho como porcentagem da imagem. Reduza para rejeitar manchas/objetos largos; aumente se a faixa estiver muito perto da camera. |
 | Extensao minima | Exige comprimento vertical minimo. Aumente para rejeitar objetos curtos; reduza se so um trecho pequeno da pista estiver visivel. |
 | Ignorar topo | Exclui a parte superior, onde frequentemente aparecem objetos fora da pista. |
@@ -87,6 +95,18 @@ Um polinomio cubico robusto suaviza o centro e reconstrui apenas o intervalo
 entre observacoes, permitindo pequenas lacunas e curvas. O corredor final
 precisa ter pelo menos 50% de suporte de cor tolerante e 12% de suporte forte,
 para nao transformar uma sequencia de pontos aleatorios em uma faixa.
+Quando a cadeia possui gaps longos de pontilhado validados, o suporte tolerante
+minimo passa para 28%, mantendo 12% de suporte forte. Cada ligacao longa exige
+trechos com comprimento suficiente para medir a tangente nos dois lados,
+variacao angular de ate 35 graus e alinhamento com a direcao media. Uma simples
+mudanca lateral entre dois objetos paralelos nao e suficiente para conecta-los.
+
+O `PathResult.path_mask` e a linha central `PathResult.center` incluem os gaps
+aceitos, proporcionando um caminho continuo para um consumidor de percepcao.
+`PathResult.dash_mask` identifica especificamente a interpolacao azul, e
+`observed_mask` permite distinguir a evidencia de cor da estimativa geometrica.
+O programa USB continua sendo uma ferramenta de percepcao/visualizacao; nao foi
+conectado aos comandos de direcao ou velocidade do carrinho.
 
 Isso filtra manchas compactas e objetos largos, mas e uma heuristica geometrica,
 nao um classificador semantico: um objeto amarelo fino, longo e alinhado com a
@@ -101,7 +121,8 @@ nao prolonga uma linha antiga indefinidamente. Ele nao envia comandos ao carrinh
 venv/bin/python -m unittest discover -s veiculo_real/tools/tests -p 'test_yellow_path.py' -v
 ```
 
-As regressoes cobrem retas/curvas, falhas curtas e longas, objetos amarelos fora
+As regressoes cobrem retas/curvas, falhas curtas e longas, pontilhados retos e
+curvos com preenchimento azul, rejeicao de tracos desalinhados, objetos fora
 da faixa, tinta desbotada, selecao entre duas faixas, perda de deteccao e troca
 de camera com captura simulada. A webcam e o aspecto da janela devem ser
 conferidos em uma sessao grafica real.

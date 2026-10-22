@@ -6,6 +6,7 @@ As medidas sao em pixels, sem calibracao metrica ou classificacao semantica.
 """
 
 from dataclasses import dataclass, field
+import math
 import time
 
 import cv2
@@ -24,6 +25,8 @@ class PathSettings:
     max_width: int = 18        # Porcentagem da largura da imagem.
     min_span: int = 25         # Extensao vertical minima, % da altura total.
     smoothing: int = 35        # Peso temporal; zero desativa.
+    dashed: bool = True        # Conecta tracos separados com tangentes compativeis.
+    dash_gap: int = 120        # Gap pontilhado maximo, na escala de 480 px.
 
 
 @dataclass
@@ -34,6 +37,7 @@ class PathResult:
     center: np.ndarray = field(default_factory=lambda: np.empty((0, 2), np.int32))
     support: float = 0.0
     status: str = "Buscando faixa"
+    dash_mask: np.ndarray | None = None  # Interpolacao entre tracos, sem cor observada.
 
     @property
     def valid(self):
@@ -106,11 +110,12 @@ class YellowPathDetector:
         """
         height, width = weak.shape
         rows, step = self._candidates(strong, weak, settings)
-        gap_limit = settings.max_gap * height / 480 + step
+        short_limit = settings.max_gap * height / 480 + step
+        gap_limit = max(short_limit, settings.dash_gap * height / 480 + step) if settings.dashed else short_limit
         seed_y = height * (settings.roi_top / 100 + .55 * (1 - settings.roi_top / 100))
         active, paths = [], []
         recent = self.previous is not None and now - self.previous_time < .25
-        for candidates in rows:
+        for row_index, candidates in enumerate(rows):
             if not candidates:
                 continue
             y = candidates[0][1]
@@ -120,13 +125,16 @@ class YellowPathDetector:
                 x, y, band_width, evidence = point
                 reward = step * (.35 + .65 * min(1., evidence * 2))
                 best = None
+                upper_tangent = None
+                tangent_checked = False
                 if y >= seed_y:
                     penalty = 45 * abs(x / width - self.anchor)
                     if recent:
                         expected = np.polyval(self.previous, y / height)
                         penalty += min(25., abs(x - expected) * .15)
                     best = (reward - penalty, (point,), 0.)
-                for score, chain, slope in active:
+                has_short_parent = False
+                for score, chain, slope in reversed(active):
                     px, py, pw, _ = chain[-1]
                     dy, dx = py - y, x - px
                     prediction = px + slope * dy
@@ -138,6 +146,25 @@ class YellowPathDetector:
                     width_change = abs(np.log(max(band_width, 1) / max(pw, 1)))
                     if width_change > 1.25:
                         continue
+                    if dy <= short_limit:
+                        has_short_parent = True
+                    if dy > short_limit:
+                        if has_short_parent:
+                            continue
+                        # Gaps de pontilhado exigem orientacao medida nos dois
+                        # lados: nao basta aproximar dois objetos amarelos.
+                        if not tangent_checked:
+                            upper_tangent = self._forward_tangent(point, rows[row_index + 1:row_index + 5], step)
+                            tangent_checked = True
+                        lower_tangent = self._tail_tangent(chain, step)
+                        if (upper_tangent is None or lower_tangent is None
+                                or evidence < .12 or chain[-1][3] < .12 or width_change > .65):
+                            continue
+                        if abs(math.atan(upper_tangent) - math.atan(lower_tangent)) > math.radians(35):
+                            continue
+                        mean_slope = (upper_tangent + lower_tangent) / 2
+                        if abs(new_slope - mean_slope) > .22 + .4 * abs(upper_tangent - lower_tangent):
+                            continue
                     turn_penalty = abs(new_slope - slope) if len(chain) > 1 else 0
                     cost = (.12 * abs(dx) + .22 * max(0, dy - step)
                             + step * .35 * turn_penalty + step * .25 * width_change)
@@ -153,12 +180,60 @@ class YellowPathDetector:
         for path in paths:
             points = np.asarray(path[1])
             span = np.ptp(points[:, 1])
+            long_gap = settings.dashed and np.any(np.abs(np.diff(points[:, 1])) > short_limit)
             if (span >= height * settings.min_span / 100
                     and span / max(1., np.median(points[:, 2])) >= 3.2
-                    and len(points) * step / max(span, 1) >= .5
+                    and len(points) * step / max(span, 1) >= (.28 if long_gap else .5)
                     and np.mean(points[:, 3] >= .12) >= .25):
                 acceptable.append(path)
         return None if not acceptable else np.asarray(max(acceptable, key=lambda p: p[0])[1])
+
+    @staticmethod
+    def _tail_tangent(chain, step):
+        tail = [chain[-1]]
+        for point in reversed(chain[:-1]):
+            if point[1] - tail[-1][1] > 1.6 * step or len(tail) >= 6:
+                break
+            tail.append(point)
+        if len(tail) < 3:
+            return None
+        points = np.asarray(tail)
+        return float(np.polyfit(-points[:, 1], points[:, 0], 1)[0])
+
+    @staticmethod
+    def _forward_tangent(point, upcoming_rows, step):
+        points = [point]
+        for row in upcoming_rows:
+            if not row:
+                break
+            previous = points[-1]
+            candidate = min(row, key=lambda p: abs(p[0] - previous[0]))
+            if (previous[1] - candidate[1] > 1.6 * step
+                    or abs(candidate[0] - previous[0]) > max(12., previous[2]) + step):
+                break
+            points.append(candidate)
+        if len(points) < 3:
+            return None
+        points = np.asarray(points)
+        return float(np.polyfit(-points[:, 1], points[:, 0], 1)[0])
+
+    @staticmethod
+    def _dash_mask(path_mask, observed_mask, height, settings):
+        """Marca somente falhas internas entre observacoes atuais dos tracos."""
+        mask = np.zeros_like(path_mask)
+        if not settings.dashed:
+            return mask
+        total = np.count_nonzero(path_mask, axis=1)
+        observed = np.count_nonzero(observed_mask, axis=1)
+        missing = (total > 0) & (observed < .15 * total)
+        changes = np.diff(np.r_[False, missing, False].astype(np.int8))
+        for start, end in zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)):
+            if (start > 0 and end < height and total[start - 1] > 0 and total[end] > 0
+                    and observed[start - 1] > 0 and observed[end] > 0
+                    and end - start >= max(6, round(12 * height / 480))):
+                mask[start:end] = path_mask[start:end]
+                mask[start:end][observed_mask[start:end] > 0] = 0
+        return mask
 
     def process(self, frame, settings=None, timestamp=None):
         settings = PathSettings() if settings is None else settings
@@ -166,7 +241,7 @@ class YellowPathDetector:
         strong, weak = self.segment(frame, settings)
         height, width = weak.shape
         empty = np.zeros_like(weak)
-        result = PathResult(strong, empty.copy(), empty.copy())
+        result = PathResult(strong, empty.copy(), empty.copy(), dash_mask=empty.copy())
         points = self._trace(strong, weak, settings, now)
         if points is None:
             return result
@@ -184,8 +259,10 @@ class YellowPathDetector:
                             3 * float(np.median(residual[keep])))
             keep = residual <= threshold
         points = points[keep]
+        step = max(3, round(height / 80))
+        gap = max(settings.max_gap, settings.dash_gap) if settings.dashed else settings.max_gap
         if (len(points) < 6 or np.ptp(points[:, 1]) < height * settings.min_span / 100
-                or np.max(np.diff(np.sort(points[:, 1]))) > settings.max_gap * height / 480 + height / 80 + 1):
+                or np.max(np.diff(np.sort(points[:, 1]))) > gap * height / 480 + step + 1):
             return result
         coefficients = np.polyfit(points[:, 1] / height, points[:, 0], 3)
         ys = np.arange(int(np.ceil(points[:, 1].min())), int(points[:, 1].max()) + 1)
@@ -197,7 +274,14 @@ class YellowPathDetector:
                 xs = (1 - weight) * xs + weight * old
                 coefficients = np.polyfit(ys / height, xs, 3)
         order = np.argsort(points[:, 1])
-        half_width = np.interp(ys, points[order, 1], points[order, 2]) / 2
+        # Pontas arredondadas dos tracos parecem estreitas em uma unica banda.
+        # Usa a largura tipica das bandas vizinhas para a ponte nao afunilar.
+        measured_widths = points[:, 2].copy()
+        for index, point in enumerate(points):
+            nearby = np.abs(points[:, 1] - point[1]) <= 5 * step
+            typical = float(np.median(points[nearby, 2]))
+            measured_widths[index] = max(point[2], .85 * typical)
+        half_width = np.interp(ys, points[order, 1], measured_widths[order]) / 2
         # A faixa reconstruida conserva a largura medida; nao une todo amarelo.
         left = np.column_stack((np.clip(xs - half_width, 0, width - 1), ys))
         right = np.column_stack((np.clip(xs + half_width, 0, width - 1), ys))[::-1]
@@ -205,18 +289,22 @@ class YellowPathDetector:
         result.observed_mask = cv2.bitwise_and(result.path_mask, weak)
         result.support = cv2.countNonZero(result.observed_mask) / max(1, cv2.countNonZero(result.path_mask))
         strong_support = cv2.countNonZero(cv2.bitwise_and(result.path_mask, strong)) / max(1, cv2.countNonZero(result.path_mask))
+        long_gap = settings.dashed and np.any(np.diff(np.sort(points[:, 1])) > settings.max_gap * height / 480 + step)
         # Uma cadeia em textura aleatoria pode parecer alongada. Confirma que
         # o corredor final tem suporte real, em vez de muitos pontos isolados.
-        if result.support < .5 or strong_support < .12:
-            return PathResult(strong, empty.copy(), empty.copy(), status="Buscando faixa com mais evidencia")
+        if result.support < (.28 if long_gap else .5) or strong_support < .12:
+            return PathResult(strong, empty.copy(), empty.copy(), status="Buscando faixa com mais evidencia", dash_mask=empty.copy())
         result.center = np.rint(np.column_stack((np.clip(xs, 0, width - 1), ys))).astype(np.int32)
+        result.dash_mask = self._dash_mask(result.path_mask, result.observed_mask, height, settings)
         result.status = "Faixa acompanhada" if result.support >= .8 else "Faixa com falhas reconstruidas"
+        if cv2.countNonZero(result.dash_mask):
+            result.status = "Faixa pontilhada: conexoes em azul"
         self.previous, self.previous_time = coefficients, now
         return result
 
 
 def render_path(frame, result, settings, anchor=.5):
-    """Verde = evidencia de cor; laranja = preenchimento geometrico estimado."""
+    """Verde = cor; laranja = buracos; azul = conexao entre tracos separados."""
     output = cv2.convertScaleAbs(frame, alpha=.60)
     if result.valid:
         observed = result.observed_mask > 0
@@ -224,6 +312,9 @@ def render_path(frame, result, settings, anchor=.5):
         green = cv2.addWeighted(frame, .25, np.full_like(frame, (70, 245, 30)), .75, 0)
         orange = cv2.addWeighted(frame, .25, np.full_like(frame, (0, 165, 255)), .75, 0)
         output[observed], output[inferred] = green[observed], orange[inferred]
+        if result.dash_mask is not None:
+            blue = cv2.addWeighted(frame, .15, np.full_like(frame, (255, 95, 25)), .85, 0)
+            output[result.dash_mask > 0] = blue[result.dash_mask > 0]
         contours, _ = cv2.findContours(result.path_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(output, contours, -1, (255, 235, 90), 1)
         cv2.polylines(output, [result.center], False, (255, 255, 255), 2, cv2.LINE_AA)
