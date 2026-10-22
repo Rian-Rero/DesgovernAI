@@ -17,7 +17,7 @@ import numpy as np
 class PathSettings:
     h_min: int = 18
     h_max: int = 40
-    s_min: int = 65
+    s_min: int = 25
     v_min: int = 45
     clahe: bool = True
     roi_top: int = 30          # Porcentagem da altura ignorada no topo.

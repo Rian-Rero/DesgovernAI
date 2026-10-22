@@ -558,14 +558,21 @@ class Car:
             self.traj = [data]
 
     ########################################
+    # acrescenta telemetria a amostra atual
+    def log(self, **values):
+        if getattr(self, "traj", None):
+            self.traj[-1].update(values)
+
+    ########################################
     # salva trajetoria em csv
     def save(self):
 
         filename = os.path.join(self.logfile, "car.csv")
 
-        header = ",".join(self.traj[0].keys())
-
-        data = np.array([list(traj.values()) for traj in self.traj])
+        keys = list(dict.fromkeys(key for row in self.traj for key in row))
+        header = ",".join(keys)
+        data = np.array([[row.get(key, np.nan) for key in keys]
+                         for row in self.traj], dtype=float)
 
         np.savetxt(filename, data, delimiter=",", header=header, comments="")
 

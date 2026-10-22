@@ -67,7 +67,7 @@ sistema. Mantenha `yellow_path.py` na mesma pasta do programa principal.
 | Ignorar topo | Exclui a parte superior, onde frequentemente aparecem objetos fora da pista. |
 | Estabilidade temporal | Suaviza a geometria entre frames recentes, somente quando ha deteccao atual compativel. Reduza se a camera se mover rapidamente. |
 | H minimo / maximo | Faixa de matiz, inicialmente 18–40 na escala de 0–179 do OpenCV. |
-| S minimo | Diminua para tinta pouco saturada; aumentar ajuda a excluir superficies esbranquicadas. |
+| S minimo | Padrao 25, na escala 0..255, conforme o ajuste da linha real. Aumentar ajuda a excluir superficies esbranquicadas. |
 | V minimo | Diminua para sombras e manchas escuras. |
 | CLAHE | Compensa contraste no brilho sem mudar H e S. Compare ligado/desligado em sua pista. |
 

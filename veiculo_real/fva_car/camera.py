@@ -189,7 +189,11 @@ class Camera:
 	def close(self):
 		if hasattr(self, 'cap') and self.cap is not None:
 			self.cap.release()
-		cv2.destroyAllWindows()
+		try:
+			cv2.destroyAllWindows()
+		except cv2.error:
+			# OpenCV headless nao tem janelas HighGUI; a captura ja foi liberada.
+			pass
 
 ########################################
 # main test
