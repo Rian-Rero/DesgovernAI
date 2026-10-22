@@ -38,6 +38,23 @@ class LateralTests(unittest.TestCase):
             self.assertAlmostEqual(heading, 0., places=8)
             self.assertAlmostEqual(curvature, sign/radius, places=8)
 
+    def test_offset_arc_is_selected_even_if_extrapolated_parabola_is_flat(self):
+        # Um arco exato deve prevalecer sobre uma parabola cuja extrapolacao
+        # muda o sinal da orientacao e da distancia no eixo dianteiro.
+        radius, angle = 2., .75
+        theta = np.linspace(.15, .8, 60)
+        for sign in [-1, 1]:
+            tangent = np.array([math.cos(angle), sign*math.sin(angle)])
+            normal = np.array([-tangent[1], tangent[0]])
+            lateral = -.7*sign
+            points = (lateral*normal + radius*np.sin(theta)[:, None]*tangent
+                      + sign*radius*(1-np.cos(theta))[:, None]*normal)
+            cross, heading, curvature = fit_line_errors(
+                points, [0, 0], [1, 0], with_curvature=True)
+            self.assertAlmostEqual(cross, lateral, places=8)
+            self.assertAlmostEqual(heading, sign*angle, places=8)
+            self.assertAlmostEqual(curvature, sign/radius, places=8)
+
     def test_braking_holds_last_steer_only_briefly(self):
         car = Mock()
         car.t = 0.
@@ -73,6 +90,27 @@ class LateralTests(unittest.TestCase):
         self.assertLess(curve_speed(1.5, 1., 0, 0), 1.)
         self.assertLess(curve_speed(1.5, 0, .8, .5), .7)
         self.assertEqual(curve_speed(.3, 0, 1, 1), .3)
+
+    def test_offset_curve_uses_normal_projection_and_tangent_at_same_point(self):
+        # Ponto conhecido cuja normal passa pelo eixo dianteiro (origem local).
+        # x + y*y' = 0 em x=-0.1; isso fixa c sem resolver raizes no teste.
+        foot_x = -.1
+        slope = .5 + 2*.4*foot_x
+        foot_y = -foot_x/slope
+        intercept = foot_y - .4*foot_x**2 - .5*foot_x
+        x = np.linspace(-.3, 1.2, 60)
+        for sign in [-1, 1]:
+            for angle in [0., 1.1]:
+                front = np.array([3., -2.])
+                forward = np.array([math.cos(angle), math.sin(angle)])
+                left = np.array([-forward[1], forward[0]])
+                y = sign*(.4*x*x + .5*x + intercept)
+                points = front + x[:, None]*forward + y[:, None]*left
+                lateral, heading, curvature = fit_line_errors(
+                    points, front, forward, with_curvature=True)
+                self.assertAlmostEqual(lateral, sign*math.hypot(foot_x, foot_y), places=8)
+                self.assertAlmostEqual(heading, math.atan(sign*slope), places=8)
+                self.assertAlmostEqual(curvature, sign*.8/(1+slope*slope)**1.5, places=8)
 
     def test_follower_converges_with_scene_actuator_sign(self):
         # Regressao do ultimo log: juntas positivas giram a frente para direita.
@@ -116,6 +154,34 @@ class LateralTests(unittest.TestCase):
                 state += .01 * model.derivative(state, 1.5, steer)
             self.assertLess(abs(state[1]), .005)
             self.assertLess(abs(state[2]), .005)
+
+    def test_curve_tracking_with_fitted_errors_in_closed_loop(self):
+        # Cadeia geometria -> erros -> Stanley -> bicicleta, sem mock dos erros.
+        # Em curva o erro angular de equilibrio e diferente de zero: o carro
+        # precisa estercar para que seu eixo dianteiro acompanhe o circulo.
+        model = BicycleModel()
+        radius, speed, dt = 2., .8, .02
+        for sign in [-1, 1]:
+            controller = StanleyController()
+            state = np.array([0., -.3*sign, .1*sign])
+            tail_errors = []
+            for step in range(1000):
+                forward = np.array([math.cos(state[2]), math.sin(state[2])])
+                front = state[:2] + model.wheelbase*forward
+                theta = math.atan2(front[0], radius-sign*front[1])
+                angles = theta + np.linspace(-.3, 1.2, 60)/radius
+                points = np.column_stack((radius*np.sin(angles),
+                                          sign*radius*(1-np.cos(angles))))
+                errors = fit_line_errors(points, front, forward, with_curvature=True)
+                self.assertIsNotNone(errors)
+                lateral, heading, curvature = errors
+                steer = controller.update(lateral, heading, speed, dt)
+                self.assertLessEqual(abs(steer), math.radians(20.))
+                state += dt*model.derivative(state, speed, steer)
+                if step >= 900:
+                    tail_errors.append(lateral)
+                    self.assertAlmostEqual(curvature, sign/radius, places=6)
+            self.assertLess(max(abs(error) for error in tail_errors), .01)
 
     def test_saturation_rate_and_zero_speed(self):
         control = StanleyController()

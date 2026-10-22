@@ -29,11 +29,18 @@ class BicycleModel:
 class StanleyController:
     def __init__(self, gain=1.5, softening=0.3, max_steer=math.radians(20),
                  max_rate=math.radians(60)):
-        if gain <= 0 or softening <= 0 or max_steer <= 0 or max_rate <= 0:
-            raise ValueError('Parametros Stanley devem ser positivos.')
+        if not all(math.isfinite(x) and x > 0
+                   for x in (gain, softening, max_steer, max_rate)):
+            raise ValueError('Parametros Stanley devem ser finitos e positivos.')
+        if max_steer >= math.pi / 2:
+            raise ValueError('max_steer deve ser menor que pi/2 radianos.')
         self.gain, self.softening = gain, softening
         self.max_steer, self.max_rate = max_steer, max_rate
         self.steer = 0.
+        self.heading_term = 0.
+        self.cross_track_term = 0.
+        self.raw_steer = 0.
+        self.target_steer = 0.
 
     def update(self, cross_track, heading_error, speed, dt):
         """cross_track: linha a esquerda do eixo dianteiro (+), em metros.
@@ -42,11 +49,12 @@ class StanleyController:
         """
         if not all(math.isfinite(x) for x in (cross_track, heading_error, speed, dt)) or dt <= 0:
             raise ValueError('Stanley requer sinais finitos e dt positivo.')
-        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
-        target = heading_error + math.atan2(self.gain * cross_track,
-                                            abs(speed) + self.softening)
-        target = float(np.clip(target, -self.max_steer, self.max_steer))
-        self.steer += float(np.clip(target - self.steer,
+        self.heading_term = math.atan2(math.sin(heading_error), math.cos(heading_error))
+        self.cross_track_term = math.atan2(self.gain * cross_track,
+                                          abs(speed) + self.softening)
+        self.raw_steer = self.heading_term + self.cross_track_term
+        self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
+        self.steer += float(np.clip(self.target_steer - self.steer,
                                     -self.max_rate * dt, self.max_rate * dt))
         return self.steer
 
@@ -92,7 +100,7 @@ def project_ground(pixels, shape, camera_matrix, perspective_angle, ground_z):
 
 
 def fit_line_errors(points, front, forward, max_distance=4., with_curvature=False):
-    """Ajusta parabola local no eixo dianteiro; opcionalmente retorna curvatura."""
+    """Erros na projecao normal do eixo dianteiro sobre a curva local."""
     forward = np.asarray(forward, dtype=float)[:2]
     forward = forward / np.linalg.norm(forward)
     left = np.array([-forward[1], forward[0]])
@@ -118,8 +126,18 @@ def fit_line_errors(points, front, forward, max_distance=4., with_curvature=Fals
     if np.sqrt(np.mean((y[keep] - np.polyval(coefficients, x[keep]))**2)) > .12:
         return None
     a, slope, intercept = coefficients
-    curvature = float(2*a / (1+slope*slope)**1.5)
-    errors = (float(intercept / math.sqrt(1+slope*slope)), math.atan(slope))
+    # Stanley usa a tangente no ponto mais proximo, que em geral nao e x=0.
+    # Minimo de x^2 + y(x)^2: x + y(x)*y'(x) = 0 (polinomio cubico).
+    roots = np.roots([2*a*a, 3*a*slope, 1+slope*slope+2*a*intercept,
+                      slope*intercept])
+    real_roots = [float(root.real) for root in roots if abs(root.imag) < 1e-8]
+    closest_x = min(real_roots, key=lambda x: x*x + np.polyval(coefficients, x)**2)
+    closest_y = float(np.polyval(coefficients, closest_x))
+    closest_slope = float(2*a*closest_x + slope)
+    normal_scale = math.sqrt(1+closest_slope*closest_slope)
+    errors = ((closest_y-closest_x*closest_slope)/normal_scale,
+              math.atan(closest_slope))
+    closest_curvature = float(2*a / normal_scale**3)
     # Em curvas fechadas y(x) extrapola mal ate o eixo dianteiro.
     # Compara com um arco: mesma quantidade de parametros, erro em metros.
     xx, yy = x[keep], y[keep]
@@ -133,7 +151,7 @@ def fit_line_errors(points, front, forward, max_distance=4., with_curvature=Fals
             (np.hypot(xx-center_x, yy-center_y)-radius)**2)))
         poly_rmse = float(np.sqrt(np.mean(
             ((yy-np.polyval(coefficients, xx))/np.sqrt(1+(2*a*xx+slope)**2))**2)))
-        if (abs(curvature) > .15 and .6 < radius < 8
+        if (1/radius > .15 and .6 < radius < 8
                 and center_distance > .1 and circle_rmse < .9*poly_rmse):
             # Tangente orientada no sentido de avanco, normal positiva a esquerda.
             tangent = np.array([center_y, -center_x]) / center_distance
@@ -143,8 +161,8 @@ def fit_line_errors(points, front, forward, max_distance=4., with_curvature=Fals
             turn_sign = math.copysign(1., np.dot([center_x, center_y], left_normal))
             errors = (turn_sign*(center_distance-radius),
                       math.atan2(tangent[1], tangent[0]))
-            curvature = turn_sign/radius
-    return (*errors, curvature) if with_curvature else errors
+            closest_curvature = turn_sign/radius
+    return (*errors, closest_curvature) if with_curvature else errors
 
 
 def curve_speed(reference, curvature, lateral, heading, min_speed=.5,
@@ -188,7 +206,15 @@ class YellowLineFollower:
     """Percepcao metrica e comando; uma unica aquisicao de imagem por passo."""
     def __init__(self, car):
         self.car = car
-        self.controller = StanleyController(gain=car.parameters.get('stanley_gain', 1.5))
+        max_steer_deg = car.parameters.get('stanley_max_steer_deg', 20.)
+        if not math.isfinite(max_steer_deg):
+            raise ValueError('stanley_max_steer_deg deve ser finito.')
+        self.controller = StanleyController(
+            gain=car.parameters.get('stanley_gain', 1.5),
+            softening=car.parameters.get('stanley_softening', .3),
+            # O atuador Car aceita no maximo 20 graus; respeita limites menores.
+            max_steer=math.radians(min(max_steer_deg, 20.)),
+            max_rate=math.radians(car.parameters.get('stanley_max_rate_deg_s', 60.)))
         # Na cena Car, juntas positivas viram para a direita. Stanley usa
         # angulo geometrico positivo para a esquerda (confirmado pelo log).
         self.steering_sign = car.parameters.get('steering_sign', -1.)
@@ -255,6 +281,10 @@ class YellowLineFollower:
                 lateral_accel=car.parameters.get('curve_lateral_accel', .6)))
         car.log(line_valid=int(errors is not None), cross_track_m=lateral,
                 curvature_m_inv=curvature,
+                stanley_heading_rad=self.controller.heading_term if errors is not None else float('nan'),
+                stanley_cross_track_rad=self.controller.cross_track_term if errors is not None else float('nan'),
+                stanley_raw_rad=self.controller.raw_steer if errors is not None else float('nan'),
+                stanley_target_rad=self.controller.target_steer if errors is not None else float('nan'),
                 steer_geometric_rad=steer, steering_sign=self.steering_sign,
                 line_pixels=len(pixels), line_ground_points=len(points),
                 line_memory_points=len(path_points),

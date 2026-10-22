@@ -21,7 +21,7 @@ DISPLAY_RATE = 10.0  # Hz
 TELEMETRY_RESOLUTION = (2304, 1344)  # pixels
 TELEMETRY_DPI = 100
 parameters = {
-    "ts": 100.0,
+    "ts": 120.0,
     "save": True,
     "logfile": "logs/",
     "beep": True,
@@ -29,7 +29,10 @@ parameters = {
     "explicit_vision": True,
     "real_time": True,
     "velocity_reference": VELOCITY_REFERENCE,
-    "stanley_gain": 1.5,
+    "stanley_gain": 1.5,  # 1/s: peso do erro de distancia lateral
+    "stanley_softening": 0.3,  # m/s: evita divisao por zero na partida
+    "stanley_max_steer_deg": 20.0,  # graus: limite fisico do carrinho
+    "stanley_max_rate_deg_s": 60.0,  # graus/s: limita movimentos bruscos
     "curve_min_speed": 0.5,  # m/s durante recuperacao de erro/curvas
     "curve_lateral_accel": 0.6,  # m/s^2: limite nominal v^2*|curvatura|
     "steering_sign": -1.0,  # juntas positivas da cena Car viram para a direita
@@ -58,20 +61,30 @@ class TelemetryPlot:
         grid = self.figure.add_gridspec(3, 2, height_ratios=(1.2, 1, 1))
         camera = self.figure.add_subplot(grid[0, :])
         self.lateral_axis = self.figure.add_subplot(grid[1, 0])
+        self.heading_axis = self.lateral_axis.twinx()
         self.velocity_axis = self.figure.add_subplot(grid[1, 1], sharex=self.lateral_axis)
         self.control_axis = self.figure.add_subplot(grid[2, 0], sharex=self.lateral_axis)
         self.steering_axis = self.figure.add_subplot(grid[2, 1], sharex=self.lateral_axis)
         self.image = camera.imshow(vision_func(car))
         camera.axis("off")
         (self.lateral_error,) = self.lateral_axis.plot([], [], label="Erro lateral")
-        self.lateral_axis.axhline(0, color="gray", linestyle="--", label="Erro zero")
+        (self.heading_error,) = self.heading_axis.plot(
+            [], [], color="tab:orange", linestyle="--", label="Erro de orientacao"
+        )
+        zero_error = self.lateral_axis.axhline(
+            0, color="gray", linestyle=":", label="Erro zero"
+        )
         self.lateral_axis.set(
             xlabel="Tempo de simulacao (s)", ylabel="Erro lateral (m)",
             xlim=(0, duration), ylim=(-0.5, 0.5),
-            title="Erro lateral (+ linha a esquerda)",
+            title="Erros do Stanley (+ linha a esquerda)",
         )
+        self.heading_axis.set(ylabel="Erro de orientacao (graus)", ylim=(-10, 10))
+        self.heading_axis.tick_params(axis="y", colors="tab:orange", labelsize=12)
+        self.heading_axis.yaxis.label.set_color("tab:orange")
+        self.heading_axis.yaxis.label.set_size(14)
         self.lateral_axis.grid(True)
-        self.lateral_axis.legend()
+        self.lateral_axis.legend(handles=[self.lateral_error, self.heading_error, zero_error])
         (self.measured,) = self.velocity_axis.plot([], [], label="Velocidade medida")
         self.velocity_axis.axhline(
             car.parameters.get("velocity_reference", VELOCITY_REFERENCE),
@@ -140,6 +153,13 @@ class TelemetryPlot:
         finite = [abs(error) for error in errors if math.isfinite(error)]
         limit = max(0.5, 1.15 * max(finite, default=0.0))
         self.lateral_axis.set_ylim(-limit, limit)
+        headings = [math.degrees(state.get("heading_error_rad", float("nan")))
+                    if state.get("line_valid") == 1 else float("nan")
+                    for state in trajectory]
+        self.heading_error.set_data(t, headings)
+        finite_headings = [abs(error) for error in headings if math.isfinite(error)]
+        heading_limit = max(10., 1.15 * max(finite_headings, default=0.))
+        self.heading_axis.set_ylim(-heading_limit, heading_limit)
         self.measured.set_data(t, [state["v"] for state in trajectory])
         self.reference.set_data(t, [state["vref"] for state in trajectory])
         self.pwm.set_data(t, [state["motor_pwm_percent"] for state in trajectory])
