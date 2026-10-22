@@ -23,7 +23,7 @@ from main import parameters, run_mission
 SIM_STEERING_SIGN = -1.0
 VELOCITY_REFERENCE = 1.5  # m/s
 STANLEY_GAIN = 5.0  # 1/s; validado em ensaios comparativos e volta completa
-SIMULATION_TIME = 100.0  # s
+SIMULATION_TIME = 120.0  # s
 
 
 def place_car(sim, pose):
