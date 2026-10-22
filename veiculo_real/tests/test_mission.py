@@ -133,6 +133,17 @@ class MissionTests(unittest.TestCase):
         logs=[call.kwargs for call in self.car.log.call_args_list if 'obstacle_stop' in call.kwargs]
         self.assertEqual([log['obstacle_stop'] for log in logs],[1,1])
 
+    def test_full_rc_bypasses_stanley_while_obstacle_keeps_priority(self):
+        self.car.sel_direcao = self.car.sel_tracao = 0
+        self.car.distances = iter([(10., True), (.1, True)])
+        follower = Mock()
+        with patch.object(mission, 'RealStanleyFollower', return_value=follower):
+            self.run_fake()
+        self.assertIn(('speed', 0.), self.events)
+        follower.controller.reset.assert_called_once()
+        follower.apply.assert_called_once()
+        self.assertTrue(follower.apply.call_args.kwargs['obstacle_detected'])
+
     def test_capture_timestamp_is_taken_before_acquisition_and_snapshot_is_atomic(self):
         stop=threading.Event();data={};events=[]
         def clock():events.append('clock');return 5.

@@ -102,6 +102,12 @@ class Car:
         # comando de estercamento
         self.st = 0.0
 
+        # Receptor e seletores independentes: 0 = RC, 1 = AUTO.
+        self.rc_direcao = 0.0
+        self.rc_acelerador = 0.0
+        self.sel_direcao = 0
+        self.sel_tracao = 0
+
         # botao de emergencia
         self.emergencia = True
 
@@ -111,7 +117,7 @@ class Car:
         # filtros dos sinais
         self.v_filt = filter.MovingAverage(n=VELOCITY_FILTER_SIZE)
         self.a_filt = filter.MovingAverage(n=30)
-        self.w_filt = filter.MovingAverage(n=20)
+        self.w_filt = filter.MovingAverage(n=10)
         self.vel_error_integral = 0.0
 
         # logs de salvamento
@@ -128,9 +134,7 @@ class Car:
 
         # atuadores de estercamento, aceleracao e ultrasom/camera
         try:
-            self.atuador = servos.Servos(
-                ultrasonic=self.parameters["ultrasonic_steering"]
-            )
+            self.atuador = servos.Servos()
         except Exception as e:
             print(f"\033[31mErro nos servos: {e}\033[0m", flush=True)
             raise
@@ -260,6 +264,13 @@ class Car:
         self.v_ant = self.v
         self.v, self.w = self.get_vel()
 
+        # O firmware RC publica os cinco campos na mesma mensagem serial.
+        self.rc_direcao, self.rc_acelerador = self.odometer.get_rc()
+        previous_traction_mode = self.sel_tracao
+        self.sel_direcao, self.sel_tracao = self.odometer.get_control_mode()
+        if self.sel_tracao != previous_traction_mode:
+            self.vel_error_integral = 0.0
+
         # aceleracao
         self.a = self.get_accel()
 
@@ -351,7 +362,7 @@ class Car:
             _, _, self.yaw_mag = self.imu.get_euler(degrees=False)
 
             if self.yaw_mag is not None:
-                K = 0.05
+                K = 0.0  # rc-input: orientacao estimada pelo modelo cinematico
                 # erro angular corretamente embrulhado
                 error = np.arctan2(
                     np.sin(self.yaw_mag - yaw), np.cos(self.yaw_mag - yaw)
@@ -384,7 +395,7 @@ class Car:
         self.w_imu = np.deg2rad(g_z)
 
         # fusao modelo + IMU
-        K = 0.8
+        K = 0.0
         w = (1.0 - K) * self.w_model + K * self.w_imu
 
         # filtra velocidade angular
@@ -406,7 +417,7 @@ class Car:
         self.a_x, _, _ = self.imu.get_accel()
 
         # fusao sensorial
-        K = 0.2
+        K = 0.0
         a = (1.0 - K) * self.a_model + K * self.a_x
 
         # filtra
@@ -438,6 +449,10 @@ class Car:
     ########################################
     # seta torque do veiculo
     def set_vel(self, vref):
+
+        # Em RC, o receptor escolhe a referencia; em AUTO, preserva o PI local.
+        if self.sel_tracao == 0:
+            vref = self.rc_acelerador * CAR["VELMAX"]
 
         # define referencia e marcha
         self._set_ref(vref)
@@ -498,6 +513,8 @@ class Car:
         # emergencia
         if self.emergencia:
             st = 0.0
+        elif self.sel_direcao == 0:
+            st = self.rc_direcao * CAR["STEERMAX"]
 
         # limita angulo de estercamento
         self.st = np.clip(st, -CAR["STEERMAX"], CAR["STEERMAX"])
@@ -548,6 +565,10 @@ class Car:
             "w_model": self.w_model,
             "w_imu": self.w_imu,
             "yaw_mag": self.yaw_mag,
+            "rc_direcao": self.rc_direcao,
+            "rc_acelerador": self.rc_acelerador,
+            "sel_direcao": self.sel_direcao,
+            "sel_tracao": self.sel_tracao,
         }
 
         # se ja iniciou as trajetorias

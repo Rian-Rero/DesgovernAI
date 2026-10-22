@@ -13,6 +13,8 @@ from fva_car.lateral import (
 )
 
 MAIN_VEL = 1.0  # m/s: referencia inicial para ajuste no veiculo real
+TELEMETRY_HZ = 10.0
+TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20
 STOP_REACTION_TIME = 0.30
 STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
@@ -111,6 +113,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             figure, axis = plt.subplots()
             plot = (plt, figure, axis)
         t_plot = clock()
+        t_telemetry = t_plot - TELEMETRY_PERIOD
         obstacle_detected = False
         next_stop_beep = 0.0
         while car.t < config["ts"]:
@@ -123,7 +126,18 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 obstacle_detected = True
                 print(f"Obstaculo a {dist:.2f} m: parada travada ate o fim do ensaio.", flush=True)
             observation = vision_data["observation"]
-            follower.apply(car, observation, clock(), obstacle_detected=obstacle_detected)
+            manual = (getattr(car, "sel_direcao", 1) == 0
+                      and getattr(car, "sel_tracao", 1) == 0)
+            if (manual and not car.emergencia and not obstacle_detected
+                    and np.isfinite(car.v) and np.isfinite(car.dt) and car.dt > 0):
+                # Car aplica os dois canais RC; a perda da faixa nao impede
+                # controle manual. Obstaculos e emergencia conservam prioridade.
+                follower.controller.reset()
+                car.set_steer(0.0)
+                car.set_vel(0.0)
+                car.log(lateral_active=0)
+            else:
+                follower.apply(car, observation, clock(), obstacle_detected=obstacle_detected)
             car.log(obstacle_stop=int(obstacle_detected), distance_m=dist,
                     stopping_distance_m=stop_distance)
             if not thread_vision.is_alive():
@@ -134,10 +148,12 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             if obstacle_detected and now >= next_stop_beep:
                 if car.bz.beep([0.15, 0.15], silence=0.15):
                     next_stop_beep = now + 1.0
-            # Conserva o formato DATA lido pela GUI remota existente.
-            print(f"DATA,{car.t:.3f},{car.p[0]:.3f},{car.p[1]:.3f},"
-                  f"{car.v:.3f},{car.vref:.3f},{car.a:.3f},{car.u:.3f},"
-                  f"{car.w:.3f},{car.th:.3f}", flush=True)
+            # O controle roda em todo passo; somente a telemetria usa 10 Hz.
+            if now - t_telemetry >= TELEMETRY_PERIOD:
+                print(f"DATA,{car.t:.3f},{car.p[0]:.3f},{car.p[1]:.3f},"
+                      f"{car.v:.3f},{car.vref:.3f},{car.a:.3f},{car.u:.3f},"
+                      f"{car.w:.3f},{car.th:.3f}", flush=True)
+                t_telemetry = now
             if plot is not None and now - t_plot >= 1.0:
                 plt, _, axis = plot
                 if observation is not None and observation.frame is not None:
