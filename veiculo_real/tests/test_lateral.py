@@ -160,6 +160,13 @@ class SharedPerceptionTests(unittest.TestCase):
 
 
 class RealFollowerTests(unittest.TestCase):
+    def test_rc_reverse_request_does_not_run_forward_stanley(self):
+        car = fake_car()
+        car.sel_tracao, car.rc_acelerador = 0, -.4
+        follower = lateral.RealStanleyFollower({})
+        self.assertFalse(follower.apply(car, self.valid_observation(), 10.))
+        self.assert_neutral(car)
+
     def valid_observation(self,lateral_error=.15,heading=0.,timestamp=10.):
         return lateral.LineObservation(timestamp=timestamp,errors=(lateral_error,heading,0.))
 

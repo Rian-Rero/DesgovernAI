@@ -342,8 +342,11 @@ class RealStanleyFollower:
                          and math.isfinite(car.v) and math.isfinite(car.dt) and car.dt > 0)
         gear = getattr(car, 'gear', None)
         reverse_gear = getattr(gear, 'value', gear) in ('reverse', -1)
+        reverse_requested = (getattr(car, 'sel_tracao', 1) == 0
+                             and getattr(car, 'rc_acelerador', 0.) < 0)
         active = (not car.emergencia and not obstacle_detected and finite_sample
-                  and not reverse_gear and car.v >= -.05 and errors is not None)
+                  and not reverse_gear and not reverse_requested
+                  and car.v >= -.05 and errors is not None)
         if active:
             lateral, heading, curvature = errors
             steer = self.controller.update(lateral, heading, car.v, car.dt)
