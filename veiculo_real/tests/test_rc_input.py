@@ -40,6 +40,7 @@ class RCInputTests(unittest.TestCase):
     def setUp(self):
         self.car = self.module.Car.__new__(self.module.Car)
         self.car.emergencia = False
+        self.car.encoder_valid = True
         self.car.sel_direcao = self.car.sel_tracao = 1
         self.car.rc_direcao = self.car.rc_acelerador = .25
         self.car.gear = Gear.FORWARD
@@ -60,6 +61,40 @@ class RCInputTests(unittest.TestCase):
     def test_auto_traction_keeps_received_reference(self):
         self.car.set_vel(.3)
         self.assertAlmostEqual(self.car.vref, .3)
+
+    def test_invalid_encoder_cuts_throttle_and_integral_without_requesting_reverse(self):
+        self.car.encoder_valid = False
+        self.car.sel_tracao = 0
+        self.car.rc_acelerador = -1.
+        self.car.vel_error_integral = 5.
+        self.car.set_reverse = Mock()
+        self.car.set_vel(1.)
+        self.assertEqual(self.car.vref, 0.)
+        self.assertEqual(self.car.vel_error_integral, 0.)
+        self.car.atuador.set_throttle.assert_called_once_with(0.)
+        self.car.set_reverse.assert_not_called()
+
+    def test_invalid_encoder_blocks_direct_throttle_and_rc_steering(self):
+        self.car.encoder_valid = False
+        self.car.sel_direcao = 0
+        self.car.rc_direcao = 1.
+        self.car.set_u(1.)
+        self.car.set_steer(.2)
+        self.car.atuador.set_throttle.assert_called_once_with(0.)
+        self.car.atuador.set_steer.assert_called_once_with(0.)
+
+    def test_encoder_timeout_during_gear_shift_cuts_the_new_throttle(self):
+        self.car.gear = Gear.REVERSE
+        self.car.odometer = Mock()
+        self.car.odometer.control_valid.side_effect = [True, False]
+        self.car.set_forward = Mock(side_effect=lambda: setattr(self.car, 'gear', Gear.FORWARD))
+        self.car.vel_error_integral = 2.
+        self.car.set_vel(.3)
+        self.car.set_forward.assert_called_once()
+        self.car.atuador.set_throttle.assert_called_once_with(0.)
+        self.assertEqual(self.car.vref, 0.)
+        self.assertEqual(self.car.vel_error_integral, 0.)
+        self.assertFalse(self.car.encoder_valid)
 
     def test_independent_selectors_control_only_their_axis(self):
         self.car.sel_direcao = 0
@@ -90,6 +125,7 @@ class RCInputTests(unittest.TestCase):
         self.car.odometer = Mock()
         self.car.odometer.get_rc.return_value = (-.2, .7)
         self.car.odometer.get_control_mode.return_value = (0, 1)
+        self.car.odometer.control_valid.return_value = False
         self.car.get_vel = Mock(return_value=(0., 0.))
         self.car.get_accel = Mock(return_value=0.)
         self.car.get_yaw = Mock(return_value=0.)
@@ -100,6 +136,7 @@ class RCInputTests(unittest.TestCase):
         self.assertEqual((self.car.rc_direcao, self.car.rc_acelerador), (-.2, .7))
         self.assertEqual((self.car.sel_direcao, self.car.sel_tracao), (0, 1))
         self.assertEqual(self.car.vel_error_integral, 0.)
+        self.assertFalse(self.car.encoder_valid)
 
 
 if __name__ == '__main__':

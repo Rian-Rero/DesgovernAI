@@ -107,6 +107,7 @@ class Car:
         self.rc_acelerador = 0.0
         self.sel_direcao = 0
         self.sel_tracao = 0
+        self.encoder_valid = False
 
         # botao de emergencia
         self.emergencia = True
@@ -141,7 +142,9 @@ class Car:
 
         # odometro da roda
         try:
-            self.odometer = encoder.Encoder()
+            self.odometer = encoder.Encoder(
+                protocol=self.parameters.get("encoder_protocol", "rc")
+            )
         except Exception as e:
             print(f"\033[31mErro no velocimetro: {e}\033[0m", flush=True)
             raise
@@ -264,8 +267,9 @@ class Car:
         self.v_ant = self.v
         self.v, self.w = self.get_vel()
 
-        # O firmware RC publica os cinco campos na mesma mensagem serial.
+        # O protocolo RPM usa AUTO; o protocolo RC recebe as chaves do Arduino.
         self.rc_direcao, self.rc_acelerador = self.odometer.get_rc()
+        self.encoder_valid = bool(self.odometer.control_valid())
         previous_traction_mode = self.sel_tracao
         self.sel_direcao, self.sel_tracao = self.odometer.get_control_mode()
         if self.sel_tracao != previous_traction_mode:
@@ -447,8 +451,24 @@ class Car:
         return self.vref
 
     ########################################
+    # revalida a comunicacao inclusive depois de uma troca de marcha
+    def _encoder_ready(self):
+        valid = bool(getattr(self, "encoder_valid", False))
+        odometer = getattr(self, "odometer", None)
+        if valid and odometer is not None:
+            valid = bool(odometer.control_valid())
+        self.encoder_valid = valid
+        return valid
+
+    ########################################
     # seta torque do veiculo
     def set_vel(self, vref):
+
+        if not self._encoder_ready():
+            self._set_ref(0.0)
+            self.vel_error_integral = 0.0
+            self.set_u(0.0)
+            return
 
         # Em RC, o receptor escolhe a referencia; em AUTO, preserva o PI local.
         if self.sel_tracao == 0:
@@ -480,6 +500,10 @@ class Car:
     def set_u(self, u):
 
         # em caso de emergencia, corte o throttle
+        if not self._encoder_ready():
+            self.vref = 0.0
+            self.vel_error_integral = 0.0
+            u = 0.0
         if self.emergencia:
             u = 0.0
 
@@ -511,7 +535,7 @@ class Car:
     # seta steer do veiculo
     def set_steer(self, st):
         # emergencia
-        if self.emergencia:
+        if self.emergencia or not self._encoder_ready():
             st = 0.0
         elif self.sel_direcao == 0:
             st = self.rc_direcao * CAR["STEERMAX"]
@@ -569,6 +593,7 @@ class Car:
             "rc_acelerador": self.rc_acelerador,
             "sel_direcao": self.sel_direcao,
             "sel_tracao": self.sel_tracao,
+            "encoder_valid": int(self.encoder_valid),
         }
 
         # se ja iniciou as trajetorias

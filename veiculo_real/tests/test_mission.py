@@ -190,6 +190,28 @@ class MissionTests(unittest.TestCase):
         car.set_u.assert_not_called()
         car.set_steer.assert_not_called()
 
+    def test_invalid_encoder_protocol_is_rejected_before_opening_drivers(self):
+        factory = Mock()
+        with self.assertRaisesRegex(ValueError, 'encoder_protocol'):
+            mission.run_mission({'encoder_protocol': 'auto'}, car_factory=factory)
+        factory.assert_not_called()
+
+    def test_cli_allows_explicit_rc_firmware_without_changing_default_rpm(self):
+        with patch.object(sys, 'argv', ['main.py', '--encoder-protocol', 'rc', '--speed', '.3']), \
+                patch.object(mission, 'run_mission') as run:
+            mission.main()
+        run.assert_called_once_with({'velocity_reference': .3, 'encoder_protocol': 'rc'}, display=False)
+        self.assertEqual(mission.parameters['encoder_protocol'], 'rpm')
+
+    def test_invalid_encoder_does_not_enable_manual_bypass(self):
+        self.car.sel_direcao = self.car.sel_tracao = 0
+        self.car.encoder_valid = False
+        follower = Mock()
+        with patch.object(mission, 'RealStanleyFollower', return_value=follower):
+            self.run_fake()
+        follower.controller.reset.assert_not_called()
+        self.assertEqual(follower.apply.call_count, 2)
+
 
 class RealCarLoggingTests(unittest.TestCase):
     def test_late_lateral_columns_are_saved_with_missing_values_as_nan(self):

@@ -13,10 +13,10 @@ camera virtual ou localizacao ideal do CoppeliaSim.
 
 ## Calibrar antes de movimentar
 
-A calibracao da camera do carrinho nao foi encontrada no projeto. O exemplo
-`calibracao/camera_lateral.example.json` tem listas vazias intencionalmente:
-nao representa medidas reais e nao habilita movimento. A missao valida um
-arquivo de calibracao antes de criar `Car` ou abrir os atuadores.
+A calibracao medida esta em `calibracao/camera_lateral.json` (12 pontos,
+640x480). Ela corresponde a montagem usada na medicao. O arquivo
+`calibracao/camera_lateral.example.json` e apenas um modelo vazio. A missao
+valida o arquivo escolhido antes de criar `Car` ou abrir os atuadores.
 
 1. Deixe a camera fixa, com o mesmo enquadramento e resolucao usados na missao.
 2. Com o carro parado, marque pelo menos quatro pontos no chao, distribuidos
@@ -52,12 +52,48 @@ python3 veiculo_real/main.py
 python3 veiculo_real/main.py --calibration caminho/camera.json --speed 0.5 --display
 ```
 
-A referencia inicial e 0.5 m/s, maximo de 20 graus e taxa de 60 graus/s.
+A referencia padrao e 1.0 m/s; use `--speed 0.3` no primeiro ensaio.
+O maximo de estercamento e 20 graus, com taxa de 60 graus/s.
 Ganhos, sinais e limites ainda precisam de ajuste e verificacao no carro
 fisico. O entre-eixos do `Car` real continua 0.36 m; nao foi substituido pelo
 valor de 0.302 m do simulador. `steering_sign=+1` segue a convencao do codigo
 real (positivo para esquerda) e pode ser invertido se a montagem do servo
 exigir. A calibracao de trim existente nos servos e preservada.
+
+## Firmware do encoder e transferencia pela GUI
+
+No carro VERMELHO, a leitura serial foi verificada em 22/10/2026:
+o Arduino envia apenas `0.00` (RPM), sem os cinco campos do firmware RC.
+Por isso `main.py` seleciona explicitamente `encoder_protocol="rpm"`.
+Esse modo le o RPM com a conversao existente e usa controle automatico de
+direcao e tracao; nao recebe chaves ou comandos do radio. Nao existe troca
+automatica de protocolo ao receber uma linha incompleta.
+
+O firmware novo permanece disponivel com `--encoder-protocol rc`. Nesse
+modo sao obrigatorios os cinco campos `RPM,RC_DIR,RC_ACEL,SEL_DIR,SEL_TRACAO`;
+as chaves publicadas pelo Arduino continuam escolhendo RC (0) ou AUTO (1).
+O construtor `Encoder()` e o teste individual continuam usando `rc` por
+padrao, para preservar os outros programas com esse firmware.
+
+Na interface `fva_gui_multiplataforma.py`, envie novamente o conteudo de
+`veiculo_real` para `/home/alunos/Desktop/fva`. A transferencia copia o
+arquivo `.ino`, mas nao grava o Arduino. Com a missao encerrada, na aba
+Executar Comandos, teste o protocolo verificado sem comandar motores:
+
+```sh
+python3 -u /home/alunos/Desktop/fva/fva_car/encoder.py --protocol rpm --seconds 5
+```
+
+Depois de aparecer `OK`, o ensaio de linha em baixa velocidade usa:
+
+```sh
+python3 -u /home/alunos/Desktop/fva/main.py --speed 0.3
+```
+
+Sem amostra atual do encoder por mais de 0.3 s, ou com pulso ausente em um
+eixo selecionado para RC, o comando vai para neutro e o integral do PI e
+zerado. Pulso zero nao e mais convertido em pedido de re. O CSV registra
+`encoder_valid`; a missao informa mudancas de validade no terminal.
 
 Em `main.py:parameters`, `path_settings` recebe os mesmos campos de
 `tools/yellow_path.PathSettings`, por exemplo:

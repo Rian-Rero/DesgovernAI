@@ -160,6 +160,26 @@ class SharedPerceptionTests(unittest.TestCase):
 
 
 class RealFollowerTests(unittest.TestCase):
+    def test_invalid_encoder_overrides_a_fresh_visible_line(self):
+        car = fake_car()
+        car.encoder_valid = False
+        follower = lateral.RealStanleyFollower({})
+        self.assertFalse(follower.apply(car, self.valid_observation(), 10.))
+        self.assert_neutral(car)
+        self.assertEqual(car.log.call_args.kwargs['lateral_active'], 0)
+
+    def test_encoder_expiring_during_actuation_is_logged_as_inactive(self):
+        car = fake_car()
+        car.encoder_valid = True
+        car.set_vel.side_effect = lambda _: setattr(car, 'encoder_valid', False)
+        follower = lateral.RealStanleyFollower({})
+        self.assertFalse(follower.apply(car, self.valid_observation(), 10.))
+        car._set_ref.assert_called_with(0.)
+        car.set_u.assert_called_with(0.)
+        car.set_steer.assert_called_with(0.)
+        self.assertEqual(car.vel_error_integral, 0.)
+        self.assertEqual(car.log.call_args.kwargs['lateral_active'], 0)
+
     def test_rc_reverse_request_does_not_run_forward_stanley(self):
         car = fake_car()
         car.sel_tracao, car.rc_acelerador = 0, -.4

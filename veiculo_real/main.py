@@ -27,6 +27,7 @@ parameters = {
     "ultrasonic_steering": False,  # camera fixa apos calibrada
     "us_buzzer": False,
     "initial_position": [0, 0, 0.0],
+    "encoder_protocol": "rpm",  # firmware verificado no VERMELHO: apenas RPM
     "camera_calibration_file": str(
         Path(__file__).resolve().parent / "calibracao" / "camera_lateral.json"
     ),
@@ -84,6 +85,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         config.update(settings)
     if not config["camera"] or config["ultrasonic_steering"]:
         raise ValueError("Stanley requer camera ligada e fixa (ultrasonic_steering=False).")
+    if config["encoder_protocol"] not in ("rpm", "rc"):
+        raise ValueError("encoder_protocol deve ser 'rpm' ou 'rc'.")
     # Valida geometria e ajustes antes de abrir sensores ou atuar nos motores.
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
     detector = RealLineDetector(
@@ -102,6 +105,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     try:
         car.start_mission()
         print(f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s", flush=True)
+        print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
         thread_vision = threading.Thread(
             target=vision_func, args=(car, vision_data, stop_event, detector, clock),
             daemon=True, name="linha-hsv",
@@ -116,9 +120,16 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         t_telemetry = t_plot - TELEMETRY_PERIOD
         obstacle_detected = False
         next_stop_beep = 0.0
+        last_encoder_valid = None
         while car.t < config["ts"]:
             if not car.step():
                 break
+            encoder_valid = bool(getattr(car, "encoder_valid", True))
+            if encoder_valid != last_encoder_valid:
+                print("Encoder: leitura OK." if encoder_valid else
+                      "Encoder sem leitura valida: comandos em neutro. Confira o protocolo e a serial.",
+                      flush=True)
+                last_encoder_valid = encoder_valid
             dist, valid = car.get_distance()
             stop_distance = stopping_distance(car.v)
             if (not obstacle_detected and valid and np.isfinite(dist)
@@ -128,7 +139,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             observation = vision_data["observation"]
             manual = (getattr(car, "sel_direcao", 1) == 0
                       and getattr(car, "sel_tracao", 1) == 0)
-            if (manual and not car.emergencia and not obstacle_detected
+            if (manual and encoder_valid and not car.emergencia and not obstacle_detected
                     and np.isfinite(car.v) and np.isfinite(car.dt) and car.dt > 0):
                 # Car aplica os dois canais RC; a perda da faixa nao impede
                 # controle manual. Obstaculos e emergencia conservam prioridade.
@@ -186,9 +197,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calibration", help="JSON da camera calibrada em metros")
     parser.add_argument("--speed", type=float, default=MAIN_VEL, help="Teto de velocidade em m/s")
+    parser.add_argument("--encoder-protocol", choices=("rpm", "rc"),
+                        help="rpm: Arduino original; rc: Arduino com receptor e chaves")
     parser.add_argument("--display", action="store_true", help="Mostrar a faixa detectada")
     args = parser.parse_args()
     settings = {"velocity_reference": args.speed}
+    if args.encoder_protocol:
+        settings["encoder_protocol"] = args.encoder_protocol
     if args.calibration:
         settings["camera_calibration_file"] = args.calibration
     def interrupt_mission(_signum, _frame):

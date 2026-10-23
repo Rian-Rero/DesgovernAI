@@ -345,6 +345,7 @@ class RealStanleyFollower:
         reverse_requested = (getattr(car, 'sel_tracao', 1) == 0
                              and getattr(car, 'rc_acelerador', 0.) < 0)
         active = (not car.emergencia and not obstacle_detected and finite_sample
+                  and getattr(car, 'encoder_valid', True)
                   and not reverse_gear and not reverse_requested
                   and car.v >= -.05 and errors is not None)
         if active:
@@ -353,7 +354,9 @@ class RealStanleyFollower:
             car.set_steer(self.steering_sign * steer)
             car.set_vel(curve_speed(self.reference, curvature, lateral, heading,
                                     min_speed=self.min_speed, lateral_accel=self.lateral_accel))
-        else:
+            # Os setters revalidam a serial, inclusive apos uma troca de marcha.
+            active = bool(getattr(car, 'encoder_valid', True))
+        if not active:
             car._set_ref(0.)
             car.vel_error_integral = 0.
             car.set_u(0.)
