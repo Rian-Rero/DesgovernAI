@@ -20,7 +20,7 @@ from fva_car.lateral import (
     RealStanleyFollower,
 )
 
-MAIN_VEL = 1.0  # m/s: iniciar o ajuste lateral sem percorrer metros durante a correcao
+MAIN_VEL = 0.7  # m/s: iniciar o ajuste lateral sem percorrer metros durante a correcao
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20
