@@ -39,6 +39,7 @@ parameters = {
     "velocity_reference": MAIN_VEL,
     "stanley_gain": 1.5,
     "stanley_softening": 0.3,
+    "stanley_use_vref": True,  # True: vref no denominador; False: velocidade medida (car.v)
     "stanley_max_steer_deg": 20.0,
     "stanley_max_rate_deg_s": 60.0,
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda
@@ -204,6 +205,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         car.start_mission()
         print(f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s", flush=True)
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
+        print('Stanley: velocidade de referencia (vref)' if config['stanley_use_vref'] else
+              'Stanley: velocidade medida (encoder)', flush=True)
         print(f"Direcao: filtro de {config['steering_filter_size']} amostras", flush=True)
         thread_capture = threading.Thread(
             target=capture_func, args=(car, frames, stop_event, clock),

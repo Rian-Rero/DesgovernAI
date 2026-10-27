@@ -160,6 +160,44 @@ class SharedPerceptionTests(unittest.TestCase):
 
 
 class RealFollowerTests(unittest.TestCase):
+    def test_default_vref_uses_this_steps_reference_even_when_starting_from_zero(self):
+        car = fake_car()
+        car.v = car.vref = 0.
+        car.dt = .2
+        follower = lateral.RealStanleyFollower({'velocity_reference': .8})
+        self.assertTrue(follower.apply(car, self.valid_observation(.04, 0.), 10.))
+        self.assertGreater(car.vref, 0.)
+        self.assertAlmostEqual(follower.controller.cross_track_term,
+                               math.atan2(1.5*.04, abs(car.vref)+.3))
+        self.assertAlmostEqual(car.log.call_args.kwargs['stanley_speed_m_s'], car.vref)
+        self.assertEqual(car.log.call_args.kwargs['stanley_use_vref'], 1)
+
+    def test_toggle_restores_measured_velocity_in_denominator(self):
+        car = fake_car()
+        car.v = .2
+        car.dt = .2
+        follower = lateral.RealStanleyFollower({'stanley_use_vref': False, 'velocity_reference': .8})
+        self.assertTrue(follower.apply(car, self.valid_observation(.04, 0.), 10.))
+        self.assertNotAlmostEqual(car.vref, car.v)
+        self.assertAlmostEqual(follower.controller.cross_track_term, math.atan2(1.5*.04, .2+.3))
+        self.assertAlmostEqual(car.log.call_args.kwargs['stanley_speed_m_s'], .2)
+        self.assertEqual(car.log.call_args.kwargs['stanley_use_vref'], 0)
+
+    def test_invalid_toggle_is_rejected(self):
+        for value in (0, 1, 'True', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                lateral.RealStanleyFollower({'stanley_use_vref': value})
+
+    def test_nonfinite_vref_cuts_commands_instead_of_entering_equation(self):
+        car = fake_car()
+        car.set_vel.side_effect = lambda _: setattr(car, 'vref', float('nan'))
+        follower = lateral.RealStanleyFollower({})
+        self.assertFalse(follower.apply(car, self.valid_observation(), 10.))
+        car.set_u.assert_called_with(0.)
+        car.set_steer.assert_called_with(0.)
+        self.assertEqual(car.vref, 0.)
+        self.assertIn('Stanley invalida', follower.status)
+
     def test_invalid_encoder_overrides_a_fresh_visible_line(self):
         car = fake_car()
         car.encoder_valid = False

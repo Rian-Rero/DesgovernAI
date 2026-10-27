@@ -365,6 +365,9 @@ class RealStanleyFollower:
         self.reference = positive('velocity_reference', .5)
         self.min_speed = positive('curve_min_speed', .3)
         self.lateral_accel = positive('curve_lateral_accel', .4)
+        self.use_vref = self.settings.get('stanley_use_vref', True)
+        if not isinstance(self.use_vref, (bool, np.bool_)):
+            raise ValueError('stanley_use_vref deve ser True ou False.')
         self.steering_sign = self.settings.get('steering_sign', 1.)
         if self.steering_sign not in (-1., 1.):
             raise ValueError('steering_sign deve ser -1 ou +1; calibre o sinal do carro real.')
@@ -378,6 +381,8 @@ class RealStanleyFollower:
         """Retorna True somente quando uma observacao atual autoriza seguir."""
         age = float('nan')
         errors = None
+        stanley_speed = float('nan')
+        reference_valid = True
         if (isinstance(now, (int, float, np.number)) and math.isfinite(now)
                 and observation is not None):
             try:
@@ -401,12 +406,21 @@ class RealStanleyFollower:
                   and car.v >= -.05 and errors is not None)
         if active:
             lateral, heading, curvature = errors
-            steer = self.controller.update(lateral, heading, car.v, car.dt)
-            car.set_steer(self.steering_sign * steer)
+            # Primeiro resolve a referencia deste passo (inclui curvas e RC).
+            # Usar car.vref antes de set_vel leria a referencia anterior,
+            # frequentemente zero no inicio ou apos uma perda de faixa.
             car.set_vel(curve_speed(self.reference, curvature, lateral, heading,
                                     min_speed=self.min_speed, lateral_accel=self.lateral_accel))
-            # Os setters revalidam a serial, inclusive apos uma troca de marcha.
             active = bool(getattr(car, 'encoder_valid', True))
+            stanley_speed = car.vref if self.use_vref else car.v
+            reference_valid = (isinstance(stanley_speed, (int, float, np.number))
+                               and math.isfinite(stanley_speed))
+            active = active and reference_valid
+            if active:
+                steer = self.controller.update(lateral, heading, stanley_speed, car.dt)
+                car.set_steer(self.steering_sign * steer)
+                # O setter revalida a serial antes de enviar a direcao.
+                active = bool(getattr(car, 'encoder_valid', True))
         if not active:
             car._set_ref(0.)
             car.vel_error_integral = 0.
@@ -424,6 +438,8 @@ class RealStanleyFollower:
             self.status = 'Encoder sem leitura valida'
         elif not finite_sample:
             self.status = 'Velocidade ou periodo de controle invalido'
+        elif not reference_valid:
+            self.status = 'Velocidade selecionada para o Stanley invalida'
         elif reverse_gear or reverse_requested or car.v < -.05:
             self.status = 'Marcha a re: Stanley dianteiro bloqueado'
         elif observation is None:
@@ -450,6 +466,8 @@ class RealStanleyFollower:
                 steer_filtered_rad=getattr(car, 'st_filtered', invalid),
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
+                stanley_speed_m_s=float(stanley_speed) if active else invalid,
+                stanley_use_vref=int(self.use_vref),
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,
                 stanley_target_rad=self.controller.target_steer if active else invalid,
                 vref=float(car.vref), u=float(car.u))

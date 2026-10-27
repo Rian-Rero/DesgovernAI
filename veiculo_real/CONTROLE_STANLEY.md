@@ -181,6 +181,22 @@ incluindo capturas sem faixa; nao e a frequencia de 50 Hz do controle.
 
 ## Resposta de direcao e ensaio em reta
 
+O denominador do termo lateral do Stanley usa por padrao `abs(vref) + 0.3`.
+O toggle `stanley_use_vref` em `main.py:parameters` permite comparar:
+
+```python
+"stanley_use_vref": True,   # referencia de velocidade deste passo
+# "stanley_use_vref": False,  # velocidade medida e filtrada do encoder
+```
+
+A referencia e atualizada antes do calculo do Stanley, incluindo a reducao
+por curvatura/erro e a selecao de tracao RC/AUTO. Nao se usa a referencia
+zerada do passo anterior ao iniciar ou retomar o seguimento. O termo de
+suavizacao, a saturacao e o limite de taxa permanecem os mesmos.
+O CSV registra `stanley_speed_m_s` (entrada efetiva no denominador) e
+`stanley_use_vref` (1 para referencia, 0 para medida); o modo tambem aparece
+no terminal ao iniciar a missao.
+
 O Stanley limita a taxa a 60 graus/s. A missao usa adicionalmente uma media
 movel de apenas tres amostras no servo, em vez das dez anteriores. No ensaio
 analisado, o atraso de dez amostras estimado pelos periodos registrados foi
