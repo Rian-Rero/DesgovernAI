@@ -82,18 +82,30 @@ class YellowPathDetector:
         roi = int(height * settings.roi_top / 100)
         rows = []
         max_width = width * settings.max_width / 100
-        for bottom in range(height - 1, roi + step - 1, -step):
+        count = max(0, (height - roi - 1) // step)
+        if count == 0:
+            return rows, step
+        # Conta todas as bandas de uma vez; a soma prefixada permite medir
+        # o suporte de cada intervalo sem percorrer novamente seus pixels.
+        shape = (count, step, width)
+        active = np.count_nonzero(weak[height-count*step:].reshape(shape), axis=1)[::-1]
+        evidence_columns = np.count_nonzero(strong[height-count*step:].reshape(shape), axis=1)[::-1]
+        prefix = np.zeros((count, width + 1), np.int32)
+        np.cumsum(evidence_columns, axis=1, dtype=np.int32, out=prefix[:, 1:])
+        padded = np.zeros((count, width + 2), np.int8)
+        padded[:, 1:-1] = active >= max(1, step // 3)
+        all_changes = np.diff(padded, axis=1)
+        for index, changes in enumerate(all_changes):
+            bottom = height - 1 - index * step
             top = bottom - step + 1
-            active = np.count_nonzero(weak[top:bottom + 1], axis=0) >= max(1, step // 3)
-            changes = np.diff(np.r_[False, active, False].astype(np.int8))
             starts, ends = np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)
             candidates = []
             for start, end in zip(starts, ends):
                 size = end - start
                 if not 2 <= size <= max_width:
                     continue
-                evidence = np.count_nonzero(strong[top:bottom + 1, start:end]) / (step * size)
-                candidates.append(((start + end - 1) / 2, (top + bottom) / 2,
+                evidence = (prefix[index, end] - prefix[index, start]) / (step * size)
+                candidates.append((float(start + end - 1) / 2, (top + bottom) / 2,
                                    float(size), float(evidence)))
             # Limita trabalho em texturas muito ruidosas sem abrir mao de
             # manter varios candidatos concorrentes para curvas/bifurcacoes.
@@ -125,7 +137,8 @@ class YellowPathDetector:
             # Mantem a ordem original e todas as validacoes de pontilhado.
             parent_x = parent_dy = predictions = None
             if len(active) >= 32:
-                parents = np.asarray([(p[1][-1][0], p[1][-1][1], p[2]) for p in active])
+                parents = np.asarray([(p[1][-1][0], p[1][-1][1], p[2], p[0],
+                                       p[1][-1][2], len(p[1])) for p in active])
                 parent_x = parents[:, 0]
                 parent_dy = parents[:, 1] - y
                 predictions = parent_x + parents[:, 2] * parent_dy
@@ -146,9 +159,32 @@ class YellowPathDetector:
                 has_short_parent = False
                 parents_to_check = reversed(active)
                 if parent_x is not None:
+                    new_slopes = (x - parent_x) / parent_dy
+                    width_changes = np.abs(np.log(max(band_width, 1) / np.maximum(parents[:, 4], 1)))
                     compatible = ((np.abs(x - predictions) <= reach)
-                                  & (np.abs((x - parent_x) / parent_dy) <= 2.8))
-                    parents_to_check = (active[index] for index in np.flatnonzero(compatible)[::-1])
+                                  & (np.abs(new_slopes) <= 2.8)
+                                  & (width_changes <= 1.25))
+                    short = np.flatnonzero(compatible & (parent_dy <= short_limit))[::-1]
+                    if len(short):
+                        # Todos os pais curtos ja passaram pelos mesmos testes.
+                        # A versao escalar ignora os longos assim que acha um
+                        # curto; calcula seus scores de uma vez em NumPy.
+                        dx = x - parent_x[short]
+                        turn = np.where(parents[short, 5] > 1,
+                                        np.abs(new_slopes[short] - parents[short, 2]), 0.)
+                        costs = (.12 * np.abs(dx) + .22 * np.maximum(0., parent_dy[short] - step)
+                                 + step * .35 * turn + step * .25 * width_changes[short])
+                        scores = parents[short, 3] + reward - costs
+                        winner = int(np.argmax(scores))
+                        index = short[winner]
+                        score, chain, slope = active[index]
+                        candidate = (float(scores[winner]), chain + (point,),
+                                     .5 * slope + .5 * float(new_slopes[index]))
+                        if best is None or candidate[0] > best[0]:
+                            best = candidate
+                        parents_to_check = ()
+                    else:
+                        parents_to_check = (active[index] for index in np.flatnonzero(compatible)[::-1])
                 for score, chain, slope in parents_to_check:
                     px, py, pw, _ = chain[-1]
                     dy, dx = py - y, x - px
@@ -216,8 +252,7 @@ class YellowPathDetector:
             tail.append(point)
         if len(tail) < 3:
             return None
-        points = np.asarray(tail)
-        return float(np.polyfit(-points[:, 1], points[:, 0], 1)[0])
+        return YellowPathDetector._tangent_slope(tail)
 
     @staticmethod
     def _forward_tangent(point, upcoming_rows, step):
@@ -233,8 +268,16 @@ class YellowPathDetector:
             points.append(candidate)
         if len(points) < 3:
             return None
-        points = np.asarray(points)
-        return float(np.polyfit(-points[:, 1], points[:, 0], 1)[0])
+        return YellowPathDetector._tangent_slope(points)
+
+    @staticmethod
+    def _tangent_slope(points):
+        """Mesmo ajuste linear, centrado, sem criar uma SVD para 3 a 6 pontos."""
+        mean_y = sum(p[1] for p in points) / len(points)
+        mean_x = sum(p[0] for p in points) / len(points)
+        numerator = sum((mean_y-p[1]) * (p[0]-mean_x) for p in points)
+        denominator = sum((mean_y-p[1])**2 for p in points)
+        return float(numerator / denominator)
 
     @staticmethod
     def _dash_mask(path_mask, observed_mask, height, settings):
@@ -295,11 +338,9 @@ class YellowPathDetector:
         order = np.argsort(points[:, 1])
         # Pontas arredondadas dos tracos parecem estreitas em uma unica banda.
         # Usa a largura tipica das bandas vizinhas para a ponte nao afunilar.
-        measured_widths = points[:, 2].copy()
-        for index, point in enumerate(points):
-            nearby = np.abs(points[:, 1] - point[1]) <= 5 * step
-            typical = float(np.median(points[nearby, 2]))
-            measured_widths[index] = max(point[2], .85 * typical)
+        nearby = np.abs(points[:, 1, None] - points[None, :, 1]) <= 5 * step
+        typical = np.nanmedian(np.where(nearby, points[None, :, 2], np.nan), axis=1)
+        measured_widths = np.maximum(points[:, 2], .85 * typical)
         half_width = np.interp(ys, points[order, 1], measured_widths[order]) / 2
         # A faixa reconstruida conserva a largura medida; nao une todo amarelo.
         left = np.column_stack((np.clip(xs - half_width, 0, width - 1), ys))

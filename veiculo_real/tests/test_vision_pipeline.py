@@ -16,6 +16,53 @@ from test_lateral import lateral, fake_car, calibration_data, calibration_from, 
 
 
 class VisionPipelineTests(unittest.TestCase):
+    def test_reduced_processing_preserves_metric_errors_on_both_sides(self):
+        calibration = calibration_from(calibration_data())
+        for width in (480, 320):
+            for offset, slope in ((.12, 0.), (-.12, 0.), (.08, .15)):
+                with self.subTest(width=width, offset=offset, slope=slope):
+                    frame = metric_line_frame(offset, slope)
+                    full = lateral.RealLineDetector(calibration, render_preview=False).observe_frame(frame, 10.)
+                    detector = lateral.RealLineDetector(calibration, render_preview=False, processing_width=width)
+                    actual = detector.observe_frame(frame, 10.)
+                    self.assertTrue(actual.valid, actual.reason)
+                    np.testing.assert_allclose(actual.errors, full.errors, atol=.015)
+                    self.assertEqual(actual.processing_size, (width, round(width*.75)))
+                    self.assertEqual(actual.path_result.path_mask.shape[1], width)
+                    self.assertIs(actual.source_frame, frame)
+                    self.assertEqual(detector.with_preview(actual).frame.shape, frame.shape)
+                    self.assertEqual(actual.timestamp, 10.)
+
+    def test_reduction_still_requires_original_camera_resolution(self):
+        detector = lateral.RealLineDetector(calibration_from(calibration_data()), processing_width=320)
+        observation = detector.observe_frame(np.zeros((240, 320, 3), np.uint8), 10.)
+        self.assertFalse(observation.valid)
+        self.assertIn('Resolucao diferente', observation.reason)
+
+    def test_reduced_processing_keeps_curved_and_sparse_dashes(self):
+        from test_yellow_update import dashed_scene
+        calibration = lateral.GroundCalibration((640, 480),
+            np.array([[0., -.005, 2.4], [-.003, 0., .96], [0., 0., 1.]]))
+        for curved, sparse in ((False, True), (True, False), (True, True)):
+            frame = dashed_scene(curved=curved, sparse=sparse)
+            full = lateral.RealLineDetector(calibration, render_preview=False).observe_frame(frame, 10.)
+            for width in (480, 320):
+                with self.subTest(width=width, curved=curved, sparse=sparse):
+                    detector = lateral.RealLineDetector(calibration, render_preview=False, processing_width=width)
+                    observation = detector.observe_frame(frame, 10.)
+                    self.assertTrue(observation.valid, observation.reason)
+                    self.assertAlmostEqual(observation.errors[0], full.errors[0], delta=.015)
+                    self.assertAlmostEqual(observation.errors[1], full.errors[1], delta=.04)
+                    self.assertAlmostEqual(observation.errors[2], full.errors[2], delta=.08)
+                    missing = detector.observe_frame(np.full_like(frame, 35), 10.05)
+                    self.assertFalse(missing.valid)
+
+    def test_processing_width_rejects_upscaling_and_invalid_values(self):
+        calibration = calibration_from(calibration_data())
+        for width in (-1, 80, 641, True, 320., '320'):
+            with self.subTest(width=width), self.assertRaises(ValueError):
+                lateral.RealLineDetector(calibration, processing_width=width)
+
     def test_headless_processing_defers_preview_without_changing_metric_results(self):
         calibration = calibration_from(calibration_data())
         settings = {'clahe': False, 'smoothing': 0}
@@ -81,6 +128,7 @@ class VisionPipelineTests(unittest.TestCase):
         self.assertEqual(actual.timestamp, 10.)
         self.assertAlmostEqual(actual.capture_seconds, .04)
         self.assertAlmostEqual(actual.processing_seconds, .35)
+        self.assertEqual(actual.sequence, 1)
         car.get_image.assert_not_called()
         follower = mission.RealStanleyFollower({})
         vehicle = fake_car()

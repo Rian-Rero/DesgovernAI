@@ -44,6 +44,7 @@ parameters = {
     "curve_min_speed": 0.3,
     "curve_lateral_accel": 0.4,
     "vision_timeout": 0.3,  # segundos desde o inicio da captura
+    "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120},
     "path_anchor": 0.5,  # preferencia horizontal da faixa, entre 0 e 1
@@ -90,6 +91,7 @@ def capture_func(car, frames, stop_event, clock=time.monotonic):
 
 def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic, frames=None):
     """Apenas percebe; a thread principal e a unica que envia comandos."""
+    sequence = 0
     while not stop_event.is_set():
         if frames is not None:
             try:
@@ -107,8 +109,9 @@ def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic, fr
                 capture_seconds = clock() - captured_at
             processing_at = clock()
             observation = detector.observe_frame(frame, captured_at)
+            sequence += 1
             observation = replace(observation, capture_seconds=capture_seconds,
-                                  processing_seconds=clock() - processing_at)
+                                  processing_seconds=clock() - processing_at, sequence=sequence)
         except Exception as error:
             vision_data["observation"] = LineObservation(
                 timestamp=captured_at, reason=f"Falha de visao: {error}"
@@ -142,6 +145,8 @@ def save_vision_snapshot(car, observation, status, now):
             'metric_line_valid': bool(observation.valid),
             'image_size': (None if observation.source_frame is None else
                            list(observation.source_frame.shape[1::-1])),
+            'processing_size': observation.processing_size,
+            'vision_frame_id': observation.sequence,
             'vision_age_s': finite(now - observation.timestamp),
             'capture_s': finite(observation.capture_seconds),
             'processing_s': finite(observation.processing_seconds),
@@ -173,6 +178,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         calibration, path_settings=config.get("path_settings", {}),
         anchor=config.get("path_anchor", 0.5),
         render_preview=False,
+        processing_width=config.get('vision_width', 0),
     )
     follower = RealStanleyFollower(config)
     if car_factory is None:
@@ -213,6 +219,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         next_stop_beep = 0.0
         last_encoder_valid = None
         t_diagnostic = t_plot - 1.
+        last_diagnostic_sequence = 0
         while car.t < config["ts"]:
             if not car.step():
                 break
@@ -253,15 +260,20 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 break
             if now - t_diagnostic >= 1.:
                 timing = ''
+                sequence = 0 if observation is None else observation.sequence
+                vision_fps = (sequence - last_diagnostic_sequence) / (now - t_diagnostic)
                 if observation is not None:
                     timing = (f' | imagem={now-observation.timestamp:.3f}s'
                               f' captura={observation.capture_seconds:.3f}s'
                               f' processamento={observation.processing_seconds:.3f}s'
                               f' deteccao={observation.detection_seconds:.3f}s'
                               f' geometria={observation.geometry_seconds:.3f}s')
-                print(f'CONTROLE: {control_status}{timing}'
+                    if observation.processing_size:
+                        timing += f' grade={observation.processing_size[0]}x{observation.processing_size[1]}'
+                print(f'CONTROLE: {control_status}{timing} visao={vision_fps:.1f}fps'
                       f' | vref={car.vref:.2f} u={car.u:.2f}', flush=True)
                 t_diagnostic = now
+                last_diagnostic_sequence = sequence
             if obstacle_detected and now >= next_stop_beep:
                 if car.bz.beep([0.15, 0.15], silence=0.15):
                     next_stop_beep = now + 1.0
@@ -311,8 +323,12 @@ def main():
     parser.add_argument("--encoder-protocol", choices=("rpm", "rc"),
                         help="rpm: Arduino original; rc: Arduino com receptor e chaves")
     parser.add_argument("--display", action="store_true", help="Mostrar a faixa detectada")
+    parser.add_argument('--vision-width', type=int,
+                        help='Largura do processamento: 0 original, 320 ou 480 para reduzir custo')
     args = parser.parse_args()
     settings = {"velocity_reference": args.speed}
+    if args.vision_width is not None:
+        settings['vision_width'] = args.vision_width
     if args.encoder_protocol:
         settings["encoder_protocol"] = args.encoder_protocol
     if args.calibration:

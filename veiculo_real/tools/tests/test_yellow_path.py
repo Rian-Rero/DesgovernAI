@@ -38,6 +38,16 @@ def dashed_scene(curved=False, sparse=False):
 
 
 class YellowPathTests(unittest.TestCase):
+    def test_batched_bands_preserve_roi_boundary(self):
+        strong = np.zeros((480, 640), np.uint8)
+        strong[:, 312:329] = 255
+        rows, step = YellowPathDetector._candidates(strong, strong, PathSettings())
+        self.assertEqual(step, 6)
+        self.assertEqual(len(rows), 55)
+        self.assertEqual(rows[0][0][1], 476.5)
+        self.assertEqual(rows[-1][0][1], 152.5)
+        self.assertEqual(rows[0][0][3], 1.)
+
     def test_many_parallel_candidates_keep_selected_path_and_dashed_rules(self):
         frame = np.full((480, 640, 3), 35, np.uint8)
         columns = np.arange(12, 630, 26)

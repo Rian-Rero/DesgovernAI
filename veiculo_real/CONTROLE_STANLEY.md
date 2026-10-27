@@ -160,6 +160,39 @@ separa `deteccao` (HSV e busca da faixa) de `geometria` (projecao em metros e
 ajuste da curva). Os mesmos tempos sao gravados como `vision_detection_s`
 e `vision_geometry_s` no CSV e `detection_s` e `geometry_s` no JSON.
 
+Para reduzir ainda mais o custo, use `--vision-width 320` ou `480`:
+
+```sh
+python3 -u main.py --speed 0.3 --vision-width 320
+```
+
+A camera continua capturando na resolucao calibrada (por exemplo, 640x480).
+Somente o processamento usa uma imagem menor; os centros de pixel voltam
+para a grade original antes da homografia. A calibracao nao precisa ser
+refeita por causa dessa opcao. O padrao `--vision-width 0` preserva a grade
+original. Menos pixels podem perder tracos muito finos: compare a faixa
+desenhada e os erros metricos nos logs. O terminal mostra `grade=320x240`
+para confirmar a opcao recebida; o JSON registra `processing_size`.
+`visao=...fps` no terminal conta observacoes novas publicadas no intervalo,
+incluindo capturas sem faixa; nao e a frequencia de 50 Hz do controle.
+`vision_frame_id` no CSV identifica quais passos reutilizaram a mesma imagem.
+
+O detector tambem calcula em lote os scores de conexoes curtas e as bandas
+de candidatos, usa somas prefixadas para suporte de cor e resolve as pequenas
+tangentes diretamente, sem uma SVD por ajuste. Os criterios de rejeicao,
+validacao do pontilhado e o horario original da imagem continuam em vigor.
+
+Para comparar as tres larguras usando uma foto coletada do proprio carro,
+sem abrir camera ou motores, execute na pasta remota do projeto:
+
+```sh
+python3 tools/benchmark_visao.py --image logs/AAAAMMDD_HHMMSS/vision_camera.jpg
+```
+
+O resultado inclui mediana, percentil 95, tempos de deteccao/geometria e
+quantidade de frames validos. `processing_hz` mede apenas processamento da
+foto; nao representa o framerate garantido com sensores e controle rodando.
+
 `Buscando faixa` indica rejeicao pelo detector HSV; `Faixa sem cobertura
 metrica suficiente junto ao eixo dianteiro` indica faixa visual encontrada,
 mas geometria rejeitada antes do Stanley. `Faixa valida; controle liberado`

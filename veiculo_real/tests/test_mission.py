@@ -210,6 +210,13 @@ class MissionTests(unittest.TestCase):
         run.assert_called_once_with({'velocity_reference': .3, 'encoder_protocol': 'rpm'}, display=False)
         self.assertEqual(mission.parameters['encoder_protocol'], 'rc')
 
+    def test_cli_selects_reduced_vision_without_changing_default_resolution(self):
+        with patch.object(sys, 'argv', ['main.py', '--vision-width', '320', '--speed', '.3']), \
+                patch.object(mission, 'run_mission') as run:
+            mission.main()
+        run.assert_called_once_with({'velocity_reference': .3, 'vision_width': 320}, display=False)
+        self.assertEqual(mission.parameters['vision_width'], 0)
+
     def test_default_mission_passes_rc_protocol_to_car_factory(self):
         factory = Mock(return_value=self.car)
         with patch.object(mission.threading, 'Thread', side_effect=self.fake_thread):

@@ -30,6 +30,8 @@ class LineObservation:
     detection_seconds: float = math.nan
     geometry_seconds: float = math.nan
     path_result: PathResult | None = None
+    processing_size: tuple | None = None
+    sequence: int = 0
 
     @property
     def valid(self):
@@ -149,7 +151,8 @@ def _path_settings(value):
 
 
 class RealLineDetector:
-    def __init__(self, calibration, path_settings=None, anchor=.5, render_preview=True):
+    def __init__(self, calibration, path_settings=None, anchor=.5, render_preview=True,
+                 processing_width=0):
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('RealLineDetector requer GroundCalibration em metros.')
         if not isinstance(anchor, (int, float)) or not math.isfinite(anchor) or not 0 <= anchor <= 1:
@@ -158,6 +161,12 @@ class RealLineDetector:
         self.settings = _path_settings(path_settings)
         self.anchor = float(anchor)
         self.render_preview = render_preview
+        if (isinstance(processing_width, bool) or not isinstance(processing_width, int)
+                or processing_width != 0 and not 160 <= processing_width <= calibration.image_size[0]):
+            raise ValueError('vision_width deve ser 0 (original) ou inteiro entre 160 e a largura calibrada.')
+        width, height = calibration.image_size
+        self.processing_size = ((width, height) if processing_width == 0 else
+                                (processing_width, max(1, round(height * processing_width / width))))
         self.detector = YellowPathDetector()
         self.detector.reset(anchor=self.anchor)
 
@@ -173,12 +182,16 @@ class RealLineDetector:
             return LineObservation(timestamp, reason='Resolucao diferente da calibracao da camera',
                                    source_frame=frame)
         detection_at = time.perf_counter()
-        result = self.detector.process(frame, self.settings, timestamp=timestamp)
+        processing_frame = frame
+        if self.processing_size != self.calibration.image_size:
+            processing_frame = cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
+        result = self.detector.process(processing_frame, self.settings, timestamp=timestamp)
         metadata = {'source_frame': frame, 'path_result': result,
+                    'processing_size': self.processing_size,
                     'detection_seconds': time.perf_counter() - detection_at}
         display = None
         if self.render_preview:
-            display = cv2.cvtColor(render_path(frame, result, self.settings, self.anchor), cv2.COLOR_BGR2RGB)
+            display = self._preview(frame, result)
         # A validacao de evidencia pertence ao detector compartilhado. O modo
         # pontilhado pode aceitar suporte < 50% apos validar as duas tangentes.
         if (not result.valid or not math.isfinite(result.support)
@@ -190,7 +203,13 @@ class RealLineDetector:
                          cv2.countNonZero(cv2.bitwise_and(result.dash_mask, result.path_mask)))
         metadata.update(color_support=float(result.support),
                         dash_fraction=bridge_pixels / max(1, path_pixels))
-        points = self.calibration.project_pixels(result.center)
+        pixels = result.center
+        if self.processing_size != self.calibration.image_size:
+            # cv2.resize alinha centros de pixel. Retorna a grade original
+            # ANTES da homografia, sem reutilizar pixels pequenos como grandes.
+            scale = np.asarray(self.calibration.image_size) / self.processing_size
+            pixels = (pixels.astype(float) + .5) * scale - .5
+        points = self.calibration.project_pixels(pixels)
         try:
             errors = fit_line_errors(points, [0., 0.], [1., 0.], with_curvature=True)
         except (ValueError, np.linalg.LinAlgError, FloatingPointError):
@@ -208,9 +227,15 @@ class RealLineDetector:
         if (observation is None or observation.frame is not None
                 or observation.source_frame is None or observation.path_result is None):
             return observation
-        display = render_path(observation.source_frame, observation.path_result,
-                              self.settings, self.anchor)
-        return replace(observation, frame=cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
+        return replace(observation, frame=self._preview(observation.source_frame, observation.path_result))
+
+    def _preview(self, frame, result):
+        size = result.path_mask.shape[1::-1]
+        source = frame if frame.shape[1::-1] == size else cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+        display = render_path(source, result, self.settings, self.anchor)
+        if display.shape[:2] != frame.shape[:2]:
+            display = cv2.resize(display, frame.shape[1::-1], interpolation=cv2.INTER_NEAREST)
+        return cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
 
 
 class StanleyController:
@@ -412,6 +437,7 @@ class RealStanleyFollower:
         invalid = float('nan')
         lateral, heading, curvature = errors if errors is not None else (invalid, invalid, invalid)
         car.log(line_valid=int(errors is not None), lateral_active=int(active),
+                vision_frame_id=getattr(observation, 'sequence', 0),
                 line_color_support=getattr(observation, 'color_support', invalid) if errors is not None else invalid,
                 line_dash_fraction=getattr(observation, 'dash_fraction', invalid) if errors is not None else invalid,
                 vision_age_s=age, cross_track_m=lateral, heading_error_rad=heading,
