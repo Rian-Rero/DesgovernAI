@@ -52,7 +52,8 @@ python3 veiculo_real/main.py
 python3 veiculo_real/main.py --calibration caminho/camera.json --speed 0.5 --display
 ```
 
-A referencia padrao e 1.0 m/s; use `--speed 0.3` no primeiro ensaio.
+A referencia padrao e 0.3 m/s para ajustar o seguimento antes de aumentar
+a velocidade com `--speed`. O piso de velocidade em curvas e 0.15 m/s.
 O maximo de estercamento e 20 graus, com taxa de 60 graus/s.
 Ganhos, sinais e limites ainda precisam de ajuste e verificacao no carro
 fisico. O entre-eixos do `Car` real continua 0.36 m; nao foi substituido pelo
@@ -129,7 +130,7 @@ de acerto; uma conexao azul tambem pode preencher um buraco em faixa continua.
 Esses valores servem para diagnostico e nao alteram o ganho Stanley.
 
 A velocidade e reduzida pela curvatura e pelos erros. Perda de deteccao,
-frame antigo por mais de 0.3 s, falha na thread ou emergencia cortam throttle
+frame mais antigo que `vision_timeout`, falha na thread ou emergencia cortam throttle
 e zeram o integral do PI. A parada por obstaculo ja existente permanece
 travada ate o fim da missao. Cortar throttle coloca o ESC em neutro; isso
 nao equivale a uma frenagem ativa e o carrinho ainda percorre uma distancia.
@@ -145,9 +146,10 @@ diferentes da ferramenta `detectar_linha_amarela_hsv.py`.
 
 O terminal imprime `CONTROLE:` uma vez por segundo com o motivo atual,
 idade da imagem, duracao da captura, duracao do processamento, referencia
-de velocidade e throttle. Por exemplo, `Imagem atrasada: 0.420 s; limite
-0.300 s` indica que a observacao expirou. O horario continua sendo o inicio
-da aquisicao, nunca o fim do processamento; o limite de 0.3 s foi mantido.
+de velocidade e throttle. Por exemplo, `Imagem atrasada: 1.420 s; limite
+1.000 s` indica que a observacao expirou. O horario continua sendo o inicio
+da aquisicao, nunca o fim do processamento. O limite atual e 1.0 s, definido
+em `vision_timeout`; ele nao representa a idade desejada para o controle.
 Se o processamento sozinho ultrapassar esse limite, descartar frames na
 fila nao basta: sera necessario medir e otimizar o processamento no hardware.
 
@@ -176,6 +178,34 @@ para confirmar a opcao recebida; o JSON registra `processing_size`.
 `visao=...fps` no terminal conta observacoes novas publicadas no intervalo,
 incluindo capturas sem faixa; nao e a frequencia de 50 Hz do controle.
 `vision_frame_id` no CSV identifica quais passos reutilizaram a mesma imagem.
+
+## Resposta de direcao e ensaio em reta
+
+O Stanley limita a taxa a 60 graus/s. A missao usa adicionalmente uma media
+movel de apenas tres amostras no servo, em vez das dez anteriores. No ensaio
+analisado, o atraso de dez amostras estimado pelos periodos registrados foi
+de aproximadamente 188 ms (mediana), alem da idade da imagem. O log antigo
+mostrava somente o comando ANTES dessa media. O novo `steer_filtered_rad`
+mostra o comando apos o filtro de software; nao mede o angulo fisico da roda.
+
+Para comparar os filtros explicitamente:
+
+```sh
+python3 -u main.py --vision-width 320 --speed 0.3 --steering-filter 3
+python3 -u main.py --vision-width 320 --speed 0.3 --steering-filter 1
+```
+
+O valor 1 elimina a media movel; o limite de taxa do Stanley continua ativo.
+O sinal da direcao nao foi invertido. Perda da faixa continua cortando o
+throttle, zerando a direcao e reiniciando o Stanley, sem seguir dados ausentes.
+
+Na missao, `imu_telemetry=False` evita duas leituras I2C por passo cujos ganhos
+de fusao ja eram zero. O modelo usado pelo controle permanece o mesmo.
+As colunas `a_x` e `w_imu` ficam NaN (nao medidas), em vez de inventar zeros.
+Use `--imu-telemetry` para reativar essas leituras. Outros programas `Car`
+mantem o comportamento anterior quando nao especificam essa opcao.
+As medias moveis usam soma incremental, evitando criar vetores NumPy em
+cada passo, e continuam recuperando-se quando NaN/Inf sai da janela.
 
 O detector tambem calcula em lote os scores de conexoes curtas e as bandas
 de candidatos, usa somas prefixadas para suporte de cor e resolve as pequenas

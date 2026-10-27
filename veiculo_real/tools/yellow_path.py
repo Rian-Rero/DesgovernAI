@@ -188,6 +188,10 @@ class YellowPathDetector:
                 for score, chain, slope in parents_to_check:
                     px, py, pw, _ = chain[-1]
                     dy, dx = py - y, x - px
+                    # active esta em ordem de altura. Apos encontrar um pai
+                    # curto, nenhum pai mais distante pode ser escolhido.
+                    if has_short_parent and dy > short_limit:
+                        break
                     prediction = px + slope * dy
                     if abs(x - prediction) > max(12., width * .025) + .65 * dy:
                         continue

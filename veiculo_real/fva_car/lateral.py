@@ -447,6 +447,7 @@ class RealStanleyFollower:
                 vision_geometry_s=getattr(observation, 'geometry_seconds', invalid),
                 curvature_m_inv=curvature, steer_geometric_rad=steer,
                 steer_cmd_rad=float(car.st), steering_sign=float(self.steering_sign),
+                steer_filtered_rad=getattr(car, 'st_filtered', invalid),
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,

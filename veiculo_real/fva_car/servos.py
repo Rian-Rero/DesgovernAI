@@ -40,7 +40,10 @@ class Gear(Enum):
 class Servos:
 	########################################
 	# construtor
-	def __init__(self, steering=0.0, throttle=0.0, velmax=1.5, dt=0.03):
+	def __init__(self, steering=0.0, throttle=0.0, velmax=1.5, dt=0.03, steering_filter_size=10):
+		if (isinstance(steering_filter_size, bool) or not isinstance(steering_filter_size, int)
+				or steering_filter_size < 1):
+			raise ValueError('steering_filter_size deve ser inteiro positivo.')
 		
 		# lock de secao critica
 		self.lock = threading.Lock()
@@ -66,7 +69,7 @@ class Servos:
 		# estercamento
 		#########################
 		# cria filtro de estercamento
-		self.st_filt = filter.MovingAverage(n=10, initial=steering)
+		self.st_filt = filter.MovingAverage(n=steering_filter_size, initial=steering)
 		# inicializa o estercamento
 		self.set_steer(steering)
 		
@@ -252,6 +255,7 @@ class Servos:
 
 		with self.lock:
 			self.st_pwm = GAIN_STERRING_ANGLE * (st + self.trim_steer) + ZERO_STERRING_ANGLE
+		return float(st)  # comando filtrado; nao e uma medida da roda
         
 	########################################
 	# seta o ajuste fino dos servos (em radianos)

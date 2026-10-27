@@ -217,6 +217,20 @@ class MissionTests(unittest.TestCase):
         run.assert_called_once_with({'velocity_reference': .3, 'vision_width': 320}, display=False)
         self.assertEqual(mission.parameters['vision_width'], 0)
 
+    def test_cli_allows_filter_comparison_without_changing_direction_sign(self):
+        with patch.object(sys, 'argv', ['main.py', '--steering-filter', '1']), \
+                patch.object(mission, 'run_mission') as run:
+            mission.main()
+        run.assert_called_once_with({'velocity_reference': .3, 'steering_filter_size': 1}, display=False)
+        self.assertEqual(mission.parameters['steering_sign'], 1.)
+
+    def test_invalid_steering_filter_is_rejected_before_drivers(self):
+        for size in (0, -1, True, 1.5):
+            factory = Mock()
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                mission.run_mission(dict(self.settings, steering_filter_size=size), car_factory=factory)
+            factory.assert_not_called()
+
     def test_default_mission_passes_rc_protocol_to_car_factory(self):
         factory = Mock(return_value=self.car)
         with patch.object(mission.threading, 'Thread', side_effect=self.fake_thread):

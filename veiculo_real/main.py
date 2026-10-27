@@ -16,7 +16,7 @@ from fva_car.lateral import (
     GroundCalibration, LineObservation, RealLineDetector, RealStanleyFollower,
 )
 
-MAIN_VEL = 1.0  # m/s: referencia inicial para ajuste no veiculo real
+MAIN_VEL = 0.3  # m/s: iniciar o ajuste lateral sem percorrer metros durante a correcao
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20
@@ -30,6 +30,7 @@ parameters = {
     "camera": True,
     "ultrasonic_steering": False,  # camera fixa apos calibrada
     "us_buzzer": False,
+    "imu_telemetry": False,  # fusao atual usa K=0; evita duas leituras I2C por passo
     "initial_position": [0, 0, 0.0],
     "encoder_protocol": "rc",  # mesmo formato de cinco campos da upstream/rc-input
     "camera_calibration_file": str(
@@ -41,7 +42,8 @@ parameters = {
     "stanley_max_steer_deg": 20.0,
     "stanley_max_rate_deg_s": 60.0,
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda
-    "curve_min_speed": 0.3,
+    "steering_filter_size": 3,  # Stanley ja limita a taxa; reduz atraso extra do servo
+    "curve_min_speed": 0.15,
     "curve_lateral_accel": 0.4,
     "vision_timeout": 1.0,  # segundos desde o inicio da captura
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
@@ -172,6 +174,10 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         raise ValueError("Stanley requer camera ligada e fixa (ultrasonic_steering=False).")
     if config["encoder_protocol"] not in ("rpm", "rc"):
         raise ValueError("encoder_protocol deve ser 'rpm' ou 'rc'.")
+    if (isinstance(config['steering_filter_size'], bool)
+            or not isinstance(config['steering_filter_size'], int)
+            or config['steering_filter_size'] < 1):
+        raise ValueError('steering_filter_size deve ser inteiro positivo.')
     # Valida geometria e ajustes antes de abrir sensores ou atuar nos motores.
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
     detector = RealLineDetector(
@@ -198,6 +204,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         car.start_mission()
         print(f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s", flush=True)
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
+        print(f"Direcao: filtro de {config['steering_filter_size']} amostras", flush=True)
         thread_capture = threading.Thread(
             target=capture_func, args=(car, frames, stop_event, clock),
             daemon=True, name='captura-camera',
@@ -325,10 +332,17 @@ def main():
     parser.add_argument("--display", action="store_true", help="Mostrar a faixa detectada")
     parser.add_argument('--vision-width', type=int,
                         help='Largura do processamento: 0 original, 320 ou 480 para reduzir custo')
+    parser.add_argument('--steering-filter', type=int,
+                        help='Amostras do filtro da direcao: padrao 3; 1 desativa a media movel')
+    parser.add_argument('--imu-telemetry', action='store_true', help='Reativar leituras extras da IMU no CSV')
     args = parser.parse_args()
     settings = {"velocity_reference": args.speed}
     if args.vision_width is not None:
         settings['vision_width'] = args.vision_width
+    if args.steering_filter is not None:
+        settings['steering_filter_size'] = args.steering_filter
+    if args.imu_telemetry:
+        settings['imu_telemetry'] = True
     if args.encoder_protocol:
         settings["encoder_protocol"] = args.encoder_protocol
     if args.calibration:

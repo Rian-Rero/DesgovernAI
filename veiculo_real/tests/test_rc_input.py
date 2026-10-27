@@ -62,6 +62,35 @@ class RCInputTests(unittest.TestCase):
         self.car.set_vel(.3)
         self.assertAlmostEqual(self.car.vref, .3)
 
+    def test_filtered_steering_is_logged_separately_from_requested_steering(self):
+        self.car.atuador.set_steer.return_value = .03
+        self.car.set_steer(.1)
+        self.assertAlmostEqual(self.car.st, .1)
+        self.assertAlmostEqual(self.car.st_filtered, .03)
+
+    def test_optional_imu_telemetry_skips_i2c_without_changing_model_states(self):
+        self.car.parameters = {'imu_telemetry': False}
+        self.car.odometer = Mock()
+        self.car.odometer.get_vel.return_value = (.4, True)
+        self.car.imu = Mock()
+        self.car.v_filt = Mock()
+        self.car.v_filt.filter.side_effect = lambda value: value
+        self.car.w_filt = Mock()
+        self.car.w_filt.filter.side_effect = lambda value: value
+        self.car.a_filt = Mock()
+        self.car.a_filt.filter.side_effect = lambda value: value
+        self.car.st = .1
+        self.car.v_ant, self.car.v = .2, .4
+        velocity, yaw_rate = self.car.get_vel()
+        acceleration = self.car.get_accel()
+        self.car.imu.get_gyro.assert_not_called()
+        self.car.imu.get_accel.assert_not_called()
+        self.assertAlmostEqual(velocity, .4)
+        self.assertAlmostEqual(yaw_rate, .4/self.module.CAR['L'] * np.tan(.1))
+        self.assertAlmostEqual(acceleration, (.4-.2)/.02)
+        self.assertTrue(np.isnan(self.car.w_imu))
+        self.assertTrue(np.isnan(self.car.a_x))
+
     def test_invalid_encoder_cuts_throttle_and_integral_without_requesting_reverse(self):
         self.car.encoder_valid = False
         self.car.sel_tracao = 0

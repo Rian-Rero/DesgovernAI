@@ -101,6 +101,7 @@ class Car:
         self.u = 0.0
         # comando de estercamento
         self.st = 0.0
+        self.st_filtered = 0.0
 
         # Receptor e seletores independentes: 0 = RC, 1 = AUTO.
         self.rc_direcao = 0.0
@@ -135,7 +136,9 @@ class Car:
 
         # atuadores de estercamento, aceleracao e ultrasom/camera
         try:
-            self.atuador = servos.Servos()
+            self.atuador = servos.Servos(
+                steering_filter_size=self.parameters.get('steering_filter_size', 10)
+            )
         except Exception as e:
             print(f"\033[31mErro nos servos: {e}\033[0m", flush=True)
             raise
@@ -394,13 +397,16 @@ class Car:
         # velocidade angular pelo modelo cinematico
         self.w_model = (vf / CAR["L"]) * np.tan(self.st)
 
-        # velocidade angular medida pela IMU
-        _, _, g_z = self.imu.get_gyro()
-        self.w_imu = np.deg2rad(g_z)
-
-        # fusao modelo + IMU
-        K = 0.0
-        w = (1.0 - K) * self.w_model + K * self.w_imu
+        if getattr(self, 'parameters', {}).get('imu_telemetry', True):
+            # Mantem a telemetria e a fusao existente para outros programas.
+            _, _, g_z = self.imu.get_gyro()
+            self.w_imu = np.deg2rad(g_z)
+            K = 0.0
+            w = (1.0 - K) * self.w_model + K * self.w_imu
+        else:
+            # K era zero: o controlador ja usava somente o modelo.
+            self.w_imu = float('nan')
+            w = self.w_model
 
         # filtra velocidade angular
         wf = self.w_filt.filter(w)
@@ -417,12 +423,13 @@ class Car:
         else:
             self.a_model = 0.0
 
-        # aceleracao medida pela IMU
-        self.a_x, _, _ = self.imu.get_accel()
-
-        # fusao sensorial
-        K = 0.0
-        a = (1.0 - K) * self.a_model + K * self.a_x
+        if getattr(self, 'parameters', {}).get('imu_telemetry', True):
+            self.a_x, _, _ = self.imu.get_accel()
+            K = 0.0
+            a = (1.0 - K) * self.a_model + K * self.a_x
+        else:
+            self.a_x = float('nan')
+            a = self.a_model
 
         # filtra
         af = self.a_filt.filter(a)
@@ -544,7 +551,9 @@ class Car:
         self.st = np.clip(st, -CAR["STEERMAX"], CAR["STEERMAX"])
 
         # atua no volante
-        self.atuador.set_steer(self.st)
+        filtered = self.atuador.set_steer(self.st)
+        self.st_filtered = (float(filtered) if isinstance(filtered, (int, float, np.number))
+                            and np.isfinite(filtered) else float('nan'))
 
     ########################################
     # get image data
@@ -594,6 +603,7 @@ class Car:
             "sel_direcao": self.sel_direcao,
             "sel_tracao": self.sel_tracao,
             "encoder_valid": int(self.encoder_valid),
+            "steer_filtered_rad": self.st_filtered,
         }
 
         # se ja iniciou as trajetorias

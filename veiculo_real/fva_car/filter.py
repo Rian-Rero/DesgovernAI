@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import Deque, Optional
 import numpy as np
+import math
 
 # =========================
 # Classe-base / Interface
@@ -66,17 +67,26 @@ class MovingAverage(BaseFilter):
 			raise ValueError("n deve ser > 0")
 		self.n: int = int(n)
 		self._buffer: Deque[float] = deque([float(initial)] * n, maxlen=n)
+		self._sum = float(initial) * n
 
 	########################################
 	def filter(self, sample: float) -> float:
-		self._buffer.append(float(sample))
-		self._value = float(np.mean(self._buffer))
+		sample = float(sample)
+		oldest = self._buffer[0]
+		self._buffer.append(sample)
+		if math.isfinite(self._sum) and math.isfinite(oldest) and math.isfinite(sample):
+			self._sum += sample - oldest
+		else:
+			# Mantem a recuperacao original quando NaN/Inf sai da janela.
+			self._sum = float(np.sum(self._buffer))
+		self._value = self._sum / self.n
 		return self._value
 
 	########################################
 	def reset(self, value: float = 0.0) -> None:
 		super().reset(value)
 		self._buffer = deque([float(value)] * self.n, maxlen=self.n)
+		self._sum = float(value) * self.n
 
 # =======================================
 # Filtro exponencial (alpha / low-pass 1P)
