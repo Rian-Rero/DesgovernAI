@@ -120,6 +120,17 @@ class YellowPathDetector:
                 continue
             y = candidates[0][1]
             active = [p for p in active if 0 < p[1][-1][1] - y <= gap_limit]
+            # Com varios objetos amarelos, elimina em NumPy os pais que
+            # falhariam nos mesmos dois primeiros testes geometricos abaixo.
+            # Mantem a ordem original e todas as validacoes de pontilhado.
+            parent_x = parent_dy = predictions = None
+            if len(active) >= 32:
+                parents = np.asarray([(p[1][-1][0], p[1][-1][1], p[2]) for p in active])
+                parent_x = parents[:, 0]
+                parent_dy = parents[:, 1] - y
+                predictions = parent_x + parents[:, 2] * parent_dy
+                reach = max(12., width * .025) + .65 * parent_dy
+            expected = np.polyval(self.previous, y / height) if recent and y >= seed_y else None
             new = []
             for point in candidates:
                 x, y, band_width, evidence = point
@@ -130,11 +141,15 @@ class YellowPathDetector:
                 if y >= seed_y:
                     penalty = 45 * abs(x / width - self.anchor)
                     if recent:
-                        expected = np.polyval(self.previous, y / height)
                         penalty += min(25., abs(x - expected) * .15)
                     best = (reward - penalty, (point,), 0.)
                 has_short_parent = False
-                for score, chain, slope in reversed(active):
+                parents_to_check = reversed(active)
+                if parent_x is not None:
+                    compatible = ((np.abs(x - predictions) <= reach)
+                                  & (np.abs((x - parent_x) / parent_dy) <= 2.8))
+                    parents_to_check = (active[index] for index in np.flatnonzero(compatible)[::-1])
+                for score, chain, slope in parents_to_check:
                     px, py, pw, _ = chain[-1]
                     dy, dx = py - y, x - px
                     prediction = px + slope * dy
@@ -143,7 +158,7 @@ class YellowPathDetector:
                     new_slope = dx / dy
                     if abs(new_slope) > 2.8:
                         continue
-                    width_change = abs(np.log(max(band_width, 1) / max(pw, 1)))
+                    width_change = abs(math.log(max(band_width, 1) / max(pw, 1)))
                     if width_change > 1.25:
                         continue
                     if dy <= short_limit:
@@ -176,17 +191,21 @@ class YellowPathDetector:
                     new.append(best)
                     paths.append(best)
             active.extend(new)
-        acceptable = []
-        for path in paths:
+        # O resultado sempre foi o caminho aceito de maior score. Avaliar
+        # nessa ordem permite parar no primeiro, sem validar dezenas de
+        # prefixos que jamais serao selecionados. sorted conserva os empates.
+        for path in sorted(paths, key=lambda p: p[0], reverse=True):
+            chain = path[1]
+            span = chain[0][1] - chain[-1][1]
+            if span < height * settings.min_span / 100:
+                continue
             points = np.asarray(path[1])
-            span = np.ptp(points[:, 1])
             long_gap = settings.dashed and np.any(np.abs(np.diff(points[:, 1])) > short_limit)
-            if (span >= height * settings.min_span / 100
-                    and span / max(1., np.median(points[:, 2])) >= 3.2
+            if (span / max(1., np.median(points[:, 2])) >= 3.2
                     and len(points) * step / max(span, 1) >= (.28 if long_gap else .5)
                     and np.mean(points[:, 3] >= .12) >= .25):
-                acceptable.append(path)
-        return None if not acceptable else np.asarray(max(acceptable, key=lambda p: p[0])[1])
+                return points
+        return None
 
     @staticmethod
     def _tail_tangent(chain, step):

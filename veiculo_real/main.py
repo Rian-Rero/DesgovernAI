@@ -145,6 +145,8 @@ def save_vision_snapshot(car, observation, status, now):
             'vision_age_s': finite(now - observation.timestamp),
             'capture_s': finite(observation.capture_seconds),
             'processing_s': finite(observation.processing_seconds),
+            'detection_s': finite(observation.detection_seconds),
+            'geometry_s': finite(observation.geometry_seconds),
             'errors': None if observation.errors is None else list(observation.errors),
             'color_support': finite(observation.color_support),
             'encoder_valid': bool(getattr(car, 'encoder_valid', False)),
@@ -170,6 +172,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     detector = RealLineDetector(
         calibration, path_settings=config.get("path_settings", {}),
         anchor=config.get("path_anchor", 0.5),
+        render_preview=False,
     )
     follower = RealStanleyFollower(config)
     if car_factory is None:
@@ -253,7 +256,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 if observation is not None:
                     timing = (f' | imagem={now-observation.timestamp:.3f}s'
                               f' captura={observation.capture_seconds:.3f}s'
-                              f' processamento={observation.processing_seconds:.3f}s')
+                              f' processamento={observation.processing_seconds:.3f}s'
+                              f' deteccao={observation.detection_seconds:.3f}s'
+                              f' geometria={observation.geometry_seconds:.3f}s')
                 print(f'CONTROLE: {control_status}{timing}'
                       f' | vref={car.vref:.2f} u={car.u:.2f}', flush=True)
                 t_diagnostic = now
@@ -268,9 +273,10 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 t_telemetry = now
             if plot is not None and now - t_plot >= 1.0:
                 plt, _, axis = plot
-                if observation is not None and observation.frame is not None:
+                preview = detector.with_preview(observation)
+                if preview is not None and preview.frame is not None:
                     axis.clear()
-                    axis.imshow(observation.frame)
+                    axis.imshow(preview.frame)
                     axis.set_title(observation.reason or "Linha amarela HSV")
                     axis.axis("off")
                     plt.pause(0.001)
@@ -289,7 +295,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 thread_capture.join(timeout=1.0)
             try:
                 if config['save']:
-                    save_vision_snapshot(car, observation, control_status, last_control_at)
+                    save_vision_snapshot(car, detector.with_preview(observation), control_status, last_control_at)
                 if config["save"] and getattr(car, "traj", None):
                     car.save()
             finally:

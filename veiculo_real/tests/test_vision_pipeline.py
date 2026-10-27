@@ -6,16 +6,41 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
 
 from test_mission import mission
-from test_lateral import lateral, fake_car
+from test_lateral import lateral, fake_car, calibration_data, calibration_from, metric_line_frame
 
 
 class VisionPipelineTests(unittest.TestCase):
+    def test_headless_processing_defers_preview_without_changing_metric_results(self):
+        calibration = calibration_from(calibration_data())
+        settings = {'clahe': False, 'smoothing': 0}
+        normal = lateral.RealLineDetector(calibration, settings)
+        headless = lateral.RealLineDetector(calibration, settings, render_preview=False)
+        frame = metric_line_frame()
+        expected = normal.observe_frame(frame, 10.)
+        with patch.object(lateral, 'render_path', wraps=lateral.render_path) as render:
+            actual = headless.observe_frame(frame, 10.)
+            render.assert_not_called()
+            self.assertIsNone(actual.frame)
+            self.assertEqual(actual.errors, expected.errors)
+            self.assertEqual(actual.color_support, expected.color_support)
+            self.assertGreaterEqual(actual.detection_seconds, 0.)
+            self.assertGreaterEqual(actual.geometry_seconds, 0.)
+            with patch.object(headless.detector, 'process') as process:
+                preview = headless.with_preview(actual)
+                process.assert_not_called()
+            render.assert_called_once()
+        self.assertEqual(preview.timestamp, 10.)
+        self.assertEqual(preview.errors, actual.errors)
+        self.assertEqual(preview.detection_seconds, actual.detection_seconds)
+        self.assertIsNone(actual.frame)
+        np.testing.assert_array_equal(preview.frame, expected.frame)
+
     def test_capture_drops_old_frames_and_preserves_acquisition_start(self):
         frames = queue.Queue(maxsize=1)
         stop = threading.Event()

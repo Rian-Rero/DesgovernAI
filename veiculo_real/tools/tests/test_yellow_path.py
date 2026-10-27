@@ -38,6 +38,22 @@ def dashed_scene(curved=False, sparse=False):
 
 
 class YellowPathTests(unittest.TestCase):
+    def test_many_parallel_candidates_keep_selected_path_and_dashed_rules(self):
+        frame = np.full((480, 640, 3), 35, np.uint8)
+        columns = np.arange(12, 630, 26)
+        for column in columns:
+            cv2.line(frame, (int(column), 145), (int(column), 479), (0, 220, 240), 5)
+        for anchor in (.2, .5, .8):
+            with self.subTest(anchor=anchor):
+                detector = YellowPathDetector()
+                detector.reset(anchor=anchor)
+                expected = columns[np.argmin(abs(columns / 640 - anchor))]
+                for timestamp in (10., 10.05):
+                    result = detector.process(frame, timestamp=timestamp)
+                    self.assertTrue(result.valid)
+                    np.testing.assert_array_equal(result.center[:, 0], expected)
+                    self.assertEqual(cv2.countNonZero(result.dash_mask), 0)
+
     def test_straight_curve_and_s_curve(self):
         for kind in ("straight", "curve", "s_curve"):
             with self.subTest(kind=kind):

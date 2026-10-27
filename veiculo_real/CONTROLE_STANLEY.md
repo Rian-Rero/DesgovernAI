@@ -151,6 +151,15 @@ da aquisicao, nunca o fim do processamento; o limite de 0.3 s foi mantido.
 Se o processamento sozinho ultrapassar esse limite, descartar frames na
 fila nao basta: sera necessario medir e otimizar o processamento no hardware.
 
+A missao nao desenha a visualizacao em cada frame: produz o destaque apenas
+para `--display` (uma vez por segundo) ou ao salvar o diagnostico no fim.
+O detector compartilhado descarta candidatos geometricamente impossiveis
+em lote e valida primeiro os caminhos de maior score, conservando os
+criterios de aceitacao, desempate e reconstrucao de pontilhados. O terminal
+separa `deteccao` (HSV e busca da faixa) de `geometria` (projecao em metros e
+ajuste da curva). Os mesmos tempos sao gravados como `vision_detection_s`
+e `vision_geometry_s` no CSV e `detection_s` e `geometry_s` no JSON.
+
 `Buscando faixa` indica rejeicao pelo detector HSV; `Faixa sem cobertura
 metrica suficiente junto ao eixo dianteiro` indica faixa visual encontrada,
 mas geometria rejeitada antes do Stanley. `Faixa valida; controle liberado`

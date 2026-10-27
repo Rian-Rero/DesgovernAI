@@ -4,15 +4,16 @@ A homografia leva pixels da camera fixa ao plano do piso: x para frente e y
 para esquerda, em metros, com origem no centro do eixo dianteiro. A selecao
 da faixa e exatamente a implementacao compartilhada de tools.yellow_path.
 """
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import json
 import math
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
 
-from tools.yellow_path import PathSettings, YellowPathDetector, render_path
+from tools.yellow_path import PathResult, PathSettings, YellowPathDetector, render_path
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,9 @@ class LineObservation:
     source_frame: np.ndarray | None = None  # BGR original para diagnostico.
     capture_seconds: float = math.nan
     processing_seconds: float = math.nan
+    detection_seconds: float = math.nan
+    geometry_seconds: float = math.nan
+    path_result: PathResult | None = None
 
     @property
     def valid(self):
@@ -145,7 +149,7 @@ def _path_settings(value):
 
 
 class RealLineDetector:
-    def __init__(self, calibration, path_settings=None, anchor=.5):
+    def __init__(self, calibration, path_settings=None, anchor=.5, render_preview=True):
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('RealLineDetector requer GroundCalibration em metros.')
         if not isinstance(anchor, (int, float)) or not math.isfinite(anchor) or not 0 <= anchor <= 1:
@@ -153,6 +157,7 @@ class RealLineDetector:
         self.calibration = calibration
         self.settings = _path_settings(path_settings)
         self.anchor = float(anchor)
+        self.render_preview = render_preview
         self.detector = YellowPathDetector()
         self.detector.reset(anchor=self.anchor)
 
@@ -167,30 +172,45 @@ class RealLineDetector:
         if (frame.shape[1], frame.shape[0]) != self.calibration.image_size:
             return LineObservation(timestamp, reason='Resolucao diferente da calibracao da camera',
                                    source_frame=frame)
+        detection_at = time.perf_counter()
         result = self.detector.process(frame, self.settings, timestamp=timestamp)
-        display = cv2.cvtColor(render_path(frame, result, self.settings, self.anchor), cv2.COLOR_BGR2RGB)
+        metadata = {'source_frame': frame, 'path_result': result,
+                    'detection_seconds': time.perf_counter() - detection_at}
+        display = None
+        if self.render_preview:
+            display = cv2.cvtColor(render_path(frame, result, self.settings, self.anchor), cv2.COLOR_BGR2RGB)
         # A validacao de evidencia pertence ao detector compartilhado. O modo
         # pontilhado pode aceitar suporte < 50% apos validar as duas tangentes.
         if (not result.valid or not math.isfinite(result.support)
                 or not 0 <= result.support <= 1):
-            return LineObservation(timestamp, frame=display, reason=result.status, source_frame=frame)
+            return LineObservation(timestamp, frame=display, reason=result.status, **metadata)
+        geometry_at = time.perf_counter()
         path_pixels = cv2.countNonZero(result.path_mask)
         bridge_pixels = (0 if result.dash_mask is None else
                          cv2.countNonZero(cv2.bitwise_and(result.dash_mask, result.path_mask)))
-        metadata = {'color_support': float(result.support),
-                    'dash_fraction': bridge_pixels / max(1, path_pixels),
-                    'source_frame': frame}
+        metadata.update(color_support=float(result.support),
+                        dash_fraction=bridge_pixels / max(1, path_pixels))
         points = self.calibration.project_pixels(result.center)
         try:
             errors = fit_line_errors(points, [0., 0.], [1., 0.], with_curvature=True)
         except (ValueError, np.linalg.LinAlgError, FloatingPointError):
             errors = None
+        metadata['geometry_seconds'] = time.perf_counter() - geometry_at
         if errors is None or not np.all(np.isfinite(errors)):
             return LineObservation(timestamp, frame=display,
                                    reason='Faixa sem cobertura metrica suficiente junto ao eixo dianteiro',
                                    **metadata)
         return LineObservation(timestamp, tuple(float(x) for x in errors), display, result.status,
                                **metadata)
+
+    def with_preview(self, observation):
+        """Desenha sob demanda, sem refazer deteccao nem alterar o horario."""
+        if (observation is None or observation.frame is not None
+                or observation.source_frame is None or observation.path_result is None):
+            return observation
+        display = render_path(observation.source_frame, observation.path_result,
+                              self.settings, self.anchor)
+        return replace(observation, frame=cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
 
 
 class StanleyController:
@@ -397,6 +417,8 @@ class RealStanleyFollower:
                 vision_age_s=age, cross_track_m=lateral, heading_error_rad=heading,
                 vision_capture_s=getattr(observation, 'capture_seconds', invalid),
                 vision_processing_s=getattr(observation, 'processing_seconds', invalid),
+                vision_detection_s=getattr(observation, 'detection_seconds', invalid),
+                vision_geometry_s=getattr(observation, 'geometry_seconds', invalid),
                 curvature_m_inv=curvature, steer_geometric_rad=steer,
                 steer_cmd_rad=float(car.st), steering_sign=float(self.steering_sign),
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
