@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Stanley no veiculo real, com a percepcao HSV de tools/yellow_path.py."""
+
 import argparse
 from dataclasses import replace
 import json
@@ -13,10 +14,13 @@ import numpy as np
 import cv2
 
 from fva_car.lateral import (
-    GroundCalibration, LineObservation, RealLineDetector, RealStanleyFollower,
+    GroundCalibration,
+    LineObservation,
+    RealLineDetector,
+    RealStanleyFollower,
 )
 
-MAIN_VEL = 0.3  # m/s: iniciar o ajuste lateral sem percorrer metros durante a correcao
+MAIN_VEL = 1.0  # m/s: iniciar o ajuste lateral sem percorrer metros durante a correcao
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20
@@ -24,7 +28,7 @@ STOP_REACTION_TIME = 0.30
 STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 
 parameters = {
-    "ts": 20.0,
+    "ts": 30.0,
     "save": True,
     "logfile": "logs/",
     "camera": True,
@@ -56,8 +60,11 @@ parameters = {
 
 def stopping_distance(velocity):
     speed = abs(velocity)
-    return (OBSTACLE_DISTANCE + speed * STOP_REACTION_TIME
-            + speed ** 2 / (2.0 * STOP_DECELERATION))
+    return (
+        OBSTACLE_DISTANCE
+        + speed * STOP_REACTION_TIME
+        + speed**2 / (2.0 * STOP_DECELERATION)
+    )
 
 
 def stop_vehicle(car):
@@ -89,21 +96,25 @@ def capture_func(car, frames, stop_event, clock=time.monotonic):
         if error is not None:
             return
         if frame is None:
-            stop_event.wait(.02)
+            stop_event.wait(0.02)
 
 
-def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic, frames=None):
+def vision_func(
+    car, vision_data, stop_event, detector, clock=time.monotonic, frames=None
+):
     """Apenas percebe; a thread principal e a unica que envia comandos."""
     sequence = 0
     while not stop_event.is_set():
         if frames is not None:
             try:
-                frame, captured_at, capture_seconds, capture_error = frames.get(timeout=.1)
+                frame, captured_at, capture_seconds, capture_error = frames.get(
+                    timeout=0.1
+                )
             except queue.Empty:
                 continue
         else:
             captured_at = clock()
-            capture_seconds, capture_error = float('nan'), None
+            capture_seconds, capture_error = float("nan"), None
         try:
             if capture_error is not None:
                 raise RuntimeError(capture_error)
@@ -113,8 +124,12 @@ def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic, fr
             processing_at = clock()
             observation = detector.observe_frame(frame, captured_at)
             sequence += 1
-            observation = replace(observation, capture_seconds=capture_seconds,
-                                  processing_seconds=clock() - processing_at, sequence=sequence)
+            observation = replace(
+                observation,
+                capture_seconds=capture_seconds,
+                processing_seconds=clock() - processing_at,
+                sequence=sequence,
+            )
         except Exception as error:
             vision_data["observation"] = LineObservation(
                 timestamp=captured_at, reason=f"Falha de visao: {error}"
@@ -129,42 +144,52 @@ def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic, fr
 
 def save_vision_snapshot(car, observation, status, now):
     """Salva o ultimo frame somente apos neutralizar os motores."""
-    folder = getattr(car, 'logfile', None)
+    folder = getattr(car, "logfile", None)
     if not isinstance(folder, (str, Path)) or observation is None:
         return
     folder = Path(folder)
+
     def finite(value):
         return float(value) if value is not None and np.isfinite(value) else None
+
     try:
-        for name, frame in (('vision_camera.jpg', observation.source_frame),
-                            ('vision_detection.jpg', observation.frame)):
+        for name, frame in (
+            ("vision_camera.jpg", observation.source_frame),
+            ("vision_detection.jpg", observation.frame),
+        ):
             if frame is not None:
-                if name == 'vision_detection.jpg':
+                if name == "vision_detection.jpg":
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 if not cv2.imwrite(str(folder / name), frame):
-                    raise OSError(f'Nao foi possivel salvar {name}')
+                    raise OSError(f"Nao foi possivel salvar {name}")
         data = {
-            'control_status': status, 'vision_reason': observation.reason,
-            'metric_line_valid': bool(observation.valid),
-            'image_size': (None if observation.source_frame is None else
-                           list(observation.source_frame.shape[1::-1])),
-            'processing_size': observation.processing_size,
-            'vision_frame_id': observation.sequence,
-            'vision_age_s': finite(now - observation.timestamp),
-            'capture_s': finite(observation.capture_seconds),
-            'processing_s': finite(observation.processing_seconds),
-            'detection_s': finite(observation.detection_seconds),
-            'geometry_s': finite(observation.geometry_seconds),
-            'errors': None if observation.errors is None else list(observation.errors),
-            'color_support': finite(observation.color_support),
-            'encoder_valid': bool(getattr(car, 'encoder_valid', False)),
-            'sel_direcao': getattr(car, 'sel_direcao', None),
-            'sel_tracao': getattr(car, 'sel_tracao', None),
+            "control_status": status,
+            "vision_reason": observation.reason,
+            "metric_line_valid": bool(observation.valid),
+            "image_size": (
+                None
+                if observation.source_frame is None
+                else list(observation.source_frame.shape[1::-1])
+            ),
+            "processing_size": observation.processing_size,
+            "vision_frame_id": observation.sequence,
+            "vision_age_s": finite(now - observation.timestamp),
+            "capture_s": finite(observation.capture_seconds),
+            "processing_s": finite(observation.processing_seconds),
+            "detection_s": finite(observation.detection_seconds),
+            "geometry_s": finite(observation.geometry_seconds),
+            "errors": None if observation.errors is None else list(observation.errors),
+            "color_support": finite(observation.color_support),
+            "encoder_valid": bool(getattr(car, "encoder_valid", False)),
+            "sel_direcao": getattr(car, "sel_direcao", None),
+            "sel_tracao": getattr(car, "sel_tracao", None),
         }
-        (folder / 'vision_status.json').write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-        print(f'Diagnostico de visao salvo em {folder}', flush=True)
+        (folder / "vision_status.json").write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"Diagnostico de visao salvo em {folder}", flush=True)
     except (OSError, ValueError, cv2.error) as error:
-        print(f'Nao foi possivel salvar diagnostico de visao: {error}', flush=True)
+        print(f"Nao foi possivel salvar diagnostico de visao: {error}", flush=True)
 
 
 def run_mission(settings=None, display=False, car_factory=None, clock=time.monotonic):
@@ -172,24 +197,30 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     if settings is not None:
         config.update(settings)
     if not config["camera"] or config["ultrasonic_steering"]:
-        raise ValueError("Stanley requer camera ligada e fixa (ultrasonic_steering=False).")
+        raise ValueError(
+            "Stanley requer camera ligada e fixa (ultrasonic_steering=False)."
+        )
     if config["encoder_protocol"] not in ("rpm", "rc"):
         raise ValueError("encoder_protocol deve ser 'rpm' ou 'rc'.")
-    if (isinstance(config['steering_filter_size'], bool)
-            or not isinstance(config['steering_filter_size'], int)
-            or config['steering_filter_size'] < 1):
-        raise ValueError('steering_filter_size deve ser inteiro positivo.')
+    if (
+        isinstance(config["steering_filter_size"], bool)
+        or not isinstance(config["steering_filter_size"], int)
+        or config["steering_filter_size"] < 1
+    ):
+        raise ValueError("steering_filter_size deve ser inteiro positivo.")
     # Valida geometria e ajustes antes de abrir sensores ou atuar nos motores.
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
     detector = RealLineDetector(
-        calibration, path_settings=config.get("path_settings", {}),
+        calibration,
+        path_settings=config.get("path_settings", {}),
         anchor=config.get("path_anchor", 0.5),
         render_preview=False,
-        processing_width=config.get('vision_width', 0),
+        processing_width=config.get("vision_width", 0),
     )
     follower = RealStanleyFollower(config)
     if car_factory is None:
         from fva_car import Car
+
         car_factory = Car
     car = car_factory(config)
     vision_data = {"observation": None}
@@ -199,27 +230,44 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     thread_capture = None
     plot = None
     observation = None
-    control_status = 'Missao ainda nao iniciada'
+    control_status = "Missao ainda nao iniciada"
     last_control_at = None
     try:
         car.start_mission()
-        print(f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s", flush=True)
+        print(
+            f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s",
+            flush=True,
+        )
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
-        print('Stanley: velocidade de referencia (vref)' if config['stanley_use_vref'] else
-              'Stanley: velocidade medida (encoder)', flush=True)
-        print(f"Direcao: filtro de {config['steering_filter_size']} amostras", flush=True)
+        print(
+            (
+                "Stanley: velocidade de referencia (vref)"
+                if config["stanley_use_vref"]
+                else "Stanley: velocidade medida (encoder)"
+            ),
+            flush=True,
+        )
+        print(
+            f"Direcao: filtro de {config['steering_filter_size']} amostras", flush=True
+        )
         thread_capture = threading.Thread(
-            target=capture_func, args=(car, frames, stop_event, clock),
-            daemon=True, name='captura-camera',
+            target=capture_func,
+            args=(car, frames, stop_event, clock),
+            daemon=True,
+            name="captura-camera",
         )
         thread_capture.start()
         thread_vision = threading.Thread(
-            target=vision_func, args=(car, vision_data, stop_event, detector, clock),
-            kwargs={'frames': frames}, daemon=True, name="linha-hsv",
+            target=vision_func,
+            args=(car, vision_data, stop_event, detector, clock),
+            kwargs={"frames": frames},
+            daemon=True,
+            name="linha-hsv",
         )
         thread_vision.start()
         if display:
             import matplotlib.pyplot as plt
+
             plt.ion()
             figure, axis = plt.subplots()
             plot = (plt, figure, axis)
@@ -228,60 +276,93 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         obstacle_detected = False
         next_stop_beep = 0.0
         last_encoder_valid = None
-        t_diagnostic = t_plot - 1.
+        t_diagnostic = t_plot - 1.0
         last_diagnostic_sequence = 0
         while car.t < config["ts"]:
             if not car.step():
                 break
             encoder_valid = bool(getattr(car, "encoder_valid", True))
             if encoder_valid != last_encoder_valid:
-                print("Encoder: leitura OK." if encoder_valid else
-                      "Encoder sem leitura valida: comandos em neutro. Confira o protocolo e a serial.",
-                      flush=True)
+                print(
+                    (
+                        "Encoder: leitura OK."
+                        if encoder_valid
+                        else "Encoder sem leitura valida: comandos em neutro. Confira o protocolo e a serial."
+                    ),
+                    flush=True,
+                )
                 last_encoder_valid = encoder_valid
             dist, valid = car.get_distance()
             stop_distance = stopping_distance(car.v)
-            if (not obstacle_detected and valid and np.isfinite(dist)
-                    and dist <= stop_distance):
+            if (
+                not obstacle_detected
+                and valid
+                and np.isfinite(dist)
+                and dist <= stop_distance
+            ):
                 obstacle_detected = True
-                print(f"Obstaculo a {dist:.2f} m: parada travada ate o fim do ensaio.", flush=True)
+                print(
+                    f"Obstaculo a {dist:.2f} m: parada travada ate o fim do ensaio.",
+                    flush=True,
+                )
             observation = vision_data["observation"]
-            manual = (getattr(car, "sel_direcao", 1) == 0
-                      and getattr(car, "sel_tracao", 1) == 0)
-            if (manual and encoder_valid and not car.emergencia and not obstacle_detected
-                    and np.isfinite(car.v) and np.isfinite(car.dt) and car.dt > 0):
+            manual = (
+                getattr(car, "sel_direcao", 1) == 0
+                and getattr(car, "sel_tracao", 1) == 0
+            )
+            if (
+                manual
+                and encoder_valid
+                and not car.emergencia
+                and not obstacle_detected
+                and np.isfinite(car.v)
+                and np.isfinite(car.dt)
+                and car.dt > 0
+            ):
                 # Car aplica os dois canais RC; a perda da faixa nao impede
                 # controle manual. Obstaculos e emergencia conservam prioridade.
                 follower.controller.reset()
                 car.set_steer(0.0)
                 car.set_vel(0.0)
                 car.log(lateral_active=0)
-                control_status = 'Controle manual RC'
+                control_status = "Controle manual RC"
             else:
-                follower.apply(car, observation, clock(), obstacle_detected=obstacle_detected)
+                follower.apply(
+                    car, observation, clock(), obstacle_detected=obstacle_detected
+                )
                 control_status = follower.status
-            car.log(obstacle_stop=int(obstacle_detected), distance_m=dist,
-                    stopping_distance_m=stop_distance)
+            car.log(
+                obstacle_stop=int(obstacle_detected),
+                distance_m=dist,
+                stopping_distance_m=stop_distance,
+            )
             now = clock()
             last_control_at = now
             if not thread_vision.is_alive():
                 stop_vehicle(car)
                 print("Thread de visao encerrada; missao interrompida.", flush=True)
                 break
-            if now - t_diagnostic >= 1.:
-                timing = ''
+            if now - t_diagnostic >= 1.0:
+                timing = ""
                 sequence = 0 if observation is None else observation.sequence
-                vision_fps = (sequence - last_diagnostic_sequence) / (now - t_diagnostic)
+                vision_fps = (sequence - last_diagnostic_sequence) / (
+                    now - t_diagnostic
+                )
                 if observation is not None:
-                    timing = (f' | imagem={now-observation.timestamp:.3f}s'
-                              f' captura={observation.capture_seconds:.3f}s'
-                              f' processamento={observation.processing_seconds:.3f}s'
-                              f' deteccao={observation.detection_seconds:.3f}s'
-                              f' geometria={observation.geometry_seconds:.3f}s')
+                    timing = (
+                        f" | imagem={now-observation.timestamp:.3f}s"
+                        f" captura={observation.capture_seconds:.3f}s"
+                        f" processamento={observation.processing_seconds:.3f}s"
+                        f" deteccao={observation.detection_seconds:.3f}s"
+                        f" geometria={observation.geometry_seconds:.3f}s"
+                    )
                     if observation.processing_size:
-                        timing += f' grade={observation.processing_size[0]}x{observation.processing_size[1]}'
-                print(f'CONTROLE: {control_status}{timing} visao={vision_fps:.1f}fps'
-                      f' | vref={car.vref:.2f} u={car.u:.2f}', flush=True)
+                        timing += f" grade={observation.processing_size[0]}x{observation.processing_size[1]}"
+                print(
+                    f"CONTROLE: {control_status}{timing} visao={vision_fps:.1f}fps"
+                    f" | vref={car.vref:.2f} u={car.u:.2f}",
+                    flush=True,
+                )
                 t_diagnostic = now
                 last_diagnostic_sequence = sequence
             if obstacle_detected and now >= next_stop_beep:
@@ -289,9 +370,12 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                     next_stop_beep = now + 1.0
             # O controle roda em todo passo; somente a telemetria usa 10 Hz.
             if now - t_telemetry >= TELEMETRY_PERIOD:
-                print(f"DATA,{car.t:.3f},{car.p[0]:.3f},{car.p[1]:.3f},"
-                      f"{car.v:.3f},{car.vref:.3f},{car.a:.3f},{car.u:.3f},"
-                      f"{car.w:.3f},{car.th:.3f}", flush=True)
+                print(
+                    f"DATA,{car.t:.3f},{car.p[0]:.3f},{car.p[1]:.3f},"
+                    f"{car.v:.3f},{car.vref:.3f},{car.a:.3f},{car.u:.3f},"
+                    f"{car.w:.3f},{car.th:.3f}",
+                    flush=True,
+                )
                 t_telemetry = now
             if plot is not None and now - t_plot >= 1.0:
                 plt, _, axis = plot
@@ -316,8 +400,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             if thread_capture is not None:
                 thread_capture.join(timeout=1.0)
             try:
-                if config['save']:
-                    save_vision_snapshot(car, detector.with_preview(observation), control_status, last_control_at)
+                if config["save"]:
+                    save_vision_snapshot(
+                        car,
+                        detector.with_preview(observation),
+                        control_status,
+                        last_control_at,
+                    )
                 if config["save"] and getattr(car, "traj", None):
                     car.save()
             finally:
@@ -329,27 +418,45 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calibration", help="JSON da camera calibrada em metros")
-    parser.add_argument("--speed", type=float, default=MAIN_VEL, help="Teto de velocidade em m/s")
-    parser.add_argument("--encoder-protocol", choices=("rpm", "rc"),
-                        help="rpm: Arduino original; rc: Arduino com receptor e chaves")
-    parser.add_argument("--display", action="store_true", help="Mostrar a faixa detectada")
-    parser.add_argument('--vision-width', type=int,
-                        help='Largura do processamento: 0 original, 320 ou 480 para reduzir custo')
-    parser.add_argument('--steering-filter', type=int,
-                        help='Amostras do filtro da direcao: padrao 3; 1 desativa a media movel')
-    parser.add_argument('--imu-telemetry', action='store_true', help='Reativar leituras extras da IMU no CSV')
+    parser.add_argument(
+        "--speed", type=float, default=MAIN_VEL, help="Teto de velocidade em m/s"
+    )
+    parser.add_argument(
+        "--encoder-protocol",
+        choices=("rpm", "rc"),
+        help="rpm: Arduino original; rc: Arduino com receptor e chaves",
+    )
+    parser.add_argument(
+        "--display", action="store_true", help="Mostrar a faixa detectada"
+    )
+    parser.add_argument(
+        "--vision-width",
+        type=int,
+        help="Largura do processamento: 0 original, 320 ou 480 para reduzir custo",
+    )
+    parser.add_argument(
+        "--steering-filter",
+        type=int,
+        help="Amostras do filtro da direcao: padrao 3; 1 desativa a media movel",
+    )
+    parser.add_argument(
+        "--imu-telemetry",
+        action="store_true",
+        help="Reativar leituras extras da IMU no CSV",
+    )
     args = parser.parse_args()
     settings = {"velocity_reference": args.speed}
     if args.vision_width is not None:
-        settings['vision_width'] = args.vision_width
+        settings["vision_width"] = args.vision_width
     if args.steering_filter is not None:
-        settings['steering_filter_size'] = args.steering_filter
+        settings["steering_filter_size"] = args.steering_filter
     if args.imu_telemetry:
-        settings['imu_telemetry'] = True
+        settings["imu_telemetry"] = True
     if args.encoder_protocol:
         settings["encoder_protocol"] = args.encoder_protocol
     if args.calibration:
         settings["camera_calibration_file"] = args.calibration
+
     def interrupt_mission(_signum, _frame):
         # A GUI remota encerra com SIGTERM. Usa o mesmo finally do Ctrl+C.
         raise KeyboardInterrupt
@@ -359,7 +466,10 @@ def main():
         try:
             run_mission(settings, display=args.display)
         except (FileNotFoundError, ValueError) as error:
-            parser.exit(2, f"{error}\nCalibre com veiculo_real/tools/calibrar_camera_lateral.py antes de rodar.\n")
+            parser.exit(
+                2,
+                f"{error}\nCalibre com veiculo_real/tools/calibrar_camera_lateral.py antes de rodar.\n",
+            )
     finally:
         signal.signal(signal.SIGTERM, previous_handler)
 

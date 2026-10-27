@@ -416,7 +416,9 @@ class RsyncGUI(tk.Tk):
             font=("Courier", 11),
         )
 
-        self.cmd_text.insert("end", "python3 -u main.py --vision-width 320\n")
+        self.cmd_text.insert(
+            "end", "python3 -u main.py --vision-width 320 --steering-filter 3\n"
+        )
         self.cmd_text.pack(fill="x", pady=4)
 
         cmd_buttons = ttk.Frame(parent)
