@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 ########################################
-# Disciplina: Topicos em Engenharia de Controle e Automacao IV (ENG075): 
+# Disciplina: Topicos em Engenharia de Controle e Automacao IV (ENG075):
 # Fundamentos de Veiculos Autonomos - 2026/2
 # Professores: Armando Alves Neto e Leonardo A. Mozelli
 # Cursos: Engenharia de Controle e Automacao
@@ -23,242 +23,259 @@ GPIO mode options: BOARD/BCM
 # trigger_pin = 18 (BOARD) and 24 (BCM)
 #    echo_pin = 24 (BOARD) and  8 (BCM)
 """
-GAIN = 343.0/2.0
+GAIN = 343.0 / 2.0
 TRIGGER_PIN = 24
 ECHO_PIN = 8
 SAMPLE_TIME = 0.1  # 100 ms -> 10 Hz
-SENSOR_TIMEOUT  = 0.30   	# tempo maximo sem medida [s]
+SENSOR_TIMEOUT = 0.30  # tempo maximo sem medida [s]
+
 
 ############################################
 # Ultrasonic Class for Raspberry Pi 4 or 5
 ############################################
 class Ultrasonic:
-	########################################
-	# Constructor
-	########################################
-	def __init__(self, trigger_pin=None, echo_pin=None, min_range=0.0, max_range=4.0):
-		
-		"""
-		Initializes the ultrasonic sensor with given trigger and echo pins.
-		Configures GPIO settings and set sensor limits
+    ########################################
+    # Constructor
+    ########################################
+    def __init__(self, trigger_pin=None, echo_pin=None, min_range=0.0, max_range=4.0):
+        """
+        Initializes the ultrasonic sensor with given trigger and echo pins.
+        Configures GPIO settings and set sensor limits
 
-		Args:
-			trigger_pin (int): GPIO pin number for the trigger signal.
-			echo_pin (int): GPIO pin number for the echo signal.
-			min_range (float): Minimum measurable distance in meters.
-			max_range (float): Maximum measurable distance in meters.
-		"""
-		
-		# limites do sensor
-		self.min_range = min_range
-		self.max_range = max_range
-		
-		# distancia inicial ate receber a primeira leitura valida
-		self.dist = 0.5
-		self.valid = False
-		self.last_measurement = time.monotonic()
+        Args:
+                trigger_pin (int): GPIO pin number for the trigger signal.
+                echo_pin (int): GPIO pin number for the echo signal.
+                min_range (float): Minimum measurable distance in meters.
+                max_range (float): Maximum measurable distance in meters.
+        """
 
-		# Detectar a versao da Raspberry
-		self.rpi_version = self.detect_rpi_version()
-		#print(f"[INFO] Detected Raspberry Pi {self.rpi_version}")
+        # limites do sensor
+        self.min_range = min_range
+        self.max_range = max_range
 
-		# Raspberry Pi 5
-		if self.rpi_version == 5:
-			import lgpio as GPIO
-			self.GPIO = GPIO
-			# detecta o chip
-			chip_id = self._find_gpiochip()
-			self.handle_chip = self.GPIO.gpiochip_open(chip_id)
-			self.trigger_pin = trigger_pin if trigger_pin is not None else TRIGGER_PIN
-			self.echo_pin = echo_pin if echo_pin is not None else ECHO_PIN
-			self.GPIO.gpio_claim_output(self.handle_chip, self.trigger_pin)
-			self.GPIO.gpio_claim_input(self.handle_chip, self.echo_pin)
-			
-			# funcao de leitura pra raspberry pi 5
-			self.read_func = lambda: self.GPIO.gpio_read(self.handle_chip, self.echo_pin)
+        # ultima leitura valida
+        self.dist = self.max_range
+        self.valid = False
+        self.status = "INIT"
+        self.last_measurement = time.monotonic()
 
-		# Raspberry Pi 3/4
-		else:
-			import RPi.GPIO as GPIO
-			self.GPIO = GPIO
-			self.trigger_pin = trigger_pin if trigger_pin is not None else TRIGGER_PIN
-			self.echo_pin = echo_pin if echo_pin is not None else ECHO_PIN
-			self.GPIO.setwarnings(False)
-			self.GPIO.setmode(GPIO.BCM)
-			self.GPIO.setup(self.trigger_pin, GPIO.OUT)
-			self.GPIO.setup(self.echo_pin, GPIO.IN)
-			
-			# funcao de leitura pra raspberry pi 4
-			self.read_func = lambda: self.GPIO.input(self.echo_pin)
-		
-		# lock de secao critica
-		self.lock = threading.Lock()
-		self.stop = threading.Event()
-		# thread de leitura
-		self.thread = threading.Thread(target=self._read, daemon=True)
-		self.thread.start()
+        # Detectar a versao da Raspberry
+        self.rpi_version = self.detect_rpi_version()
+        # print(f"[INFO] Detected Raspberry Pi {self.rpi_version}")
 
-	##############################################
-	# Raspberry Pi version detector
-	##############################################
-	def detect_rpi_version(self):
-		try:
-			with open('/proc/device-tree/model') as f:
-				return 5 if 'Raspberry Pi 5' in f.read() else 4
-		except OSError:
-			return 4  # Default caso nao consiga detectar
-	
-	##############################################
-	# Detecta gpiochip
-	##############################################
-	def _find_gpiochip(self):
-		try:
-			out = subprocess.check_output(["gpiodetect"], text=True)
-			for line in out.splitlines():
-				if "pinctrl-rp1" in line:
-					match = re.match(r"gpiochip(\d+)", line)
+        # Raspberry Pi 5
+        if self.rpi_version == 5:
+            import lgpio as GPIO
 
-					if match:
-						return int(match.group(1))
+            self.GPIO = GPIO
+            # detecta o chip
+            chip_id = self._find_gpiochip()
+            self.handle_chip = self.GPIO.gpiochip_open(chip_id)
+            self.trigger_pin = trigger_pin if trigger_pin is not None else TRIGGER_PIN
+            self.echo_pin = echo_pin if echo_pin is not None else ECHO_PIN
+            self.GPIO.gpio_claim_output(self.handle_chip, self.trigger_pin)
+            self.GPIO.gpio_claim_input(self.handle_chip, self.echo_pin)
 
-		except (OSError, subprocess.SubprocessError):
-			pass
+            # funcao de leitura pra raspberry pi 5
+            self.read_func = lambda: self.GPIO.gpio_read(
+                self.handle_chip, self.echo_pin
+            )
 
-		raise RuntimeError("GPIO chip principal da Raspberry Pi 5 nao encontrado.")
+        # Raspberry Pi 3/4
+        else:
+            import RPi.GPIO as GPIO
 
-	########################################
-	# thread de leitura continua
-	########################################
-	def _read(self):
-		# inicializacao
-		time.sleep(0.1)
+            self.GPIO = GPIO
+            self.trigger_pin = trigger_pin if trigger_pin is not None else TRIGGER_PIN
+            self.echo_pin = echo_pin if echo_pin is not None else ECHO_PIN
+            self.GPIO.setwarnings(False)
+            self.GPIO.setmode(GPIO.BCM)
+            self.GPIO.setup(self.trigger_pin, GPIO.OUT)
+            self.GPIO.setup(self.echo_pin, GPIO.IN)
 
-		# loop de leitura
-		while not self.stop.is_set():
-			d = self.get_measure()
-			if d is not None:
-				with self.lock:
-					self.dist = d
-					self.last_measurement = time.monotonic()
-					self.valid = True
+            # funcao de leitura pra raspberry pi 4
+            self.read_func = lambda: self.GPIO.input(self.echo_pin)
 
-			self.stop.wait(SAMPLE_TIME)
-	
-	########################################
-	# Funcao para medir distancia
-	########################################			
-	def get_distance(self):
-		with self.lock:
-			# medida eh valida?
-			if (time.monotonic() - self.last_measurement) > SENSOR_TIMEOUT:
-				self.valid = False
+        # lock de secao critica
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        # thread de leitura
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
 
-			return self.dist, self.valid
-	
-	########################################
-	# escreve no pino de trigger
-	def _set_trigger(self, state):
-		# Raspberry Pi 5
-		if self.rpi_version == 5:
-			self.GPIO.gpio_write(self.handle_chip, self.trigger_pin, 1 if state else 0)
-		# Raspberry Pi 3/4
-		else:
-			self.GPIO.output(self.trigger_pin, True if state else False)
-			
-	########################################
-	# Funcao para medir distancia
-	########################################
-	def get_measure(self):
+    ##############################################
+    # Raspberry Pi version detector
+    ##############################################
+    def detect_rpi_version(self):
+        try:
+            with open("/proc/device-tree/model") as f:
+                return 5 if "Raspberry Pi 5" in f.read() else 4
+        except OSError:
+            return 4  # Default caso nao consiga detectar
 
-		# envia pulso de trigger
-		self._set_trigger(True)
-		time.sleep(0.00002)
-		self._set_trigger(False)
+    ##############################################
+    # Detecta gpiochip
+    ##############################################
+    def _find_gpiochip(self):
+        try:
+            out = subprocess.check_output(["gpiodetect"], text=True)
+            for line in out.splitlines():
+                if "pinctrl-rp1" in line:
+                    match = re.match(r"gpiochip(\d+)", line)
 
-		# espera inicio do eco
-		ok1, start_time = self._measure_pulse(1)
+                    if match:
+                        return int(match.group(1))
 
-		# mede duracao do eco
-		ok2, stop_time = self._measure_pulse(0)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
-		# deu tudo certo?
-		if not ok1 or not ok2:
-			return None
+        raise RuntimeError("GPIO chip principal da Raspberry Pi 5 nao encontrado.")
 
-		# calcula distancia
-		time_elapsed = stop_time - start_time
-		distance = GAIN * time_elapsed
-		
-		if not (self.min_range <= distance <= self.max_range):
-			return None
+    ########################################
+    # thread de leitura continua
+    ########################################
+    def _read(self):
+        # inicializacao
+        time.sleep(0.1)
 
-		return distance
+        while not self.stop.is_set():
+            d, status = self._measure_with_status()
+            with self.lock:
+                self.dist = self.max_range if d is None else d
+                self.valid = status == "DETECTED" or status == "OUT_OF_RANGE"
+                self.status = status
+                if self.valid:
+                    self.last_measurement = time.monotonic()
+            self.stop.wait(SAMPLE_TIME)
 
-	########################################
-	# mede os pulsos com timeout
-	########################################
-	def _measure_pulse(self, level, timeout_s=0.03):
-		"""Espera por level (0/1) com timeout; retorna (ok, t)."""
-		deadline = time.monotonic() + timeout_s
-		while self.read_func() != level:
-			if time.monotonic() > deadline:
-				return False, None
-		# sucesso	
-		return True, time.monotonic()
-		
-	########################################
-	# Limpeza dos pinos
-	########################################
-	def cleanup(self):
-		# Closes the GPIO connection.
-		if self.rpi_version == 5:
-			self.GPIO.gpiochip_close(self.handle_chip)
-		else:
-			self.GPIO.cleanup(self.trigger_pin)
-			self.GPIO.cleanup(self.echo_pin)
+    ########################################
+    # Funcao para medir distancia
+    ########################################
+    def get_distance(self):
+        with self.lock:
+            # medida eh valida?
+            if (time.monotonic() - self.last_measurement) > SENSOR_TIMEOUT:
+                self.valid = False
+                self.dist = self.max_range
+                if self.status in ("DETECTED", "OUT_OF_RANGE"):
+                    self.status = "STALE"
 
-	########################################
-	# Destrutor
-	########################################
-	def close(self):
-		# termina a thread
-		self.stop.set()
-		self.thread.join()
-		
-		#Ensure cleanup is called when object is deleted
-		self.cleanup()
+            return self.dist, self.valid
+
+    ########################################
+    # escreve no pino de trigger
+    def _set_trigger(self, state):
+        # Raspberry Pi 5
+        if self.rpi_version == 5:
+            self.GPIO.gpio_write(self.handle_chip, self.trigger_pin, 1 if state else 0)
+        # Raspberry Pi 3/4
+        else:
+            self.GPIO.output(self.trigger_pin, True if state else False)
+
+    ########################################
+    # Funcao para medir distancia
+    ########################################
+    def get_measure(self):
+        """Mantem a interface original: retorna distancia ou None."""
+        d, status = self._measure_with_status()
+        return d if status in ("DETECTED", "OUT_OF_RANGE") else None
+
+    def get_status(self):
+        """Diagnostico da ultima tentativa de leitura."""
+        with self.lock:
+            return self.status
+
+    def _measure_with_status(self):
+        # Se ECHO ja estiver alto, nao ha uma nova borda de subida confiavel.
+        if self.read_func() != 0:
+            return None, "ECHO_STUCK_HIGH"
+
+        self._set_trigger(False)
+        self._set_trigger(True)
+        time.sleep(0.00002)
+        self._set_trigger(False)
+
+        ok1, start_time = self._measure_pulse(1)
+        if not ok1:
+            return None, "NO_ECHO"
+
+        ok2, stop_time = self._measure_pulse(0)
+        if not ok2:
+            return None, "INCOMPLETE_ECHO"
+
+        distance = GAIN * (stop_time - start_time)
+        if distance < self.min_range:
+            return None, "BELOW_MIN_RANGE"
+        if distance > self.max_range:
+            return self.max_range, "OUT_OF_RANGE"
+        return distance, "DETECTED"
+
+    ########################################
+    # mede os pulsos com timeout
+    ########################################
+    def _measure_pulse(self, level, timeout_s=0.03):
+        """Espera por level (0/1) com timeout; retorna (ok, t)."""
+        deadline = time.monotonic() + timeout_s
+        while self.read_func() != level:
+            if time.monotonic() > deadline:
+                return False, None
+        # sucesso
+        return True, time.monotonic()
+
+    ########################################
+    # Limpeza dos pinos
+    ########################################
+    def cleanup(self):
+        # Closes the GPIO connection.
+        if self.rpi_version == 5:
+            self.GPIO.gpiochip_close(self.handle_chip)
+        else:
+            self.GPIO.cleanup(self.trigger_pin)
+            self.GPIO.cleanup(self.echo_pin)
+
+    ########################################
+    # Destrutor
+    ########################################
+    def close(self):
+        # termina a thread
+        self.stop.set()
+        self.thread.join()
+
+        # Ensure cleanup is called when object is deleted
+        self.cleanup()
+
 
 ########################################################################
 # Teste rapido
 ########################################################################
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-	us = Ultrasonic()
+    us = Ultrasonic()
 
-	print("Teste: sensor ultrassonico")
-	print("Ctrl+C para sair")
-	print()
+    print("Teste: sensor ultrassonico")
+    print("Ctrl+C para sair")
+    print()
 
-	try:
-		while True:
+    try:
+        while True:
 
-			distance, valid = us.get_distance()
+            distance, valid = us.get_distance()
 
-			if valid:
-				print(
-					f"Distancia = {distance:.2f} m | Valida = SIM",
-					flush=True
-				)
-			else:
-				print(
-					f"Distancia = {distance:.2f} m | Valida = NAO",
-					flush=True
-				)
+            if valid:
+                print(
+                    f"Distancia = {distance:.2f} m | Obstaculo = SIM ({us.get_status()})",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Distancia = {distance:.2f} m | Obstaculo = NAO ({us.get_status()})",
+                    flush=True,
+                )
 
-			time.sleep(SAMPLE_TIME)
+            time.sleep(SAMPLE_TIME)
 
-	except KeyboardInterrupt:
-		print("\nTeste encerrado.")
+    except KeyboardInterrupt:
+        print("\nTeste encerrado.")
 
-	finally:
-		us.close()
+    finally:
+        us.close()
