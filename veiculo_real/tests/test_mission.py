@@ -196,12 +196,18 @@ class MissionTests(unittest.TestCase):
             mission.run_mission({'encoder_protocol': 'auto'}, car_factory=factory)
         factory.assert_not_called()
 
-    def test_cli_allows_explicit_rc_firmware_without_changing_default_rpm(self):
-        with patch.object(sys, 'argv', ['main.py', '--encoder-protocol', 'rc', '--speed', '.3']), \
+    def test_cli_allows_explicit_legacy_firmware_without_changing_default_rc(self):
+        with patch.object(sys, 'argv', ['main.py', '--encoder-protocol', 'rpm', '--speed', '.3']), \
                 patch.object(mission, 'run_mission') as run:
             mission.main()
-        run.assert_called_once_with({'velocity_reference': .3, 'encoder_protocol': 'rc'}, display=False)
-        self.assertEqual(mission.parameters['encoder_protocol'], 'rpm')
+        run.assert_called_once_with({'velocity_reference': .3, 'encoder_protocol': 'rpm'}, display=False)
+        self.assertEqual(mission.parameters['encoder_protocol'], 'rc')
+
+    def test_default_mission_passes_rc_protocol_to_car_factory(self):
+        factory = Mock(return_value=self.car)
+        with patch.object(mission.threading, 'Thread', side_effect=self.fake_thread):
+            mission.run_mission(self.settings, car_factory=factory, clock=lambda: 10.)
+        self.assertEqual(factory.call_args.args[0]['encoder_protocol'], 'rc')
 
     def test_invalid_encoder_does_not_enable_manual_bypass(self):
         self.car.sel_direcao = self.car.sel_tracao = 0

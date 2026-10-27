@@ -62,26 +62,25 @@ exigir. A calibracao de trim existente nos servos e preservada.
 
 ## Firmware do encoder e transferencia pela GUI
 
-No carro VERMELHO, a leitura serial foi verificada em 22/10/2026:
-o Arduino envia apenas `0.00` (RPM), sem os cinco campos do firmware RC.
-Por isso `main.py` seleciona explicitamente `encoder_protocol="rpm"`.
-Esse modo le o RPM com a conversao existente e usa controle automatico de
-direcao e tracao; nao recebe chaves ou comandos do radio. Nao existe troca
-automatica de protocolo ao receber uma linha incompleta.
-
-O firmware novo permanece disponivel com `--encoder-protocol rc`. Nesse
+O `main.py`, o construtor `Encoder()` e o teste individual usam `rc` por
+padrao, como a `upstream/rc-input` e o firmware deste repositorio. Nesse
 modo sao obrigatorios os cinco campos `RPM,RC_DIR,RC_ACEL,SEL_DIR,SEL_TRACAO`;
-as chaves publicadas pelo Arduino continuam escolhendo RC (0) ou AUTO (1).
-O construtor `Encoder()` e o teste individual continuam usando `rc` por
-padrao, para preservar os outros programas com esse firmware.
+as chaves publicadas pelo Arduino escolhem RC (0) ou AUTO (1).
+
+Para firmware antigo que comprovadamente envia apenas um numero por linha
+(por exemplo, `0.00`), selecione `--encoder-protocol rpm` na missao e
+`--protocol rpm` no teste individual. Esse modo usa controle automatico de
+direcao e tracao; nao recebe chaves ou comandos do radio. Nao existe troca
+automatica de protocolo ao receber uma linha incompleta. Selecionar `rpm`
+com firmware RC descarta todos os pacotes e mantem os comandos em neutro.
 
 Na interface `fva_gui_multiplataforma.py`, envie novamente o conteudo de
 `veiculo_real` para `/home/alunos/Desktop/fva`. A transferencia copia o
 arquivo `.ino`, mas nao grava o Arduino. Com a missao encerrada, na aba
-Executar Comandos, teste o protocolo verificado sem comandar motores:
+Executar Comandos, teste o protocolo RC sem comandar motores:
 
 ```sh
-python3 -u /home/alunos/Desktop/fva/fva_car/encoder.py --protocol rpm --seconds 5
+python3 -u /home/alunos/Desktop/fva/fva_car/encoder.py --protocol rc --seconds 5
 ```
 
 Depois de aparecer `OK`, o ensaio de linha em baixa velocidade usa:

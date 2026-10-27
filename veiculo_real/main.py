@@ -27,7 +27,7 @@ parameters = {
     "ultrasonic_steering": False,  # camera fixa apos calibrada
     "us_buzzer": False,
     "initial_position": [0, 0, 0.0],
-    "encoder_protocol": "rpm",  # firmware verificado no VERMELHO: apenas RPM
+    "encoder_protocol": "rc",  # mesmo formato de cinco campos da upstream/rc-input
     "camera_calibration_file": str(
         Path(__file__).resolve().parent / "calibracao" / "camera_lateral.json"
     ),
