@@ -43,7 +43,7 @@ parameters = {
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda
     "curve_min_speed": 0.3,
     "curve_lateral_accel": 0.4,
-    "vision_timeout": 0.3,  # segundos desde o inicio da captura
+    "vision_timeout": 1.0,  # segundos desde o inicio da captura
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120},
