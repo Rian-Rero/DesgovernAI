@@ -135,6 +135,41 @@ travada ate o fim da missao. Cortar throttle coloca o ESC em neutro; isso
 nao equivale a uma frenagem ativa e o carrinho ainda percorre uma distancia.
 A atuacao fica na thread principal; a visao apenas publica observacoes.
 
+## Carro parado apesar de a ferramenta HSV detectar a faixa
+
+A captura da missao roda em uma thread separada do processamento. Uma fila
+de tamanho um substitui frames antigos pelo mais recente, sem acumular
+imagens enquanto a Raspberry processa. A camera solicita buffer de um frame
+(dependendo do suporte do driver) e nao forca foco, exposicao manual ou codec
+diferentes da ferramenta `detectar_linha_amarela_hsv.py`.
+
+O terminal imprime `CONTROLE:` uma vez por segundo com o motivo atual,
+idade da imagem, duracao da captura, duracao do processamento, referencia
+de velocidade e throttle. Por exemplo, `Imagem atrasada: 0.420 s; limite
+0.300 s` indica que a observacao expirou. O horario continua sendo o inicio
+da aquisicao, nunca o fim do processamento; o limite de 0.3 s foi mantido.
+Se o processamento sozinho ultrapassar esse limite, descartar frames na
+fila nao basta: sera necessario medir e otimizar o processamento no hardware.
+
+`Buscando faixa` indica rejeicao pelo detector HSV; `Faixa sem cobertura
+metrica suficiente junto ao eixo dianteiro` indica faixa visual encontrada,
+mas geometria rejeitada antes do Stanley. `Faixa valida; controle liberado`
+indica que o seguidor autorizou comandos; as chaves RC/AUTO continuam
+selecionando a origem de cada eixo. Uma parada por obstaculo continua travada
+ate o fim do ensaio.
+
+Ao encerrar uma missao com `save=True`, depois de neutralizar os motores,
+a pasta `logs/AAAAMMDD_HHMMSS` tambem recebe o ultimo frame usado no controle:
+
+- `vision_camera.jpg`: imagem original BGR gravada como JPEG.
+- `vision_detection.jpg`: faixa e conexoes desenhadas sobre a imagem.
+- `vision_status.json`: motivo de parada, tempos, resolucao, erros metricos
+  e estados do encoder e das chaves.
+
+Esses arquivos sao baixados junto com `car.csv` pelo botao `Coletar dados`
+da GUI. O CSV inclui `vision_capture_s` e `vision_processing_s`, alem de
+`vision_age_s`. Nao e necessario abrir uma janela grafica na Raspberry.
+
 ## Arquivos principais e verificacao
 
 - `fva_car/lateral.py`: adaptador do detector, homografia e Stanley real.

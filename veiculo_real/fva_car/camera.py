@@ -53,11 +53,6 @@ class Camera:
 			if not self.cap.isOpened():
 				raise RuntimeError(f"Nao foi possivel abrir a camera (index={cam_index}).")
 
-		# tenta definir codec MJPG para melhor desempenho (se a camera suportar)
-		#fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-		fourcc = cv2.VideoWriter_fourcc(*"YUY2")
-		self.cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-
 		# configura resolucao
 		w, h = resolution
 		self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  int(w))
@@ -65,15 +60,9 @@ class Camera:
 
 		# configura taxa de quadros (best-effort)
 		self.cap.set(cv2.CAP_PROP_FPS, float(fps))
-
-		# tenta desligar autofocus e fixar foco (nem todas webcams suportam)
-		# 0 = off, 1 = on
-		if self.cap.get(cv2.CAP_PROP_AUTOFOCUS) != -1:
-			self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-		# tenta ajustar exposicao automatica (opcional)
-		if self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) != -1:
-			# Em muitas cameras do Linux, 1 significa Auto, 0.25 Manual; varia por driver
-			self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+		# Mesmos ajustes de open_camera() da ferramenta HSV. Nao forca
+		# exposicao manual, foco ou codec diferentes dos usados na ferramenta.
+		self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 		
 		# modelo da YOLO
 		self.model = None

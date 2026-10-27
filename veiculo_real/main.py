@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """Stanley no veiculo real, com a percepcao HSV de tools/yellow_path.py."""
 import argparse
+from dataclasses import replace
+import json
 from pathlib import Path
+import queue
 import signal
 import threading
 import time
 
 import numpy as np
+import cv2
 
 from fva_car.lateral import (
     GroundCalibration, LineObservation, RealLineDetector, RealStanleyFollower,
@@ -60,13 +64,51 @@ def stop_vehicle(car):
     car.set_steer(0.0)
 
 
-def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic):
-    """Apenas percebe; a thread principal e a unica que envia comandos."""
+def capture_func(car, frames, stop_event, clock=time.monotonic):
+    """Captura continuamente; a fila guarda somente o frame mais recente."""
     while not stop_event.is_set():
         captured_at = clock()
+        error = None
         try:
-            frame = car.get_image(gray=False)  # a Camera real entrega BGR
+            frame = car.get_image(gray=False)
+        except Exception as failure:
+            frame, error = None, str(failure)
+        sample = (frame, captured_at, clock() - captured_at, error)
+        try:
+            frames.put_nowait(sample)
+        except queue.Full:
+            try:
+                frames.get_nowait()
+            except queue.Empty:
+                pass
+            frames.put_nowait(sample)
+        if error is not None:
+            return
+        if frame is None:
+            stop_event.wait(.02)
+
+
+def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic, frames=None):
+    """Apenas percebe; a thread principal e a unica que envia comandos."""
+    while not stop_event.is_set():
+        if frames is not None:
+            try:
+                frame, captured_at, capture_seconds, capture_error = frames.get(timeout=.1)
+            except queue.Empty:
+                continue
+        else:
+            captured_at = clock()
+            capture_seconds, capture_error = float('nan'), None
+        try:
+            if capture_error is not None:
+                raise RuntimeError(capture_error)
+            if frames is None:
+                frame = car.get_image(gray=False)  # a Camera real entrega BGR
+                capture_seconds = clock() - captured_at
+            processing_at = clock()
             observation = detector.observe_frame(frame, captured_at)
+            observation = replace(observation, capture_seconds=capture_seconds,
+                                  processing_seconds=clock() - processing_at)
         except Exception as error:
             vision_data["observation"] = LineObservation(
                 timestamp=captured_at, reason=f"Falha de visao: {error}"
@@ -77,6 +119,42 @@ def vision_func(car, vision_data, stop_event, detector, clock=time.monotonic):
         vision_data["observation"] = observation
         if frame is None:
             stop_event.wait(0.02)
+
+
+def save_vision_snapshot(car, observation, status, now):
+    """Salva o ultimo frame somente apos neutralizar os motores."""
+    folder = getattr(car, 'logfile', None)
+    if not isinstance(folder, (str, Path)) or observation is None:
+        return
+    folder = Path(folder)
+    def finite(value):
+        return float(value) if value is not None and np.isfinite(value) else None
+    try:
+        for name, frame in (('vision_camera.jpg', observation.source_frame),
+                            ('vision_detection.jpg', observation.frame)):
+            if frame is not None:
+                if name == 'vision_detection.jpg':
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                if not cv2.imwrite(str(folder / name), frame):
+                    raise OSError(f'Nao foi possivel salvar {name}')
+        data = {
+            'control_status': status, 'vision_reason': observation.reason,
+            'metric_line_valid': bool(observation.valid),
+            'image_size': (None if observation.source_frame is None else
+                           list(observation.source_frame.shape[1::-1])),
+            'vision_age_s': finite(now - observation.timestamp),
+            'capture_s': finite(observation.capture_seconds),
+            'processing_s': finite(observation.processing_seconds),
+            'errors': None if observation.errors is None else list(observation.errors),
+            'color_support': finite(observation.color_support),
+            'encoder_valid': bool(getattr(car, 'encoder_valid', False)),
+            'sel_direcao': getattr(car, 'sel_direcao', None),
+            'sel_tracao': getattr(car, 'sel_tracao', None),
+        }
+        (folder / 'vision_status.json').write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+        print(f'Diagnostico de visao salvo em {folder}', flush=True)
+    except (OSError, ValueError, cv2.error) as error:
+        print(f'Nao foi possivel salvar diagnostico de visao: {error}', flush=True)
 
 
 def run_mission(settings=None, display=False, car_factory=None, clock=time.monotonic):
@@ -100,15 +178,25 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     car = car_factory(config)
     vision_data = {"observation": None}
     stop_event = threading.Event()
+    frames = queue.Queue(maxsize=1)
     thread_vision = None
+    thread_capture = None
     plot = None
+    observation = None
+    control_status = 'Missao ainda nao iniciada'
+    last_control_at = None
     try:
         car.start_mission()
         print(f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s", flush=True)
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
+        thread_capture = threading.Thread(
+            target=capture_func, args=(car, frames, stop_event, clock),
+            daemon=True, name='captura-camera',
+        )
+        thread_capture.start()
         thread_vision = threading.Thread(
             target=vision_func, args=(car, vision_data, stop_event, detector, clock),
-            daemon=True, name="linha-hsv",
+            kwargs={'frames': frames}, daemon=True, name="linha-hsv",
         )
         thread_vision.start()
         if display:
@@ -121,6 +209,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         obstacle_detected = False
         next_stop_beep = 0.0
         last_encoder_valid = None
+        t_diagnostic = t_plot - 1.
         while car.t < config["ts"]:
             if not car.step():
                 break
@@ -147,15 +236,27 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 car.set_steer(0.0)
                 car.set_vel(0.0)
                 car.log(lateral_active=0)
+                control_status = 'Controle manual RC'
             else:
                 follower.apply(car, observation, clock(), obstacle_detected=obstacle_detected)
+                control_status = follower.status
             car.log(obstacle_stop=int(obstacle_detected), distance_m=dist,
                     stopping_distance_m=stop_distance)
+            now = clock()
+            last_control_at = now
             if not thread_vision.is_alive():
                 stop_vehicle(car)
                 print("Thread de visao encerrada; missao interrompida.", flush=True)
                 break
-            now = clock()
+            if now - t_diagnostic >= 1.:
+                timing = ''
+                if observation is not None:
+                    timing = (f' | imagem={now-observation.timestamp:.3f}s'
+                              f' captura={observation.capture_seconds:.3f}s'
+                              f' processamento={observation.processing_seconds:.3f}s')
+                print(f'CONTROLE: {control_status}{timing}'
+                      f' | vref={car.vref:.2f} u={car.u:.2f}', flush=True)
+                t_diagnostic = now
             if obstacle_detected and now >= next_stop_beep:
                 if car.bz.beep([0.15, 0.15], silence=0.15):
                     next_stop_beep = now + 1.0
@@ -184,7 +285,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             stop_event.set()
             if thread_vision is not None:
                 thread_vision.join(timeout=1.0)
+            if thread_capture is not None:
+                thread_capture.join(timeout=1.0)
             try:
+                if config['save']:
+                    save_vision_snapshot(car, observation, control_status, last_control_at)
                 if config["save"] and getattr(car, "traj", None):
                     car.save()
             finally:

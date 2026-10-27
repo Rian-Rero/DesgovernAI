@@ -70,8 +70,12 @@ class MissionTests(unittest.TestCase):
     def fake_thread(self,**kwargs):
         events=self.events
         args=kwargs['args']
+        capture = kwargs.get('name') == 'captura-camera'
         class Thread:
             def start(self):
+                if capture:
+                    events.append('capture_start')
+                    return
                 events.append('vision_start')
                 args[1]['observation']=mission.LineObservation(timestamp=10.,errors=(.1,0.,0.))
             def is_alive(self):return True
@@ -160,9 +164,12 @@ class MissionTests(unittest.TestCase):
         car=Mock();car.get_image.side_effect=capture
         detector=Mock();detector.observe_frame.side_effect=observe
         mission.vision_func(car,data,stop,detector,clock)
-        self.assertEqual(events,['clock','capture','observe'])
+        self.assertEqual(events,['clock','capture','clock','clock','observe','clock'])
         self.assertEqual(list(data),['observation'])
-        self.assertIs(data['observation'],observation)
+        self.assertEqual(data['observation'].timestamp, observation.timestamp)
+        self.assertEqual(data['observation'].errors, observation.errors)
+        self.assertEqual(data['observation'].capture_seconds, 0.)
+        self.assertEqual(data['observation'].processing_seconds, 0.)
         car.set_u.assert_not_called()
         car.set_steer.assert_not_called()
 

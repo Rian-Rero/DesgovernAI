@@ -23,6 +23,9 @@ class LineObservation:
     reason: str = ''
     color_support: float = math.nan  # Fracao do corredor com evidencia de cor.
     dash_fraction: float = 0.0  # Fracao do corredor interpolada entre trechos.
+    source_frame: np.ndarray | None = None  # BGR original para diagnostico.
+    capture_seconds: float = math.nan
+    processing_seconds: float = math.nan
 
     @property
     def valid(self):
@@ -162,19 +165,21 @@ class RealLineDetector:
         if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
             return LineObservation(timestamp, reason='Imagem deve ser BGR uint8 com tres canais')
         if (frame.shape[1], frame.shape[0]) != self.calibration.image_size:
-            return LineObservation(timestamp, reason='Resolucao diferente da calibracao da camera')
+            return LineObservation(timestamp, reason='Resolucao diferente da calibracao da camera',
+                                   source_frame=frame)
         result = self.detector.process(frame, self.settings, timestamp=timestamp)
         display = cv2.cvtColor(render_path(frame, result, self.settings, self.anchor), cv2.COLOR_BGR2RGB)
         # A validacao de evidencia pertence ao detector compartilhado. O modo
         # pontilhado pode aceitar suporte < 50% apos validar as duas tangentes.
         if (not result.valid or not math.isfinite(result.support)
                 or not 0 <= result.support <= 1):
-            return LineObservation(timestamp, frame=display, reason=result.status)
+            return LineObservation(timestamp, frame=display, reason=result.status, source_frame=frame)
         path_pixels = cv2.countNonZero(result.path_mask)
         bridge_pixels = (0 if result.dash_mask is None else
                          cv2.countNonZero(cv2.bitwise_and(result.dash_mask, result.path_mask)))
         metadata = {'color_support': float(result.support),
-                    'dash_fraction': bridge_pixels / max(1, path_pixels)}
+                    'dash_fraction': bridge_pixels / max(1, path_pixels),
+                    'source_frame': frame}
         points = self.calibration.project_pixels(result.center)
         try:
             errors = fit_line_errors(points, [0., 0.], [1., 0.], with_curvature=True)
@@ -305,6 +310,7 @@ class RealStanleyFollower:
     """Comandos somente no laco principal; visao nunca atua nos motores."""
     def __init__(self, settings):
         self.settings = dict(settings)
+        self.status = 'Aguardando primeira imagem'
         def positive(name, default):
             value = self.settings.get(name, default)
             if not isinstance(value, (int, float, np.number)) or not math.isfinite(value) or value <= 0:
@@ -363,12 +369,34 @@ class RealStanleyFollower:
             car.set_steer(0.)
             self.controller.reset()
             steer = 0.
+        if active:
+            self.status = 'Faixa valida; controle liberado'
+        elif obstacle_detected:
+            self.status = 'Parada por obstaculo travada ate o fim da missao'
+        elif car.emergencia:
+            self.status = 'Emergencia ativa'
+        elif not getattr(car, 'encoder_valid', True):
+            self.status = 'Encoder sem leitura valida'
+        elif not finite_sample:
+            self.status = 'Velocidade ou periodo de controle invalido'
+        elif reverse_gear or reverse_requested or car.v < -.05:
+            self.status = 'Marcha a re: Stanley dianteiro bloqueado'
+        elif observation is None:
+            self.status = 'Aguardando primeira imagem'
+        elif not math.isfinite(age) or age < 0:
+            self.status = 'Horario de imagem invalido'
+        elif age > self.timeout:
+            self.status = f'Imagem atrasada: {age:.3f} s; limite {self.timeout:.3f} s'
+        else:
+            self.status = getattr(observation, 'reason', '') or 'Faixa sem erros metricos validos'
         invalid = float('nan')
         lateral, heading, curvature = errors if errors is not None else (invalid, invalid, invalid)
         car.log(line_valid=int(errors is not None), lateral_active=int(active),
                 line_color_support=getattr(observation, 'color_support', invalid) if errors is not None else invalid,
                 line_dash_fraction=getattr(observation, 'dash_fraction', invalid) if errors is not None else invalid,
                 vision_age_s=age, cross_track_m=lateral, heading_error_rad=heading,
+                vision_capture_s=getattr(observation, 'capture_seconds', invalid),
+                vision_processing_s=getattr(observation, 'processing_seconds', invalid),
                 curvature_m_inv=curvature, steer_geometric_rad=steer,
                 steer_cmd_rad=float(car.st), steering_sign=float(self.steering_sign),
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
