@@ -280,11 +280,69 @@ class RealFollowerTests(unittest.TestCase):
     def test_resume_after_loss_restarts_the_rate_limiter_from_neutral(self):
         car=fake_car();follower=lateral.RealStanleyFollower({})
         for _ in range(20):follower.apply(car,self.valid_observation(),10.)
-        follower.apply(car,None,10.)
+        follower.apply(car,None,10.6)
         self.assertEqual(car.st,0.)
-        follower.apply(car,self.valid_observation(-.15),10.)
+        follower.apply(car,self.valid_observation(-.15,timestamp=10.6),10.6)
         self.assertLess(car.st,0.)
         self.assertLessEqual(abs(car.st),math.radians(60)*car.dt+1e-12)
+
+    def test_brief_line_loss_keeps_following_last_trajectory(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({})
+        for _ in range(20):follower.apply(car,self.valid_observation(),10.)
+        steer,vref=car.st,car.vref
+        lost=lateral.LineObservation(timestamp=10.3,reason='Buscando faixa')
+        self.assertTrue(follower.apply(car,lost,10.3))
+        self.assertIn('Faixa perdida ha 0.30 s',follower.status)
+        self.assertGreater(car.vref,0.)
+        self.assertAlmostEqual(car.vref,vref,delta=.05)
+        self.assertGreater(car.st,0.)
+        self.assertAlmostEqual(car.st,steer,delta=math.radians(60)*car.dt+1e-9)
+        log=car.log.call_args.kwargs
+        self.assertEqual((log['line_valid'],log['line_hold'],log['lateral_active']),(0,1,1))
+        self.assertAlmostEqual(log['line_lost_s'],.3)
+        # Passada a tolerancia, a perda e tratada como real e o carro para.
+        car.set_vel.reset_mock()
+        self.assertFalse(follower.apply(car,lost,10.51))
+        self.assert_neutral(car)
+        self.assertIn('Faixa perdida por mais de 0.50 s: Buscando faixa',follower.status)
+        # A memoria e esquecida: uma nova perda curta nao reutiliza a faixa antiga.
+        self.assertFalse(follower.apply(car,lost,10.52))
+
+    def test_prediction_moves_last_line_with_vehicle_motion(self):
+        follower=lateral.RealStanleyFollower({})
+        car=fake_car();car.v,car.dt,car.st,car.w=1.,.1,0.,0.
+        # Linha a frente apontando para a esquerda: andar reto a afasta para a esquerda.
+        lateral_error,heading,_=follower._predict_line((0.,.2,0.),car)
+        self.assertAlmostEqual(lateral_error,.1*math.sin(.2))
+        self.assertAlmostEqual(heading,.2)
+        # Girar para a esquerda reduz o erro de orientacao; curvatura o aumenta.
+        car.w=.5
+        self.assertAlmostEqual(follower._predict_line((0.,.2,0.),car)[1],.15)
+        car.w=0.
+        self.assertAlmostEqual(follower._predict_line((0.,0.,.5),car)[1],.05)
+        # Atuador invertido: car.st e car.w voltam para a convencao geometrica.
+        inverted=lateral.RealStanleyFollower({'steering_sign':-1.})
+        car.st,car.w=-.1,-.5
+        self.assertEqual(inverted._predict_line((.05,.1,.2),car),
+                         follower._predict_line((.05,.1,.2),SimpleNamespace(v=1.,dt=.1,st=.1,w=.5)))
+
+    def test_zero_tolerance_stops_on_first_lost_frame_and_rejects_invalid_values(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_tolerance':0})
+        follower.apply(car,self.valid_observation(),10.)
+        car.set_vel.reset_mock()
+        self.assertFalse(follower.apply(car,lateral.LineObservation(timestamp=10.02),10.02))
+        self.assert_neutral(car)
+        for value in (-.1,float('nan'),True,'0.5'):
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                lateral.RealStanleyFollower({'line_loss_tolerance':value})
+
+    def test_safety_stops_are_not_bridged_by_line_memory(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({})
+        follower.apply(car,self.valid_observation(),10.)
+        car.set_vel.reset_mock()
+        self.assertFalse(follower.apply(car,self.valid_observation(),10.05,obstacle_detected=True))
+        self.assertFalse(follower.apply(car,None,10.1))
+        self.assert_neutral(car)
 
 
 if __name__=='__main__':

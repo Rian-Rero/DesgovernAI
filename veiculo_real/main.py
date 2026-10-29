@@ -51,9 +51,14 @@ parameters = {
     "curve_min_speed": 0.15,
     "curve_lateral_accel": 0.4,
     "vision_timeout": 1.0,  # segundos desde o inicio da captura
+    # Perdendo a faixa, segue a ultima trajetoria vista (odometria) por ate
+    # este tempo antes de parar; 0 volta a parar no primeiro quadro sem faixa.
+    "line_loss_tolerance": 0.5,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
-    "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120},
+    # roi_top=50 descarta a metade de cima (alem de ~0,85 m com a calibracao
+    # atual): menos linhas para rastrear e sem outras faixas pintadas ao fundo.
+    "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
     "path_anchor": 0.5,  # preferencia horizontal da faixa, entre 0 e 1
 }
 
@@ -321,7 +326,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             ):
                 # Car aplica os dois canais RC; a perda da faixa nao impede
                 # controle manual. Obstaculos e emergencia conservam prioridade.
-                follower.controller.reset()
+                follower.reset()
                 car.set_steer(0.0)
                 car.set_vel(0.0)
                 car.log(lateral_active=0)

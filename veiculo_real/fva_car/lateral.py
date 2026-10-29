@@ -362,6 +362,12 @@ class RealStanleyFollower:
                 raise ValueError(f'{name} deve ser finito e positivo.')
             return float(value)
         self.timeout = positive('vision_timeout', .3)
+        self.loss_tolerance = self.settings.get('line_loss_tolerance', .5)
+        if (isinstance(self.loss_tolerance, (bool, np.bool_))
+                or not isinstance(self.loss_tolerance, (int, float, np.number))
+                or not math.isfinite(self.loss_tolerance) or self.loss_tolerance < 0):
+            raise ValueError('line_loss_tolerance deve ser finito e nao negativo (0 desativa).')
+        self.loss_tolerance = float(self.loss_tolerance)
         self.reference = positive('velocity_reference', .5)
         self.min_speed = positive('curve_min_speed', .3)
         self.lateral_accel = positive('curve_lateral_accel', .4)
@@ -376,9 +382,35 @@ class RealStanleyFollower:
             softening=positive('stanley_softening', .3),
             max_steer=math.radians(min(20., positive('stanley_max_steer_deg', 20.))),
             max_rate=math.radians(positive('stanley_max_rate_deg_s', 60.)))
+        self.reset()
+
+    def reset(self):
+        """Neutraliza o Stanley e esquece a ultima faixa vista."""
+        self.controller.reset()
+        self.line_memory = None
+        self.line_seen_at = None
+
+    def _predict_line(self, errors, car):
+        """Avanca a ultima faixa vista por um passo de odometria.
+
+        Supoe a linha mantendo a curvatura medida; o eixo dianteiro anda na
+        direcao das rodas (car.st) e a carroceria gira com car.w. O sinal do
+        atuador volta ambos para a convencao geometrica (esquerda positiva).
+        """
+        lateral, heading, curvature = errors
+        steer = self.steering_sign * float(getattr(car, 'st', 0.))
+        yaw_rate = self.steering_sign * float(getattr(car, 'w', 0.))
+        steer = steer if math.isfinite(steer) and abs(steer) < math.pi / 2 else 0.
+        yaw_rate = yaw_rate if math.isfinite(yaw_rate) else 0.
+        front_speed = car.v / math.cos(steer)
+        relative = heading - steer
+        return (lateral + front_speed * math.sin(relative) * car.dt,
+                heading + (curvature * front_speed * math.cos(relative) - yaw_rate) * car.dt,
+                curvature)
 
     def apply(self, car, observation, now, obstacle_detected=False):
-        """Retorna True somente quando uma observacao atual autoriza seguir."""
+        """Retorna True quando uma observacao atual, ou a faixa vista ha no maximo
+        line_loss_tolerance segundos, autoriza seguir."""
         age = float('nan')
         errors = None
         stanley_speed = float('nan')
@@ -400,6 +432,19 @@ class RealStanleyFollower:
         reverse_gear = getattr(gear, 'value', gear) in ('reverse', -1)
         reverse_requested = (getattr(car, 'sel_tracao', 1) == 0
                              and getattr(car, 'rc_acelerador', 0.) < 0)
+        line_seen = errors is not None
+        holding = False
+        lost_for = float('nan')
+        if line_seen:
+            self.line_memory, self.line_seen_at = errors, float(now)
+        elif (self.line_memory is not None and finite_sample
+                and isinstance(now, (int, float, np.number)) and math.isfinite(now)):
+            lost_for = float(now) - self.line_seen_at
+            if 0 <= lost_for <= self.loss_tolerance:
+                # Reflexo ou sujeira raramente apagam a faixa de verdade: segue a
+                # ultima trajetoria vista, por odometria, e so para se a perda durar.
+                errors = self.line_memory = self._predict_line(self.line_memory, car)
+                holding = True
         active = (not car.emergencia and not obstacle_detected and finite_sample
                   and getattr(car, 'encoder_valid', True)
                   and not reverse_gear and not reverse_requested
@@ -426,9 +471,12 @@ class RealStanleyFollower:
             car.vel_error_integral = 0.
             car.set_u(0.)
             car.set_steer(0.)
-            self.controller.reset()
+            self.reset()
             steer = 0.
-        if active:
+        if active and holding:
+            self.status = (f'Faixa perdida ha {lost_for:.2f} s; seguindo ultima trajetoria'
+                           f' (limite {self.loss_tolerance:.2f} s)')
+        elif active:
             self.status = 'Faixa valida; controle liberado'
         elif obstacle_detected:
             self.status = 'Parada por obstaculo travada ate o fim da missao'
@@ -450,12 +498,17 @@ class RealStanleyFollower:
             self.status = f'Imagem atrasada: {age:.3f} s; limite {self.timeout:.3f} s'
         else:
             self.status = getattr(observation, 'reason', '') or 'Faixa sem erros metricos validos'
+            if lost_for > self.loss_tolerance:
+                self.status = f'Faixa perdida por mais de {self.loss_tolerance:.2f} s: {self.status}'
         invalid = float('nan')
         lateral, heading, curvature = errors if errors is not None else (invalid, invalid, invalid)
-        car.log(line_valid=int(errors is not None), lateral_active=int(active),
+        # line_valid continua sendo somente a faixa vista; durante a tolerancia
+        # cross_track/heading registram a trajetoria prevista usada no controle.
+        car.log(line_valid=int(line_seen), lateral_active=int(active),
+                line_hold=int(holding and active), line_lost_s=lost_for,
                 vision_frame_id=getattr(observation, 'sequence', 0),
-                line_color_support=getattr(observation, 'color_support', invalid) if errors is not None else invalid,
-                line_dash_fraction=getattr(observation, 'dash_fraction', invalid) if errors is not None else invalid,
+                line_color_support=getattr(observation, 'color_support', invalid) if line_seen else invalid,
+                line_dash_fraction=getattr(observation, 'dash_fraction', invalid) if line_seen else invalid,
                 vision_age_s=age, cross_track_m=lateral, heading_error_rad=heading,
                 vision_capture_s=getattr(observation, 'capture_seconds', invalid),
                 vision_processing_s=getattr(observation, 'processing_seconds', invalid),

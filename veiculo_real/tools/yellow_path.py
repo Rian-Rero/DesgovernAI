@@ -57,22 +57,24 @@ class YellowPathDetector:
             self.anchor = float(np.clip(anchor, 0, 1))
 
     def segment(self, frame, settings):
-        hsv = cv2.cvtColor(cv2.medianBlur(frame, 3), cv2.COLOR_BGR2HSV)
+        # O topo descartado nem entra no filtro/HSV/CLAHE: alem de poupar
+        # processamento, outras linhas pintadas ao fundo nao viram evidencia.
+        roi = int(frame.shape[0] * settings.roi_top / 100)
+        hsv = cv2.cvtColor(cv2.medianBlur(frame[roi:], 3), cv2.COLOR_BGR2HSV)
         if settings.clahe:
             hsv[:, :, 2] = self.clahe.apply(hsv[:, :, 2])
         lo, hi = sorted((settings.h_min, settings.h_max))
-        strong = cv2.inRange(hsv, (lo, settings.s_min, settings.v_min), (hi, 255, 255))
+        strong = np.zeros(frame.shape[:2], np.uint8)
+        weak = np.zeros_like(strong)
+        strong[roi:] = cv2.inRange(hsv, (lo, settings.s_min, settings.v_min), (hi, 255, 255))
         # Limiar mais tolerante recupera tinta suja/desbotada. Uma faixa ainda
         # precisa de sementes fortes e continuidade geometrica para ser aceita.
-        weak = cv2.inRange(hsv,
-                           (max(0, lo - 3), max(25, int(settings.s_min * .55)),
-                            max(15, int(settings.v_min * .55))),
-                           (min(179, hi + 3), 255, 255))
-        roi = int(frame.shape[0] * settings.roi_top / 100)
-        strong[:roi] = 0
-        weak[:roi] = 0
+        lower = cv2.inRange(hsv,
+                            (max(0, lo - 3), max(25, int(settings.s_min * .55)),
+                             max(15, int(settings.v_min * .55))),
+                            (min(179, hi + 3), 255, 255))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        weak = cv2.morphologyEx(weak, cv2.MORPH_CLOSE, kernel)
+        weak[roi:] = cv2.morphologyEx(lower, cv2.MORPH_CLOSE, kernel)
         return strong, weak
 
     @staticmethod

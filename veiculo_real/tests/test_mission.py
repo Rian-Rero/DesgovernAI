@@ -144,7 +144,7 @@ class MissionTests(unittest.TestCase):
         with patch.object(mission, 'RealStanleyFollower', return_value=follower):
             self.run_fake()
         self.assertIn(('speed', 0.), self.events)
-        follower.controller.reset.assert_called_once()
+        follower.reset.assert_called_once()
         follower.apply.assert_called_once()
         self.assertTrue(follower.apply.call_args.kwargs['obstacle_detected'])
 
@@ -243,7 +243,7 @@ class MissionTests(unittest.TestCase):
         follower = Mock()
         with patch.object(mission, 'RealStanleyFollower', return_value=follower):
             self.run_fake()
-        follower.controller.reset.assert_not_called()
+        follower.reset.assert_not_called()
         self.assertEqual(follower.apply.call_count, 2)
 
 
