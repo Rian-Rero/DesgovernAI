@@ -372,6 +372,12 @@ def curve_speed(reference, curvature, lateral, heading, min_speed=.5,
 
 
 MAX_LATENCY_COMPENSATION = .25  # s; idade tipica da imagem: 0,12 a 0,19 s
+# Entre quadros (~60 ms) o carro gira < 0,2 rad mesmo a 1,5 m/s no batente.
+# Saltos maiores sao deteccao errada (reflexo, outra faixa) e sao descartados,
+# mas no maximo MAX_REJECTED_FRAMES seguidos: uma mudanca real e aceita depois.
+MAX_HEADING_JUMP = .3  # rad
+MAX_LATERAL_JUMP = .08  # m
+MAX_REJECTED_FRAMES = 3
 
 
 class RealStanleyFollower:
@@ -408,6 +414,15 @@ class RealStanleyFollower:
             max_rate=math.radians(positive('stanley_max_rate_deg_s', 60.)),
             wheelbase=positive('wheelbase', .36),
             curvature_gain=nonnegative('stanley_curvature_ff', 1.))
+        # Constantes de tempo dos filtros; 0 desliga. O alvo de velocidade
+        # oscilava com o erro angular e a curvatura medidos em ~0,5 m de faixa;
+        # o carro, que nao freia, so dava trancos no acelerador. O esterco usa
+        # a curvatura sem filtro: no mesmo ajuste, erros de orientacao e de
+        # curvatura saem opostos e se cancelam na soma do Stanley.
+        self.curvature_filter = nonnegative('curvature_filter_s', .2)
+        self.speed_filter = nonnegative('speed_filter_s', .3)
+        # Curva mais fechada que o batente da direcao nao e seguivel: e ruido.
+        self.max_curvature = math.tan(self.controller.max_steer) / self.controller.wheelbase
         self.compensate_latency = self.settings.get('vision_latency_compensation', True)
         if not isinstance(self.compensate_latency, (bool, np.bool_)):
             raise ValueError('vision_latency_compensation deve ser True ou False.')
@@ -418,6 +433,29 @@ class RealStanleyFollower:
         self.controller.reset()
         self.line_memory = None
         self.line_seen_at = None
+        self.curvature = None
+        self.curvature_at = None
+        self.speed_target = None
+        self.frame_at = None
+        self.frame_rejected = False
+        self.rejected_frames = 0
+
+    def _filter_curvature(self, curvature, timestamp):
+        """Passa-baixa por quadro novo (o mesmo quadro serve varios passos)."""
+        if self.curvature is None or self.curvature_filter <= 0:
+            self.curvature, self.curvature_at = curvature, timestamp
+        elif timestamp > self.curvature_at:
+            weight = 1. - math.exp(-(timestamp - self.curvature_at) / self.curvature_filter)
+            self.curvature += weight * (curvature - self.curvature)
+            self.curvature_at = timestamp
+        return self.curvature
+
+    def _filter_speed(self, target, dt):
+        if self.speed_target is None or self.speed_filter <= 0:
+            self.speed_target = target
+        else:
+            self.speed_target += (1. - math.exp(-dt / self.speed_filter)) * (target - self.speed_target)
+        return self.speed_target
 
     def _predict_line(self, errors, car, dt=None):
         """Avanca a faixa por dt segundos de odometria (padrao: um passo).
@@ -444,6 +482,7 @@ class RealStanleyFollower:
         age = float('nan')
         errors = None
         stanley_speed = float('nan')
+        speed_raw = float('nan')
         reference_valid = True
         if (isinstance(now, (int, float, np.number)) and math.isfinite(now)
                 and observation is not None):
@@ -466,6 +505,29 @@ class RealStanleyFollower:
         holding = False
         lost_for = float('nan')
         compensated = 0.
+        curvature_raw = errors[2] if line_seen else float('nan')
+        if line_seen:
+            # Curva mais fechada que o batente da direcao nao e seguivel: e ruido.
+            errors = (*errors[:2], float(np.clip(errors[2], -self.max_curvature, self.max_curvature)))
+        if line_seen and finite_sample and observation.timestamp != self.frame_at:
+            # Julga cada quadro uma vez, embora ele sirva a varios passos.
+            self.frame_at = observation.timestamp
+            elapsed = float(now) - self.line_seen_at if self.line_memory is not None else math.nan
+            jump = 0. <= elapsed <= self.loss_tolerance
+            if jump:
+                expected = self._predict_line(self.line_memory, car, elapsed)
+                measured = errors[:2]
+                if self.compensate_latency and age > 0:
+                    measured = self._predict_line(errors, car, min(age, MAX_LATENCY_COMPENSATION))[:2]
+                jump = (abs(measured[0] - expected[0]) > MAX_LATERAL_JUMP
+                        or abs(measured[1] - expected[1]) > MAX_HEADING_JUMP)
+            self.rejected_frames = self.rejected_frames + 1 if jump else 0
+            self.frame_rejected = jump and self.rejected_frames <= MAX_REJECTED_FRAMES
+        outlier = line_seen and self.frame_rejected
+        if outlier:
+            line_seen, errors = False, None
+        if line_seen:
+            self._filter_curvature(errors[2], float(observation.timestamp))
         if line_seen and self.compensate_latency and finite_sample and age > 0:
             # Os erros sao do instante da captura; a 1,5 m/s o carro anda
             # ~20 cm ate o comando. Leva a faixa ao instante atual, com teto
@@ -491,8 +553,11 @@ class RealStanleyFollower:
             # Primeiro resolve a referencia deste passo (inclui curvas e RC).
             # Usar car.vref antes de set_vel leria a referencia anterior,
             # frequentemente zero no inicio ou apos uma perda de faixa.
-            car.set_vel(curve_speed(self.reference, curvature, lateral, heading,
-                                    min_speed=self.min_speed, lateral_accel=self.lateral_accel))
+            # Curvatura filtrada so no limite de velocidade (antes do 1o quadro: a atual).
+            speed_curvature = curvature if self.curvature is None else self.curvature
+            speed_raw = curve_speed(self.reference, speed_curvature, lateral, heading,
+                                    min_speed=self.min_speed, lateral_accel=self.lateral_accel)
+            car.set_vel(self._filter_speed(speed_raw, car.dt))
             active = bool(getattr(car, 'encoder_valid', True))
             stanley_speed = car.vref if self.use_vref else car.v
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
@@ -510,7 +575,9 @@ class RealStanleyFollower:
             car.set_steer(0.)
             self.reset()
             steer = 0.
-        if active and holding:
+        if active and holding and outlier:
+            self.status = 'Quadro com salto impossivel descartado; seguindo ultima trajetoria'
+        elif active and holding:
             self.status = (f'Faixa perdida ha {lost_for:.2f} s; seguindo ultima trajetoria'
                            f' (limite {self.loss_tolerance:.2f} s)')
         elif active:
@@ -543,6 +610,7 @@ class RealStanleyFollower:
         # cross_track/heading registram a trajetoria prevista usada no controle.
         car.log(line_valid=int(line_seen), lateral_active=int(active),
                 line_hold=int(holding and active), line_lost_s=lost_for,
+                line_outlier=int(outlier),
                 vision_frame_id=getattr(observation, 'sequence', 0),
                 line_color_support=getattr(observation, 'color_support', invalid) if line_seen else invalid,
                 line_dash_fraction=getattr(observation, 'dash_fraction', invalid) if line_seen else invalid,
@@ -558,6 +626,8 @@ class RealStanleyFollower:
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
                 stanley_feedforward_rad=self.controller.feedforward_term if active else invalid,
                 vision_compensated_s=compensated,
+                curvature_raw_m_inv=curvature_raw, curve_speed_raw_m_s=speed_raw,
+                curvature_filtered_m_inv=invalid if self.curvature is None else self.curvature,
                 stanley_speed_m_s=float(stanley_speed) if active else invalid,
                 stanley_use_vref=int(self.use_vref),
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,

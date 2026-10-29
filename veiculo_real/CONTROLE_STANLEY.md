@@ -65,7 +65,16 @@ acelerador e desacelera ~0.6 m/s^2 (ensaio de banguela). A 1.5 m/s isso exige
 `roi_top=50` (~0.85 m); curvas fechadas em velocidade alta dependem da direcao.
 
 Perdendo a faixa, o carro segue a ultima trajetoria vista por ate
-`line_loss_tolerance` (0.5 s) e so entao para.
+`line_loss_tolerance` (0.5 s) e so entao para. Quadros cuja orientacao salta
+mais de 0.3 rad (ou o erro lateral mais de 8 cm) em relacao a trajetoria
+prevista sao descartados da mesma forma, no maximo 3 seguidos; o CSV marca
+`line_outlier`.
+
+Nas curvas, o alvo de velocidade usa a curvatura filtrada
+(`curvature_filter_s`, 0.2 s) e e suavizado (`speed_filter_s`, 0.3 s): antes
+ele oscilava com o ruido da visao e o acelerador dava trancos. O esterco usa a
+curvatura do proprio quadro, limitada ao batente (1/R ~ 1 m^-1): no mesmo
+ajuste, erros de orientacao e de curvatura saem opostos e se cancelam.
 
 ### Ver a camera no notebook
 

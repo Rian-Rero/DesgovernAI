@@ -53,6 +53,10 @@ parameters = {
     # Esterco de regime atan(L*kappa) somado ao Stanley; 0 desliga.
     "stanley_curvature_ff": 1.0,
     "wheelbase": 0.36,  # m: mesmo CAR["L"] de fva_car/car.py
+    # Passa-baixas (s) do limite de velocidade em curva; 0 desliga. Evitam os
+    # trancos de acelerador ("engasgos"); o esterco nao passa por eles.
+    "curvature_filter_s": 0.2,
+    "speed_filter_s": 0.3,
     # Leva os erros da imagem ao instante do comando por odometria (ate 0,25 s).
     "vision_latency_compensation": True,
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda

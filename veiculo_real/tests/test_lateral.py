@@ -360,6 +360,76 @@ class RealFollowerTests(unittest.TestCase):
         self.assertAlmostEqual(car.log.call_args.kwargs['vision_compensated_s'],
                                lateral.MAX_LATENCY_COMPENSATION)
 
+    def test_curvature_is_clamped_for_steering_and_filtered_for_speed(self):
+        follower=lateral.RealStanleyFollower({'velocity_reference':1.5,'speed_filter_s':0})
+        car=fake_car()
+        # Sinal trocando a cada quadro (como no log real) quase nao muda o filtro.
+        for index in range(20):
+            now=10.+.05*index
+            follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,.9*(-1)**index)),now)
+        self.assertLess(abs(follower.curvature),.25)
+        log=car.log.call_args.kwargs
+        # O esterco usa a curvatura do proprio quadro, que se cancela com a orientacao.
+        self.assertAlmostEqual(follower.controller.feedforward_term,math.atan(.36*.9*(-1)**19))
+        self.assertAlmostEqual(log['curvature_filtered_m_inv'],follower.curvature)
+        # A velocidade usa a filtrada: nao cai para sqrt(0,4/0,9) a cada quadro.
+        self.assertGreater(car.vref,lateral.curve_speed(1.5,.9,0.,0.,lateral_accel=.4)+.2)
+        # O mesmo quadro reaproveitado em varios passos nao reaplica o filtro.
+        repeated=follower.curvature
+        follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,5.)),now+.02)
+        self.assertEqual(follower.curvature,repeated)
+        # Acima do batente da direcao a curvatura e limitada nos dois usos.
+        for index in range(40):
+            now=12.+.05*index
+            follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,5.)),now)
+        limit=math.tan(math.radians(20))/.36
+        self.assertAlmostEqual(follower.max_curvature,limit)
+        self.assertAlmostEqual(follower.curvature,limit,places=3)
+        self.assertAlmostEqual(follower.controller.feedforward_term,math.atan(.36*limit))
+        self.assertEqual(car.log.call_args.kwargs['curvature_raw_m_inv'],5.)
+
+    def test_speed_target_is_smoothed_against_one_step_spikes(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({'velocity_reference':.7})
+        for index in range(30):
+            now=10.+.02*index
+            follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,0.)),now)
+        self.assertAlmostEqual(car.vref,.7)
+        # Um passo isolado com erro angular alto pedia ~0,53 m/s de uma vez.
+        follower.apply(car,lateral.LineObservation(timestamp=10.6,errors=(0.,.25,0.)),10.6)
+        self.assertAlmostEqual(car.log.call_args.kwargs['curve_speed_raw_m_s'],.7/1.25)
+        self.assertGreater(car.vref,.68)
+        unfiltered=lateral.RealStanleyFollower({'velocity_reference':.7,'speed_filter_s':0})
+        unfiltered.apply(car,lateral.LineObservation(timestamp=10.6,errors=(0.,.25,0.)),10.6)
+        self.assertAlmostEqual(car.vref,.7/1.25)
+
+    def test_impossible_jump_is_discarded_but_a_persistent_change_is_accepted(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({})
+        for index in range(5):
+            now=10.+.05*index
+            follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,0.)),now)
+        # Um quadro com a orientacao saltando 0,8 rad em 50 ms (log real: 0,29 -> 0,88).
+        glitch=lateral.LineObservation(timestamp=10.25,errors=(-.15,.8,0.))
+        self.assertTrue(follower.apply(car,glitch,10.25))
+        log=car.log.call_args.kwargs
+        self.assertEqual((log['line_outlier'],log['line_hold'],log['line_valid']),(1,1,0))
+        self.assertAlmostEqual(log['heading_error_rad'],0.,places=6)
+        self.assertIn('salto impossivel',follower.status)
+        # Reaproveitado no passo seguinte, o mesmo quadro continua descartado.
+        follower.apply(car,glitch,10.27)
+        self.assertEqual(car.log.call_args.kwargs['line_outlier'],1)
+        # Medida coerente volta a ser usada normalmente.
+        follower.apply(car,lateral.LineObservation(timestamp=10.3,errors=(.01,.02,0.)),10.3)
+        self.assertEqual(car.log.call_args.kwargs['line_outlier'],0)
+        self.assertAlmostEqual(car.log.call_args.kwargs['heading_error_rad'],.02,places=2)
+        # Mudanca real persistente: descarta MAX_REJECTED_FRAMES quadros e aceita o seguinte.
+        outliers=[]
+        for index in range(1,lateral.MAX_REJECTED_FRAMES+2):
+            now=10.3+.05*index
+            follower.apply(car,lateral.LineObservation(timestamp=now,errors=(.2,.5,0.)),now)
+            outliers.append(car.log.call_args.kwargs['line_outlier'])
+        self.assertEqual(outliers,[1]*lateral.MAX_REJECTED_FRAMES+[0])
+        self.assertAlmostEqual(car.log.call_args.kwargs['heading_error_rad'],.5,places=2)
+
     def test_zero_tolerance_stops_on_first_lost_frame_and_rejects_invalid_values(self):
         car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_tolerance':0})
         follower.apply(car,self.valid_observation(),10.)
