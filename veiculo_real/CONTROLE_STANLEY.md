@@ -52,9 +52,27 @@ python3 veiculo_real/main.py
 python3 veiculo_real/main.py --calibration caminho/camera.json --speed 0.5 --display
 ```
 
-A referencia padrao e 0.3 m/s para ajustar o seguimento antes de aumentar
-a velocidade com `--speed`. O piso de velocidade em curvas e 0.15 m/s.
-O maximo de estercamento e 20 graus, com taxa de 60 graus/s.
+A referencia padrao e 0.7 m/s (`MAIN_VEL`); `--fast` usa 1.5 m/s
+(`FAST_VEL`) e `--speed` aceita qualquer valor. Na GUI de um carro, o seletor
+"Velocidade" troca o `--speed` do comando. O piso de velocidade em curvas e
+0.15 m/s. O maximo de estercamento e 20 graus, com taxa de 120 graus/s.
+
+O Stanley soma o esterco de regime `atan(L*kappa)` (`stanley_curvature_ff`)
+e os erros da imagem sao levados ao instante do comando por odometria
+(`vision_latency_compensation`, ate 0.25 s). O carro nao freia: so corta o
+acelerador e desacelera ~0.6 m/s^2 (ensaio de banguela). A 1.5 m/s isso exige
+~1.6 m para chegar a velocidade de curva, mais do que a camera enxerga com
+`roi_top=50` (~0.85 m); curvas fechadas em velocidade alta dependem da direcao.
+
+Perdendo a faixa, o carro segue a ultima trajetoria vista por ate
+`line_loss_tolerance` (0.5 s) e so entao para.
+
+### Ver a camera no notebook
+
+Com o notebook no hotspot do carro, rode a missao com `--stream` (porta 8080)
+e abra `http://<ip-do-carro>:8080/` no navegador, ou use o botao "Ver camera"
+da GUI. A imagem mostra a faixa detectada, o status do controle, v, vref e o
+esterco. So comprime quadros enquanto alguem assiste.
 Ganhos, sinais e limites ainda precisam de ajuste e verificacao no carro
 fisico. O entre-eixos do `Car` real continua 0.36 m; nao foi substituido pelo
 valor de 0.302 m do simulador. `steering_sign=+1` segue a convencao do codigo

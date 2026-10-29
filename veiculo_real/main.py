@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import queue
 import signal
+import socket
 import threading
 import time
 
@@ -20,7 +21,8 @@ from fva_car.lateral import (
     RealStanleyFollower,
 )
 
-MAIN_VEL = 1.0  # m/s: iniciar o ajuste lateral sem percorrer metros durante a correcao
+MAIN_VEL = 0.7  # m/s: velocidade padrao da missao
+FAST_VEL = 1.5  # m/s: selecionada com --fast
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20
@@ -45,7 +47,14 @@ parameters = {
     "stanley_softening": 0.3,
     "stanley_use_vref": True,  # True: vref no denominador; False: velocidade medida (car.v)
     "stanley_max_steer_deg": 20.0,
-    "stanley_max_rate_deg_s": 60.0,
+    # 60 graus/s levava 0,33 s (0,5 m a 1,5 m/s) para chegar ao batente:
+    # quase todo o trecho visivel antes da curva.
+    "stanley_max_rate_deg_s": 120.0,
+    # Esterco de regime atan(L*kappa) somado ao Stanley; 0 desliga.
+    "stanley_curvature_ff": 1.0,
+    "wheelbase": 0.36,  # m: mesmo CAR["L"] de fva_car/car.py
+    # Leva os erros da imagem ao instante do comando por odometria (ate 0,25 s).
+    "vision_latency_compensation": True,
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda
     "steering_filter_size": 3,  # Stanley ja limita a taxa; reduz atraso extra do servo
     "curve_min_speed": 0.15,
@@ -60,6 +69,8 @@ parameters = {
     # atual): menos linhas para rastrear e sem outras faixas pintadas ao fundo.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
     "path_anchor": 0.5,  # preferencia horizontal da faixa, entre 0 e 1
+    # Porta HTTP com a visao ao vivo (http://<ip-do-carro>:porta/); 0 desliga.
+    "stream_port": 0,
 }
 
 
@@ -197,6 +208,30 @@ def save_vision_snapshot(car, observation, status, now):
         print(f"Nao foi possivel salvar diagnostico de visao: {error}", flush=True)
 
 
+def stream_text(car, status, observation):
+    """Legenda do quadro transmitido: o que o controle decidiu neste passo."""
+    lines = [status[:48]]
+    if observation is not None and observation.valid:
+        lateral, heading, curvature = observation.errors
+        lines.append(f"e={lateral:+.3f}m psi={np.degrees(heading):+.1f} k={curvature:+.2f}")
+    lines.append(f"v={car.v:.2f} vref={car.vref:.2f} st={np.degrees(car.st):+.1f}")
+    return lines
+
+
+def render_stream_frame(detector, observation, lines):
+    image = detector.preview_bgr(observation)
+    if image is None:
+        width, height = detector.processing_size
+        image = np.zeros((height, width, 3), np.uint8)
+    else:
+        image = image.copy()
+    for index, line in enumerate(lines):
+        origin = (4, 14 + 14 * index)
+        cv2.putText(image, line, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(image, line, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+    return image
+
+
 def run_mission(settings=None, display=False, car_factory=None, clock=time.monotonic):
     config = dict(parameters)
     if settings is not None:
@@ -223,11 +258,25 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         processing_width=config.get("vision_width", 0),
     )
     follower = RealStanleyFollower(config)
+    stream = None
+    if config.get("stream_port"):
+        from fva_car.stream import VisionStream
+
+        # Abre a porta antes dos motores: porta ocupada falha sem mover o carro.
+        stream = VisionStream(
+            lambda observation, lines: render_stream_frame(detector, observation, lines),
+            port=config["stream_port"],
+        )
     if car_factory is None:
         from fva_car import Car
 
         car_factory = Car
-    car = car_factory(config)
+    try:
+        car = car_factory(config)
+    except BaseException:
+        if stream is not None:
+            stream.close()
+        raise
     vision_data = {"observation": None}
     stop_event = threading.Event()
     frames = queue.Queue(maxsize=1)
@@ -270,6 +319,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             name="linha-hsv",
         )
         thread_vision.start()
+        if stream is not None:
+            stream.start()
+            print(
+                f"Camera ao vivo: http://{socket.gethostname()}.local:{stream.port}/"
+                f" (ou http://<ip-do-carro>:{stream.port}/)",
+                flush=True,
+            )
         if display:
             import matplotlib.pyplot as plt
 
@@ -341,6 +397,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 distance_m=dist,
                 stopping_distance_m=stop_distance,
             )
+            if stream is not None:
+                stream.publish(observation, stream_text(car, control_status, observation))
             now = clock()
             last_control_at = now
             if not thread_vision.is_alive():
@@ -400,6 +458,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             stop_vehicle(car)
         finally:
             stop_event.set()
+            if stream is not None:
+                stream.close()
             if thread_vision is not None:
                 thread_vision.join(timeout=1.0)
             if thread_capture is not None:
@@ -423,8 +483,19 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calibration", help="JSON da camera calibrada em metros")
-    parser.add_argument(
-        "--speed", type=float, default=MAIN_VEL, help="Teto de velocidade em m/s"
+    speed = parser.add_mutually_exclusive_group()
+    speed.add_argument(
+        "--speed",
+        type=float,
+        default=MAIN_VEL,
+        help=f"Teto de velocidade em m/s (padrao {MAIN_VEL})",
+    )
+    speed.add_argument(
+        "--fast",
+        action="store_const",
+        dest="speed",
+        const=FAST_VEL,
+        help=f"Atalho para --speed {FAST_VEL}",
     )
     parser.add_argument(
         "--encoder-protocol",
@@ -445,6 +516,14 @@ def main():
         help="Amostras do filtro da direcao: padrao 3; 1 desativa a media movel",
     )
     parser.add_argument(
+        "--stream",
+        type=int,
+        nargs="?",
+        const=8080,
+        metavar="PORTA",
+        help="Transmitir a visao ao vivo por HTTP (padrao 8080), para o navegador do notebook",
+    )
+    parser.add_argument(
         "--imu-telemetry",
         action="store_true",
         help="Reativar leituras extras da IMU no CSV",
@@ -455,6 +534,8 @@ def main():
         settings["vision_width"] = args.vision_width
     if args.steering_filter is not None:
         settings["steering_filter_size"] = args.steering_filter
+    if args.stream is not None:
+        settings["stream_port"] = args.stream
     if args.imu_telemetry:
         settings["imu_telemetry"] = True
     if args.encoder_protocol:

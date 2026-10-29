@@ -121,144 +121,129 @@ class YellowPathDetector:
 
         Cada candidato guarda a melhor cadeia ate ele. Penaliza saltos laterais,
         mudancas bruscas de direcao e largura, preferindo trajetorias extensas.
+        As cadeias ficam numa arvore (cada no aponta para o pai) e cada banda
+        compara todos os candidatos com todos os pais de uma vez, em NumPy.
         """
         height, width = weak.shape
         rows, step = self._candidates(strong, weak, settings)
         short_limit = settings.max_gap * height / 480 + step
         gap_limit = max(short_limit, settings.dash_gap * height / 480 + step) if settings.dashed else short_limit
         seed_y = height * (settings.roi_top / 100 + .55 * (1 - settings.roi_top / 100))
-        active, paths = [], []
         recent = self.previous is not None and now - self.previous_time < .25
+        reach = max(12., width * .025)
+        total = sum(len(candidates) for candidates in rows)
+        # Colunas: x, y, largura, evidencia, score, inclinacao, y da raiz.
+        nodes = np.empty((total, 7))
+        lengths = np.empty(total, np.int32)
+        parents = np.empty(total, np.int32)
+        count = first_active = 0
+        tails = {}
+
+        def tail_tangent(node):
+            if node not in tails:
+                tail = [node]
+                while len(tail) < 6 and parents[tail[-1]] >= 0:
+                    parent = parents[tail[-1]]
+                    if nodes[parent, 1] - nodes[tail[-1], 1] > 1.6 * step:
+                        break
+                    tail.append(parent)
+                tails[node] = (None if len(tail) < 3 else
+                               self._tangent_slope(nodes[tail, :2].tolist()))
+            return tails[node]
+
         for row_index, candidates in enumerate(rows):
             if not candidates:
                 continue
-            y = candidates[0][1]
-            active = [p for p in active if 0 < p[1][-1][1] - y <= gap_limit]
-            # Com varios objetos amarelos, elimina em NumPy os pais que
-            # falhariam nos mesmos dois primeiros testes geometricos abaixo.
-            # Mantem a ordem original e todas as validacoes de pontilhado.
-            parent_x = parent_dy = predictions = None
-            if len(active) >= 32:
-                parents = np.asarray([(p[1][-1][0], p[1][-1][1], p[2], p[0],
-                                       p[1][-1][2], len(p[1])) for p in active])
-                parent_x = parents[:, 0]
-                parent_dy = parents[:, 1] - y
-                predictions = parent_x + parents[:, 2] * parent_dy
-                reach = max(12., width * .025) + .65 * parent_dy
-            expected = np.polyval(self.previous, y / height) if recent and y >= seed_y else None
-            new = []
-            for point in candidates:
-                x, y, band_width, evidence = point
-                reward = step * (.35 + .65 * min(1., evidence * 2))
-                best = None
-                upper_tangent = None
-                tangent_checked = False
-                if y >= seed_y:
-                    penalty = 45 * abs(x / width - self.anchor)
-                    if recent:
-                        penalty += min(25., abs(x - expected) * .15)
-                    best = (reward - penalty, (point,), 0.)
-                has_short_parent = False
-                parents_to_check = reversed(active)
-                if parent_x is not None:
-                    new_slopes = (x - parent_x) / parent_dy
-                    width_changes = np.abs(np.log(max(band_width, 1) / np.maximum(parents[:, 4], 1)))
-                    compatible = ((np.abs(x - predictions) <= reach)
-                                  & (np.abs(new_slopes) <= 2.8)
-                                  & (width_changes <= 1.25))
-                    short = np.flatnonzero(compatible & (parent_dy <= short_limit))[::-1]
-                    if len(short):
-                        # Todos os pais curtos ja passaram pelos mesmos testes.
-                        # A versao escalar ignora os longos assim que acha um
-                        # curto; calcula seus scores de uma vez em NumPy.
-                        dx = x - parent_x[short]
-                        turn = np.where(parents[short, 5] > 1,
-                                        np.abs(new_slopes[short] - parents[short, 2]), 0.)
-                        costs = (.12 * np.abs(dx) + .22 * np.maximum(0., parent_dy[short] - step)
-                                 + step * .35 * turn + step * .25 * width_changes[short])
-                        scores = parents[short, 3] + reward - costs
-                        winner = int(np.argmax(scores))
-                        index = short[winner]
-                        score, chain, slope = active[index]
-                        candidate = (float(scores[winner]), chain + (point,),
-                                     .5 * slope + .5 * float(new_slopes[index]))
-                        if best is None or candidate[0] > best[0]:
-                            best = candidate
-                        parents_to_check = ()
-                    else:
-                        parents_to_check = (active[index] for index in np.flatnonzero(compatible)[::-1])
-                for score, chain, slope in parents_to_check:
-                    px, py, pw, _ = chain[-1]
-                    dy, dx = py - y, x - px
-                    # active esta em ordem de altura. Apos encontrar um pai
-                    # curto, nenhum pai mais distante pode ser escolhido.
-                    if has_short_parent and dy > short_limit:
-                        break
-                    prediction = px + slope * dy
-                    if abs(x - prediction) > max(12., width * .025) + .65 * dy:
+            points = np.asarray(candidates)
+            xs, y, widths, evidence = points[:, 0], points[0, 1], points[:, 2], points[:, 3]
+            # Nos estao em ordem de altura: os ativos formam um sufixo contiguo.
+            while first_active < count and nodes[first_active, 1] - y > gap_limit:
+                first_active += 1
+            rewards = step * (.35 + .65 * np.minimum(1., evidence * 2))
+            best_scores = np.full(len(points), -np.inf)
+            best_parents = np.full(len(points), -1, np.int32)
+            best_slopes = np.zeros(len(points))
+            if y >= seed_y:
+                penalties = 45 * np.abs(xs / width - self.anchor)
+                if recent:
+                    expected = np.polyval(self.previous, y / height)
+                    penalties = penalties + np.minimum(25., np.abs(xs - expected) * .15)
+                best_scores = rewards - penalties
+            if first_active < count:
+                active = slice(first_active, count)
+                parent_x, parent_y, parent_w, _, parent_score, parent_slope, _ = nodes[active].T
+                dy = parent_y - y
+                dx = xs[:, None] - parent_x
+                new_slopes = dx / dy
+                width_changes = np.abs(np.log(np.maximum(widths, 1)[:, None] / np.maximum(parent_w, 1)))
+                compatible = ((np.abs(xs[:, None] - (parent_x + parent_slope * dy)) <= reach + .65 * dy)
+                              & (np.abs(new_slopes) <= 2.8) & (width_changes <= 1.25))
+                turn = np.where(lengths[active] > 1, np.abs(new_slopes - parent_slope), 0.)
+                costs = (.12 * np.abs(dx) + .22 * np.maximum(0., dy - step)
+                         + step * .35 * turn + step * .25 * width_changes)
+                scores = parent_score + rewards[:, None] - costs
+                short = compatible & (dy <= short_limit)
+                # Havendo pai curto compativel, os longos nunca sao escolhidos.
+                # Em empate vence o pai mais proximo, como no laco escalar.
+                masked = np.where(short, scores, -np.inf)[:, ::-1]
+                picks = count - first_active - 1 - np.argmax(masked, axis=1)
+                picked = scores[np.arange(len(points)), picks]
+                better = short.any(axis=1) & (picked > best_scores)
+                best_scores[better] = picked[better]
+                best_parents[better] = picks[better] + first_active
+                best_slopes[better] = (.5 * parent_slope[picks[better]]
+                                       + .5 * new_slopes[better, picks[better]])
+                # Gaps de pontilhado exigem orientacao medida nos dois lados:
+                # nao basta aproximar dois objetos amarelos. Caso raro, escalar.
+                for index in np.flatnonzero(~short.any(axis=1) & compatible.any(axis=1)):
+                    if evidence[index] < .12:
                         continue
-                    new_slope = dx / dy
-                    if abs(new_slope) > 2.8:
+                    upper_tangent = self._forward_tangent(candidates[index],
+                                                          rows[row_index + 1:row_index + 5], step)
+                    if upper_tangent is None:
                         continue
-                    width_change = abs(math.log(max(band_width, 1) / max(pw, 1)))
-                    if width_change > 1.25:
-                        continue
-                    if dy <= short_limit:
-                        has_short_parent = True
-                    if dy > short_limit:
-                        if has_short_parent:
-                            continue
-                        # Gaps de pontilhado exigem orientacao medida nos dois
-                        # lados: nao basta aproximar dois objetos amarelos.
-                        if not tangent_checked:
-                            upper_tangent = self._forward_tangent(point, rows[row_index + 1:row_index + 5], step)
-                            tangent_checked = True
-                        lower_tangent = self._tail_tangent(chain, step)
-                        if (upper_tangent is None or lower_tangent is None
-                                or evidence < .12 or chain[-1][3] < .12 or width_change > .65):
+                    for parent in np.flatnonzero(compatible[index])[::-1]:
+                        node = parent + first_active
+                        lower_tangent = tail_tangent(node)
+                        if (lower_tangent is None or nodes[node, 3] < .12
+                                or width_changes[index, parent] > .65):
                             continue
                         if abs(math.atan(upper_tangent) - math.atan(lower_tangent)) > math.radians(35):
                             continue
                         mean_slope = (upper_tangent + lower_tangent) / 2
-                        if abs(new_slope - mean_slope) > .22 + .4 * abs(upper_tangent - lower_tangent):
+                        if abs(new_slopes[index, parent] - mean_slope) > .22 + .4 * abs(upper_tangent - lower_tangent):
                             continue
-                    turn_penalty = abs(new_slope - slope) if len(chain) > 1 else 0
-                    cost = (.12 * abs(dx) + .22 * max(0, dy - step)
-                            + step * .35 * turn_penalty + step * .25 * width_change)
-                    candidate = (score + reward - cost, chain + (point,),
-                                 .5 * slope + .5 * new_slope)
-                    if best is None or candidate[0] > best[0]:
-                        best = candidate
-                if best is not None:
-                    new.append(best)
-                    paths.append(best)
-            active.extend(new)
+                        if scores[index, parent] > best_scores[index]:
+                            best_scores[index] = scores[index, parent]
+                            best_parents[index] = node
+                            best_slopes[index] = .5 * parent_slope[parent] + .5 * new_slopes[index, parent]
+            accepted = np.flatnonzero(np.isfinite(best_scores))
+            new = slice(count, count + len(accepted))
+            linked = best_parents[accepted]
+            nodes[new, :4] = points[accepted]
+            nodes[new, 4] = best_scores[accepted]
+            nodes[new, 5] = best_slopes[accepted]
+            nodes[new, 6] = np.where(linked >= 0, nodes[linked, 6], y)
+            lengths[new] = np.where(linked >= 0, lengths[linked] + 1, 1)
+            parents[new] = linked
+            count += len(accepted)
         # O resultado sempre foi o caminho aceito de maior score. Avaliar
         # nessa ordem permite parar no primeiro, sem validar dezenas de
-        # prefixos que jamais serao selecionados. sorted conserva os empates.
-        for path in sorted(paths, key=lambda p: p[0], reverse=True):
-            chain = path[1]
-            span = chain[0][1] - chain[-1][1]
-            if span < height * settings.min_span / 100:
-                continue
-            points = np.asarray(path[1])
+        # prefixos que jamais serao selecionados. Ordem estavel nos empates.
+        spans = nodes[:count, 6] - nodes[:count, 1]
+        order = np.argsort(-nodes[:count, 4], kind='stable')
+        for node in order[spans[order] >= height * settings.min_span / 100]:
+            chain = [node]
+            while parents[chain[-1]] >= 0:
+                chain.append(parents[chain[-1]])
+            points = nodes[chain[::-1], :4]
+            span = spans[node]
             long_gap = settings.dashed and np.any(np.abs(np.diff(points[:, 1])) > short_limit)
             if (span / max(1., np.median(points[:, 2])) >= 3.2
                     and len(points) * step / max(span, 1) >= (.28 if long_gap else .5)
                     and np.mean(points[:, 3] >= .12) >= .25):
                 return points
         return None
-
-    @staticmethod
-    def _tail_tangent(chain, step):
-        tail = [chain[-1]]
-        for point in reversed(chain[:-1]):
-            if point[1] - tail[-1][1] > 1.6 * step or len(tail) >= 6:
-                break
-            tail.append(point)
-        if len(tail) < 3:
-            return None
-        return YellowPathDetector._tangent_slope(tail)
 
     @staticmethod
     def _forward_tangent(point, upcoming_rows, step):

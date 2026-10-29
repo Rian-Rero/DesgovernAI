@@ -326,6 +326,40 @@ class RealFollowerTests(unittest.TestCase):
         self.assertEqual(inverted._predict_line((.05,.1,.2),car),
                          follower._predict_line((.05,.1,.2),SimpleNamespace(v=1.,dt=.1,st=.1,w=.5)))
 
+    def test_curvature_feedforward_steers_into_the_curve_without_error(self):
+        controller=lateral.StanleyController(max_rate=10.,curvature_gain=1.)
+        controller.update(0.,0.,1.,.02,curvature=.5)
+        self.assertAlmostEqual(controller.feedforward_term,math.atan(.36*.5))
+        self.assertAlmostEqual(controller.raw_steer,math.atan(.36*.5))
+        for gain,expected in ((1.,1),(0.,0)):
+            with self.subTest(gain=gain):
+                car=fake_car();follower=lateral.RealStanleyFollower({'stanley_curvature_ff':gain})
+                observation=lateral.LineObservation(timestamp=10.,errors=(0.,0.,1.))
+                self.assertTrue(follower.apply(car,observation,10.))
+                self.assertEqual(int(car.st>0),expected)
+                self.assertEqual(car.st<0,False)
+        with self.assertRaises(ValueError):
+            lateral.RealStanleyFollower({'stanley_curvature_ff':-1.})
+
+    def test_latency_compensation_moves_errors_to_command_time_with_cap(self):
+        observation=lateral.LineObservation(timestamp=9.9,errors=(0.,.2,0.))
+        logged={}
+        for compensate in (True,False):
+            car=fake_car();car.v=1.
+            follower=lateral.RealStanleyFollower({'vision_latency_compensation':compensate})
+            self.assertTrue(follower.apply(car,observation,10.))
+            logged[compensate]=car.log.call_args.kwargs
+        # Linha apontando para a esquerda: andando 0,1 s ela se afasta para a esquerda.
+        self.assertAlmostEqual(logged[True]['cross_track_m'],.1*math.sin(.2))
+        self.assertAlmostEqual(logged[True]['vision_compensated_s'],.1)
+        self.assertEqual(logged[False]['cross_track_m'],0.)
+        self.assertEqual(logged[False]['vision_compensated_s'],0.)
+        car=fake_car();car.v=1.
+        follower=lateral.RealStanleyFollower({'vision_timeout':1.})
+        follower.apply(car,lateral.LineObservation(timestamp=9.2,errors=(0.,.2,0.)),10.)
+        self.assertAlmostEqual(car.log.call_args.kwargs['vision_compensated_s'],
+                               lateral.MAX_LATENCY_COMPENSATION)
+
     def test_zero_tolerance_stops_on_first_lost_frame_and_rejects_invalid_values(self):
         car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_tolerance':0})
         follower.apply(car,self.valid_observation(),10.)

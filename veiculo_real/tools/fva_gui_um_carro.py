@@ -23,6 +23,7 @@ import time
 import queue
 import csv
 import base64
+import webbrowser
 from collections import deque
 
 import paramiko
@@ -37,6 +38,19 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 SSH_USER = "alunos"
 DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp123"
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
+SPEED_PRESETS = ("0.7", "1.5")  # m/s; mesmos MAIN_VEL e FAST_VEL de main.py
+STREAM_PORT = 8080  # main.py --stream
+
+
+def with_speed(command: str, speed: str) -> str:
+    """Troca --speed/--fast das linhas que executam main.py, sem tocar nas demais."""
+    lines = []
+    for line in command.splitlines():
+        if re.search(r"\bmain\.py\b", line):
+            line = re.sub(r"\s+--speed(?:=|\s+)\S+|\s+--fast\b", "", line).rstrip()
+            line += f" --speed {speed}"
+        lines.append(line)
+    return "\n".join(lines)
 
 MACS_CARS = {
     "verde": "2c:cf:67:1c:29:4a",
@@ -417,9 +431,25 @@ class RsyncGUI(tk.Tk):
         )
 
         self.cmd_text.insert(
-            "end", "python3 -u main.py --vision-width 320 --steering-filter 3\n"
+            "end",
+            f"python3 -u main.py --vision-width 320 --steering-filter 3"
+            f" --speed {SPEED_PRESETS[0]} --stream\n",
         )
         self.cmd_text.pack(fill="x", pady=4)
+
+        speed_frame = ttk.Frame(cmds_frame)
+        speed_frame.pack(fill="x")
+        ttk.Label(speed_frame, text="Velocidade [m/s]:").pack(side="left", padx=(0, 5))
+        self.speed_var = tk.StringVar(value=SPEED_PRESETS[0])
+        speed_combo = ttk.Combobox(
+            speed_frame,
+            textvariable=self.speed_var,
+            state="readonly",
+            values=SPEED_PRESETS,
+            width=6,
+        )
+        speed_combo.pack(side="left")
+        speed_combo.bind("<<ComboboxSelected>>", lambda event: self.apply_speed_preset())
 
         cmd_buttons = ttk.Frame(parent)
         cmd_buttons.pack(fill="x", padx=10, pady=6)
@@ -431,6 +461,10 @@ class RsyncGUI(tk.Tk):
         ttk.Button(cmd_buttons, text="Gravar Arduino", command=self.flash_arduino).pack(
             side="left", padx=(0, 6)
         )
+
+        ttk.Button(
+            cmd_buttons, text="Ver câmera", command=self.open_camera_stream
+        ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
             cmd_buttons, text="Limpar terminal", command=self.clear_cmd_log
@@ -1653,6 +1687,22 @@ class RsyncGUI(tk.Tk):
     ########################################
     # Execução remota (aba 2)
     ########################################
+    def apply_speed_preset(self):
+        command = with_speed(self.cmd_text.get("1.0", "end-1c"), self.speed_var.get())
+        self.cmd_text.delete("1.0", "end")
+        self.cmd_text.insert("end", command + "\n")
+
+    def open_camera_stream(self):
+        """A missao precisa estar rodando com --stream; abre no navegador local."""
+        targets = self.get_selected_devices()
+        if not targets:
+            messagebox.showinfo(
+                "Nenhum alvo",
+                "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.",
+            )
+            return
+        webbrowser.open(f"http://{targets[0][1]}:{STREAM_PORT}/")
+
     def run_cmds_on_selected(self):
         targets = self.get_selected_devices()
         if not targets:

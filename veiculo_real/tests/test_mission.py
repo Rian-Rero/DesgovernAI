@@ -87,6 +87,31 @@ class MissionTests(unittest.TestCase):
             mission.run_mission(self.settings if settings is None else settings,
                                 car_factory=lambda _:self.car,clock=lambda:10.)
 
+    def test_stream_publishes_each_step_and_is_closed_with_the_mission(self):
+        from fva_car import stream as stream_module
+        stream = Mock(port=8080)
+        stream.start.return_value = stream
+        with patch.object(stream_module, 'VisionStream', return_value=stream) as factory:
+            self.run_fake(dict(self.settings, stream_port=8080))
+        self.assertEqual(factory.call_args.kwargs['port'], 8080)
+        stream.start.assert_called_once()
+        self.assertTrue(stream.publish.called)
+        observation, lines = stream.publish.call_args.args
+        self.assertTrue(observation.valid)
+        self.assertTrue(any('vref=' in line for line in lines))
+        stream.close.assert_called_once()
+
+    def test_stream_is_closed_if_car_creation_fails(self):
+        from fva_car import stream as stream_module
+        stream = Mock()
+        def broken_car(_):
+            raise RuntimeError('serial ausente')
+        with patch.object(stream_module, 'VisionStream', return_value=stream), \
+                self.assertRaises(RuntimeError):
+            mission.run_mission(dict(self.settings, stream_port=8080), car_factory=broken_car)
+        stream.close.assert_called_once()
+        stream.start.assert_not_called()
+
     def test_missing_calibration_is_rejected_before_car_factory(self):
         factory=Mock()
         settings=dict(self.settings,camera_calibration_file=str(Path(self.folder.name)/'missing.json'))
@@ -221,8 +246,20 @@ class MissionTests(unittest.TestCase):
         with patch.object(sys, 'argv', ['main.py', '--steering-filter', '1']), \
                 patch.object(mission, 'run_mission') as run:
             mission.main()
-        run.assert_called_once_with({'velocity_reference': .3, 'steering_filter_size': 1}, display=False)
+        run.assert_called_once_with({'velocity_reference': mission.MAIN_VEL, 'steering_filter_size': 1},
+                                    display=False)
         self.assertEqual(mission.parameters['steering_sign'], 1.)
+
+    def test_cli_fast_preset_selects_fast_speed_and_conflicts_with_speed(self):
+        with patch.object(sys, 'argv', ['main.py', '--fast']), \
+                patch.object(mission, 'run_mission') as run:
+            mission.main()
+        run.assert_called_once_with({'velocity_reference': mission.FAST_VEL}, display=False)
+        with patch.object(sys, 'argv', ['main.py', '--fast', '--speed', '.7']), \
+                patch.object(mission, 'run_mission') as run, \
+                patch('sys.stderr'), self.assertRaises(SystemExit):
+            mission.main()
+        run.assert_not_called()
 
     def test_invalid_steering_filter_is_rejected_before_drivers(self):
         for size in (0, -1, True, 1.5):

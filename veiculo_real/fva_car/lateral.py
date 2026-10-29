@@ -229,10 +229,21 @@ class RealLineDetector:
             return observation
         return replace(observation, frame=self._preview(observation.source_frame, observation.path_result))
 
-    def _preview(self, frame, result):
+    def preview_bgr(self, observation):
+        """Deteccao desenhada na grade de processamento, em BGR (transmissao)."""
+        if observation is None or observation.source_frame is None:
+            return None
+        if observation.path_result is None:
+            return cv2.resize(observation.source_frame, self.processing_size, interpolation=cv2.INTER_AREA)
+        return self._render_small(observation.source_frame, observation.path_result)
+
+    def _render_small(self, frame, result):
         size = result.path_mask.shape[1::-1]
         source = frame if frame.shape[1::-1] == size else cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-        display = render_path(source, result, self.settings, self.anchor)
+        return render_path(source, result, self.settings, self.anchor)
+
+    def _preview(self, frame, result):
+        display = self._render_small(frame, result)
         if display.shape[:2] != frame.shape[:2]:
             display = cv2.resize(display, frame.shape[1::-1], interpolation=cv2.INTER_NEAREST)
         return cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
@@ -240,34 +251,43 @@ class RealLineDetector:
 
 class StanleyController:
     def __init__(self, gain=1.5, softening=0.3, max_steer=math.radians(20),
-                 max_rate=math.radians(60)):
+                 max_rate=math.radians(60), wheelbase=.36, curvature_gain=0.):
         if not all(math.isfinite(x) and x > 0
-                   for x in (gain, softening, max_steer, max_rate)):
+                   for x in (gain, softening, max_steer, max_rate, wheelbase)):
             raise ValueError('Parametros Stanley devem ser finitos e positivos.')
         if max_steer >= math.pi / 2:
             raise ValueError('max_steer deve ser menor que pi/2 radianos.')
+        if not math.isfinite(curvature_gain) or curvature_gain < 0:
+            raise ValueError('O ganho de curvatura deve ser finito e nao negativo.')
         self.gain, self.softening = gain, softening
         self.max_steer, self.max_rate = max_steer, max_rate
+        self.wheelbase, self.curvature_gain = wheelbase, curvature_gain
         self.reset()
 
     def reset(self):
         self.steer = 0.
         self.heading_term = 0.
         self.cross_track_term = 0.
+        self.feedforward_term = 0.
         self.raw_steer = 0.
         self.target_steer = 0.
 
-    def update(self, cross_track, heading_error, speed, dt):
+    def update(self, cross_track, heading_error, speed, dt, curvature=0.):
         """cross_track: linha a esquerda do eixo dianteiro (+), em metros.
 
         heading_error = direcao da linha - direcao do carro, em radianos.
+        curvature: da linha, positiva para a esquerda, em 1/m.
         """
-        if not all(math.isfinite(x) for x in (cross_track, heading_error, speed, dt)) or dt <= 0:
+        if (not all(math.isfinite(x) for x in (cross_track, heading_error, speed, dt, curvature))
+                or dt <= 0):
             raise ValueError('Stanley requer sinais finitos e dt positivo.')
         self.heading_term = math.atan2(math.sin(heading_error), math.cos(heading_error))
         self.cross_track_term = math.atan2(self.gain * cross_track,
                                           abs(speed) + self.softening)
-        self.raw_steer = self.heading_term + self.cross_track_term
+        # Esterco de regime da curva (bicicleta): sem ele o Stanley so vira
+        # depois de acumular erro, tarde demais em velocidade alta.
+        self.feedforward_term = math.atan(self.curvature_gain * self.wheelbase * curvature)
+        self.raw_steer = self.heading_term + self.cross_track_term + self.feedforward_term
         self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
         self.steer += float(np.clip(self.target_steer - self.steer,
                                     -self.max_rate * dt, self.max_rate * dt))
@@ -351,6 +371,9 @@ def curve_speed(reference, curvature, lateral, heading, min_speed=.5,
     return min(reference, max(min_speed, min(bend_limit, recovery_limit)))
 
 
+MAX_LATENCY_COMPENSATION = .25  # s; idade tipica da imagem: 0,12 a 0,19 s
+
+
 class RealStanleyFollower:
     """Comandos somente no laco principal; visao nunca atua nos motores."""
     def __init__(self, settings):
@@ -361,13 +384,14 @@ class RealStanleyFollower:
             if not isinstance(value, (int, float, np.number)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} deve ser finito e positivo.')
             return float(value)
+        def nonnegative(name, default):
+            value = self.settings.get(name, default)
+            if (isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.number))
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError(f'{name} deve ser finito e nao negativo (0 desativa).')
+            return float(value)
         self.timeout = positive('vision_timeout', .3)
-        self.loss_tolerance = self.settings.get('line_loss_tolerance', .5)
-        if (isinstance(self.loss_tolerance, (bool, np.bool_))
-                or not isinstance(self.loss_tolerance, (int, float, np.number))
-                or not math.isfinite(self.loss_tolerance) or self.loss_tolerance < 0):
-            raise ValueError('line_loss_tolerance deve ser finito e nao negativo (0 desativa).')
-        self.loss_tolerance = float(self.loss_tolerance)
+        self.loss_tolerance = nonnegative('line_loss_tolerance', .5)
         self.reference = positive('velocity_reference', .5)
         self.min_speed = positive('curve_min_speed', .3)
         self.lateral_accel = positive('curve_lateral_accel', .4)
@@ -381,7 +405,12 @@ class RealStanleyFollower:
             gain=positive('stanley_gain', 1.5),
             softening=positive('stanley_softening', .3),
             max_steer=math.radians(min(20., positive('stanley_max_steer_deg', 20.))),
-            max_rate=math.radians(positive('stanley_max_rate_deg_s', 60.)))
+            max_rate=math.radians(positive('stanley_max_rate_deg_s', 60.)),
+            wheelbase=positive('wheelbase', .36),
+            curvature_gain=nonnegative('stanley_curvature_ff', 1.))
+        self.compensate_latency = self.settings.get('vision_latency_compensation', True)
+        if not isinstance(self.compensate_latency, (bool, np.bool_)):
+            raise ValueError('vision_latency_compensation deve ser True ou False.')
         self.reset()
 
     def reset(self):
@@ -390,8 +419,8 @@ class RealStanleyFollower:
         self.line_memory = None
         self.line_seen_at = None
 
-    def _predict_line(self, errors, car):
-        """Avanca a ultima faixa vista por um passo de odometria.
+    def _predict_line(self, errors, car, dt=None):
+        """Avanca a faixa por dt segundos de odometria (padrao: um passo).
 
         Supoe a linha mantendo a curvatura medida; o eixo dianteiro anda na
         direcao das rodas (car.st) e a carroceria gira com car.w. O sinal do
@@ -402,10 +431,11 @@ class RealStanleyFollower:
         yaw_rate = self.steering_sign * float(getattr(car, 'w', 0.))
         steer = steer if math.isfinite(steer) and abs(steer) < math.pi / 2 else 0.
         yaw_rate = yaw_rate if math.isfinite(yaw_rate) else 0.
+        dt = car.dt if dt is None else dt
         front_speed = car.v / math.cos(steer)
         relative = heading - steer
-        return (lateral + front_speed * math.sin(relative) * car.dt,
-                heading + (curvature * front_speed * math.cos(relative) - yaw_rate) * car.dt,
+        return (lateral + front_speed * math.sin(relative) * dt,
+                heading + (curvature * front_speed * math.cos(relative) - yaw_rate) * dt,
                 curvature)
 
     def apply(self, car, observation, now, obstacle_detected=False):
@@ -435,6 +465,13 @@ class RealStanleyFollower:
         line_seen = errors is not None
         holding = False
         lost_for = float('nan')
+        compensated = 0.
+        if line_seen and self.compensate_latency and finite_sample and age > 0:
+            # Os erros sao do instante da captura; a 1,5 m/s o carro anda
+            # ~20 cm ate o comando. Leva a faixa ao instante atual, com teto
+            # para nao extrapolar a curvatura alem do trecho realmente visto.
+            compensated = min(age, MAX_LATENCY_COMPENSATION)
+            errors = self._predict_line(errors, car, compensated)
         if line_seen:
             self.line_memory, self.line_seen_at = errors, float(now)
         elif (self.line_memory is not None and finite_sample
@@ -462,7 +499,7 @@ class RealStanleyFollower:
                                and math.isfinite(stanley_speed))
             active = active and reference_valid
             if active:
-                steer = self.controller.update(lateral, heading, stanley_speed, car.dt)
+                steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature)
                 car.set_steer(self.steering_sign * steer)
                 # O setter revalida a serial antes de enviar a direcao.
                 active = bool(getattr(car, 'encoder_valid', True))
@@ -519,6 +556,8 @@ class RealStanleyFollower:
                 steer_filtered_rad=getattr(car, 'st_filtered', invalid),
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
+                stanley_feedforward_rad=self.controller.feedforward_term if active else invalid,
+                vision_compensated_s=compensated,
                 stanley_speed_m_s=float(stanley_speed) if active else invalid,
                 stanley_use_vref=int(self.use_vref),
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,
