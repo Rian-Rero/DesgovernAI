@@ -124,6 +124,31 @@ class YellowPathTests(unittest.TestCase):
             other = 460 if x == 180 else 180
             self.assertEqual(result.path_mask[350, other], 0)
 
+    def test_tracked_curve_is_kept_when_a_second_line_appears(self):
+        """Faixa seguida fechando para a esquerda e outra linha, reta, mais central."""
+        def frame(index, other=None):
+            image = np.full((480, 640, 3), 35, np.uint8)
+            ys = np.arange(240, 480)
+            xs = 300 - min(index, 10) * .00045 * (480 - ys) ** 2
+            cv2.polylines(image, [np.c_[xs, ys].astype(np.int32)], False, (0, 220, 240), 14)
+            if other is not None:
+                cv2.line(image, (other, 240), (other, 479), (0, 220, 240), 14)
+            return image, np.interp(np.arange(480), ys, xs)
+        settings = PathSettings(roi_top=50)
+        for other in (350, 400, 460):
+            with self.subTest(other=other):
+                detector = YellowPathDetector()
+                for index in range(16):
+                    image, xs = frame(index, other if index >= 3 else None)
+                    result = detector.process(image, settings, timestamp=index * .06)
+                    self.assertTrue(result.valid)
+                    rows = result.center[:, 1]
+                    self.assertLess(np.mean(np.abs(result.center[:, 0] - xs[rows])), 8, index)
+        # Sem faixa recente, a preferencia horizontal continua escolhendo a central.
+        image, _ = frame(10, 350)
+        result = YellowPathDetector().process(image, settings, timestamp=0.)
+        self.assertLess(abs(np.median(result.center[:, 0]) - 350), 8)
+
     def test_shadow_and_desaturated_segment_use_tolerant_color_support(self):
         frame = scene()
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)

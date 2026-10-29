@@ -70,6 +70,9 @@ parameters = {
     "line_loss_frames": 8,
     # Teto em segundos da mesma tolerancia, caso a visao pare de entregar quadros.
     "line_loss_tolerance": 1.0,
+    # Durante a perda, soma esterco para o lado da curva (ou da faixa) a esta
+    # taxa, ate o batente: ~18 graus apos 8 quadros. 0 so segue a trajetoria.
+    "line_search_rate_deg_s": 40.0,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # roi_top=50 descarta a metade de cima (alem de ~0,85 m com a calibracao

@@ -327,6 +327,53 @@ class RealFollowerTests(unittest.TestCase):
                          else lateral.LineObservation(timestamp=now))
             self.assertTrue(follower.apply(car,observation,now))
 
+    def lose_line_after(self,errors,settings=None,frames=6):
+        """Segue a faixa por 1 s e depois a perde por alguns quadros."""
+        car=fake_car();car.v=.7
+        follower=lateral.RealStanleyFollower(dict({'line_loss_frames':8},**(settings or {})))
+        for index in range(20):
+            now=10.+.05*index
+            follower.apply(car,lateral.LineObservation(timestamp=now,errors=errors),now)
+        searches=[]
+        for index in range(1,frames+1):
+            now+=.05
+            self.assertTrue(follower.apply(car,lateral.LineObservation(timestamp=now,reason='Buscando faixa'),now))
+            searches.append(car.log.call_args.kwargs['line_search_rad'])
+        return car,follower,searches
+
+    def test_lost_line_in_curve_steers_further_into_the_curve(self):
+        for curvature,side in ((.6,'esquerda'),(-.6,'direita')):
+            with self.subTest(curvature=curvature):
+                car,follower,searches=self.lose_line_after((0.,0.,curvature))
+                sign=math.copysign(1.,curvature)
+                # Busca cresce a cada quadro perdido, sempre para o lado da curva.
+                self.assertTrue(all(sign*b>sign*a>=0 for a,b in zip(searches,searches[1:])))
+                self.assertAlmostEqual(abs(searches[-1]),math.radians(40)*.3,places=6)
+                self.assertIn(f'procurando a {side}',follower.status)
+                held,_,_=self.lose_line_after((0.,0.,curvature),{'line_search_rate_deg_s':0})
+                self.assertGreater(sign*car.st,sign*held.st)
+        # A busca nunca passa do batente da direcao.
+        _,follower,searches=self.lose_line_after((0.,0.,.6),{'line_search_rate_deg_s':1000})
+        self.assertAlmostEqual(searches[-1],follower.controller.max_steer)
+
+    def test_lost_line_on_straight_searches_where_the_line_was_heading(self):
+        for errors,expected in (((0.,0.,0.),0.),((-.1,0.,0.),-1.),((0.,.2,0.),1.)):
+            with self.subTest(errors=errors):
+                _,follower,searches=self.lose_line_after(errors)
+                self.assertEqual(math.copysign(1.,searches[-1]) if searches[-1] else 0.,expected)
+                if not expected:
+                    self.assertNotIn('procurando',follower.status)
+
+    def test_search_stops_when_the_line_comes_back(self):
+        car,follower,searches=self.lose_line_after((0.,0.,.6),frames=3)
+        self.assertGreater(searches[-1],0.)
+        # Apos quadros sem deteccao, a faixa reencontrada e aceita mesmo longe da
+        # trajetoria prevista (a busca mudou o rumo do carro).
+        follower.apply(car,lateral.LineObservation(timestamp=11.5,errors=(0.,0.,.6)),11.5)
+        log=car.log.call_args.kwargs
+        self.assertEqual((log['line_valid'],log['line_outlier'],log['line_search_rad']),(1,0,0.))
+        self.assertIsNone(follower.search_direction)
+
     def test_time_cap_stops_if_vision_stops_delivering_frames(self):
         car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_frames':100,'vision_timeout':5.})
         follower.apply(car,self.valid_observation(),10.)

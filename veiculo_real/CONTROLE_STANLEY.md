@@ -67,7 +67,17 @@ acelerador e desacelera ~0.6 m/s^2 (ensaio de banguela). A 1.5 m/s isso exige
 Perdendo a faixa, o carro segue a ultima trajetoria vista por ate
 `line_loss_frames` quadros seguidos sem deteccao (padrao 8, ~0.4-0.5 s; mude
 com `--loss-frames N`) e so entao para. `line_loss_tolerance` (1.0 s) e o teto
-em tempo, caso a visao pare de entregar quadros. Quadros cuja orientacao salta
+em tempo, caso a visao pare de entregar quadros. Durante a perda o carro
+procura a faixa: em curva (|kappa| >= 0.25 1/m) soma esterco para o lado da
+curva; em reta, para o lado em que a faixa estaria 0.4 m a frente. O esterco
+extra cresce `line_search_rate_deg_s` (40 graus/s) ate o batente, e a
+velocidade e limitada pela curva assim comandada. Ao reencontrar a faixa depois
+de quadros sem deteccao, ela e aceita mesmo longe da trajetoria prevista.
+
+Com duas linhas amarelas na imagem, o detector fica com a que ja seguia:
+por ate 0.5 s apos a ultima deteccao, cada banda longe (> 5% da largura) da
+faixa anterior perde o premio da programacao dinamica, e a preferencia pelo
+centro (`path_anchor`) so vale quando nao ha faixa recente. Quadros cuja orientacao salta
 mais de 0.3 rad (ou o erro lateral mais de 8 cm) em relacao a trajetoria
 prevista sao descartados da mesma forma, no maximo 3 seguidos; o CSV marca
 `line_outlier`.

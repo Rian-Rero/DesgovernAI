@@ -269,16 +269,18 @@ class StanleyController:
         self.heading_term = 0.
         self.cross_track_term = 0.
         self.feedforward_term = 0.
+        self.search_term = 0.
         self.raw_steer = 0.
         self.target_steer = 0.
 
-    def update(self, cross_track, heading_error, speed, dt, curvature=0.):
+    def update(self, cross_track, heading_error, speed, dt, curvature=0., search=0.):
         """cross_track: linha a esquerda do eixo dianteiro (+), em metros.
 
         heading_error = direcao da linha - direcao do carro, em radianos.
         curvature: da linha, positiva para a esquerda, em 1/m.
+        search: esterco extra (rad) para reencontrar uma faixa perdida.
         """
-        if (not all(math.isfinite(x) for x in (cross_track, heading_error, speed, dt, curvature))
+        if (not all(math.isfinite(x) for x in (cross_track, heading_error, speed, dt, curvature, search))
                 or dt <= 0):
             raise ValueError('Stanley requer sinais finitos e dt positivo.')
         self.heading_term = math.atan2(math.sin(heading_error), math.cos(heading_error))
@@ -287,7 +289,9 @@ class StanleyController:
         # Esterco de regime da curva (bicicleta): sem ele o Stanley so vira
         # depois de acumular erro, tarde demais em velocidade alta.
         self.feedforward_term = math.atan(self.curvature_gain * self.wheelbase * curvature)
-        self.raw_steer = self.heading_term + self.cross_track_term + self.feedforward_term
+        self.search_term = search
+        self.raw_steer = (self.heading_term + self.cross_track_term + self.feedforward_term
+                          + self.search_term)
         self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
         self.steer += float(np.clip(self.target_steer - self.steer,
                                     -self.max_rate * dt, self.max_rate * dt))
@@ -378,6 +382,11 @@ MAX_LATENCY_COMPENSATION = .25  # s; idade tipica da imagem: 0,12 a 0,19 s
 MAX_HEADING_JUMP = .3  # rad
 MAX_LATERAL_JUMP = .08  # m
 MAX_REJECTED_FRAMES = 3
+# Decisao de busca ao perder a faixa: em curva (|kappa| acima disto) vira para
+# o lado da curva; em reta, para o lado em que a faixa estaria a frente.
+SEARCH_MIN_CURVATURE = .25  # 1/m, raio de 4 m
+SEARCH_LOOKAHEAD = .4  # m
+SEARCH_MIN_OFFSET = .03  # m; faixa centrada na reta: nao ha lado para buscar
 
 
 class RealStanleyFollower:
@@ -431,6 +440,8 @@ class RealStanleyFollower:
         self.speed_filter = nonnegative('speed_filter_s', .3)
         # Curva mais fechada que o batente da direcao nao e seguivel: e ruido.
         self.max_curvature = math.tan(self.controller.max_steer) / self.controller.wheelbase
+        # Esterco extra acumulado por segundo de faixa perdida; 0 desliga.
+        self.search_rate = math.radians(nonnegative('line_search_rate_deg_s', 40.))
         self.compensate_latency = self.settings.get('vision_latency_compensation', True)
         if not isinstance(self.compensate_latency, (bool, np.bool_)):
             raise ValueError('vision_latency_compensation deve ser True ou False.')
@@ -449,6 +460,8 @@ class RealStanleyFollower:
         self.rejected_frames = 0
         self.counted_at = None
         self.lost_frames = 0
+        self.missed_frames = 0  # quadros sem deteccao alguma (sem contar descartes)
+        self.search_direction = None
 
     def _filter_curvature(self, curvature, timestamp):
         """Passa-baixa por quadro novo (o mesmo quadro serve varios passos)."""
@@ -459,6 +472,16 @@ class RealStanleyFollower:
             self.curvature += weight * (curvature - self.curvature)
             self.curvature_at = timestamp
         return self.curvature
+
+    def _search_side(self, errors):
+        """+1 esquerda, -1 direita, 0 sem lado: decidido uma vez por perda."""
+        lateral, heading, curvature = errors
+        if self.curvature is not None:
+            curvature = self.curvature  # filtrada: um quadro ruidoso nao inverte o lado
+        if abs(curvature) >= SEARCH_MIN_CURVATURE:
+            return math.copysign(1., curvature)
+        ahead = lateral + SEARCH_LOOKAHEAD * math.sin(heading)
+        return math.copysign(1., ahead) if abs(ahead) > SEARCH_MIN_OFFSET else 0.
 
     def _filter_speed(self, target, dt):
         if self.speed_target is None or self.speed_filter <= 0:
@@ -523,7 +546,9 @@ class RealStanleyFollower:
             # Julga cada quadro uma vez, embora ele sirva a varios passos.
             self.frame_at = observation.timestamp
             elapsed = float(now) - self.line_seen_at if self.line_memory is not None else math.nan
-            jump = 0. <= elapsed <= self.loss_tolerance
+            # Reencontrando a faixa apos quadros sem deteccao (busca), a previsao
+            # ja nao e referencia confiavel: aceita a faixa que voltar.
+            jump = self.missed_frames == 0 and 0. <= elapsed <= self.loss_tolerance
             if jump:
                 expected = self._predict_line(self.line_memory, car, elapsed)
                 measured = errors[:2]
@@ -539,10 +564,11 @@ class RealStanleyFollower:
         # Conta cada quadro novo uma vez, embora ele sirva a varios passos.
         frame_time = getattr(observation, 'timestamp', None)
         if line_seen:
-            self.lost_frames = 0
+            self.lost_frames = self.missed_frames = 0
         elif (isinstance(frame_time, (int, float, np.number)) and math.isfinite(frame_time)
                 and frame_time != self.counted_at):
             self.lost_frames += 1
+            self.missed_frames += not outlier
         if observation is not None:
             self.counted_at = frame_time
         lost_frames = self.lost_frames  # reset() abaixo zera o contador
@@ -556,25 +582,39 @@ class RealStanleyFollower:
             errors = self._predict_line(errors, car, compensated)
         if line_seen:
             self.line_memory, self.line_seen_at = errors, float(now)
+            self.search_direction = None
         elif (self.line_memory is not None and finite_sample
                 and isinstance(now, (int, float, np.number)) and math.isfinite(now)):
             lost_for = float(now) - self.line_seen_at
             if 0 <= lost_for <= self.loss_tolerance and lost_frames <= self.loss_frames:
                 # Reflexo ou sujeira raramente apagam a faixa de verdade: segue a
                 # ultima trajetoria vista, por odometria, e so para se a perda durar.
+                if self.search_direction is None:
+                    self.search_direction = self._search_side(self.line_memory)
                 errors = self.line_memory = self._predict_line(self.line_memory, car)
                 holding = True
         active = (not car.emergencia and not obstacle_detected and finite_sample
                   and getattr(car, 'encoder_valid', True)
                   and not reverse_gear and not reverse_requested
                   and car.v >= -.05 and errors is not None)
+        search = 0.
         if active:
             lateral, heading, curvature = errors
+            if holding and self.search_direction:
+                # Perdeu a faixa numa curva para a esquerda: vira cada vez mais
+                # para a esquerda, onde ela provavelmente saiu da imagem.
+                search = self.search_direction * min(self.controller.max_steer,
+                                                     self.search_rate * lost_for)
             # Primeiro resolve a referencia deste passo (inclui curvas e RC).
             # Usar car.vref antes de set_vel leria a referencia anterior,
             # frequentemente zero no inicio ou apos uma perda de faixa.
             # Curvatura filtrada so no limite de velocidade (antes do 1o quadro: a atual).
             speed_curvature = curvature if self.curvature is None else self.curvature
+            if search:
+                # Buscando com mais esterco, limita a velocidade pela curva feita.
+                searched = math.tan(abs(self.controller.steer) + abs(search)) / self.controller.wheelbase
+                speed_curvature = math.copysign(max(abs(speed_curvature), min(searched, self.max_curvature)),
+                                                search)
             speed_raw = curve_speed(self.reference, speed_curvature, lateral, heading,
                                     min_speed=self.min_speed, lateral_accel=self.lateral_accel)
             car.set_vel(self._filter_speed(speed_raw, car.dt))
@@ -584,7 +624,7 @@ class RealStanleyFollower:
                                and math.isfinite(stanley_speed))
             active = active and reference_valid
             if active:
-                steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature)
+                steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature, search)
                 car.set_steer(self.steering_sign * steer)
                 # O setter revalida a serial antes de enviar a direcao.
                 active = bool(getattr(car, 'encoder_valid', True))
@@ -598,8 +638,10 @@ class RealStanleyFollower:
         if active and holding and outlier:
             self.status = 'Quadro com salto impossivel descartado; seguindo ultima trajetoria'
         elif active and holding:
+            side = {1.: '; procurando a esquerda', -1.: '; procurando a direita'}.get(
+                math.copysign(1., search) if search else 0., '')
             self.status = (f'Faixa perdida ha {lost_frames} quadro(s) ({lost_for:.2f} s);'
-                           f' seguindo ultima trajetoria (limite {self.loss_frames} quadros)')
+                           f' seguindo ultima trajetoria{side} (limite {self.loss_frames} quadros)')
         elif active:
             self.status = 'Faixa valida; controle liberado'
         elif obstacle_detected:
@@ -647,6 +689,7 @@ class RealStanleyFollower:
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
                 stanley_feedforward_rad=self.controller.feedforward_term if active else invalid,
+                line_search_rad=search,
                 vision_compensated_s=compensated,
                 curvature_raw_m_inv=curvature_raw, curve_speed_raw_m_s=speed_raw,
                 curvature_filtered_m_inv=invalid if self.curvature is None else self.curvature,

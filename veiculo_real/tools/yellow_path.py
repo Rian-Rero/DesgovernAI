@@ -12,6 +12,11 @@ import time
 import cv2
 import numpy as np
 
+# Com uma faixa acompanhada ha menos disto, as outras linhas amarelas viram
+# distracao: em curva a faixa seguida escorrega para o lado e uma vizinha mais
+# central venceria pela preferencia horizontal (anchor).
+TRACK_SECONDS = .5
+
 
 @dataclass
 class PathSettings:
@@ -53,6 +58,7 @@ class YellowPathDetector:
     def reset(self, anchor=None):
         self.previous = None
         self.previous_time = -float("inf")
+        self.previous_rows = None  # (y min, y max) da faixa anterior
         if anchor is not None:
             self.anchor = float(np.clip(anchor, 0, 1))
 
@@ -129,7 +135,9 @@ class YellowPathDetector:
         short_limit = settings.max_gap * height / 480 + step
         gap_limit = max(short_limit, settings.dash_gap * height / 480 + step) if settings.dashed else short_limit
         seed_y = height * (settings.roi_top / 100 + .55 * (1 - settings.roi_top / 100))
-        recent = self.previous is not None and now - self.previous_time < .25
+        tracking = self.previous is not None and now - self.previous_time < TRACK_SECONDS
+        # Desvio a partir do qual a banda deixa de valer como a mesma faixa.
+        track_tolerance = max(6., width * .05)
         reach = max(12., width * .025)
         total = sum(len(candidates) for candidates in rows)
         # Colunas: x, y, largura, evidencia, score, inclinacao, y da raiz.
@@ -160,15 +168,19 @@ class YellowPathDetector:
             while first_active < count and nodes[first_active, 1] - y > gap_limit:
                 first_active += 1
             rewards = step * (.35 + .65 * np.minimum(1., evidence * 2))
+            tracked_row = (tracking and self.previous_rows[0] - 2 * step <= y
+                           <= self.previous_rows[1] + 2 * step)
+            if tracked_row:
+                # Custo em toda banda (nao so na semente): longe da faixa
+                # anterior a banda perde todo o premio, e uma linha vizinha
+                # mais longa nao vence a que ja estava sendo seguida.
+                expected = np.polyval(self.previous, y / height)
+                rewards = rewards - step * np.minimum(1., np.abs(xs - expected) / track_tolerance)
             best_scores = np.full(len(points), -np.inf)
             best_parents = np.full(len(points), -1, np.int32)
             best_slopes = np.zeros(len(points))
             if y >= seed_y:
-                penalties = 45 * np.abs(xs / width - self.anchor)
-                if recent:
-                    expected = np.polyval(self.previous, y / height)
-                    penalties = penalties + np.minimum(25., np.abs(xs - expected) * .15)
-                best_scores = rewards - penalties
+                best_scores = rewards if tracked_row else rewards - 45 * np.abs(xs / width - self.anchor)
             if first_active < count:
                 active = slice(first_active, count)
                 parent_x, parent_y, parent_w, _, parent_score, parent_slope, _ = nodes[active].T
@@ -351,6 +363,7 @@ class YellowPathDetector:
         if cv2.countNonZero(result.dash_mask):
             result.status = "Faixa pontilhada: conexoes em azul"
         self.previous, self.previous_time = coefficients, now
+        self.previous_rows = (float(ys[0]), float(ys[-1]))
         return result
 
 
