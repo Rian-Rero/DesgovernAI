@@ -65,7 +65,9 @@ acelerador e desacelera ~0.6 m/s^2 (ensaio de banguela). A 1.5 m/s isso exige
 `roi_top=50` (~0.85 m); curvas fechadas em velocidade alta dependem da direcao.
 
 Perdendo a faixa, o carro segue a ultima trajetoria vista por ate
-`line_loss_tolerance` (0.5 s) e so entao para. Quadros cuja orientacao salta
+`line_loss_frames` quadros seguidos sem deteccao (padrao 8, ~0.4-0.5 s; mude
+com `--loss-frames N`) e so entao para. `line_loss_tolerance` (1.0 s) e o teto
+em tempo, caso a visao pare de entregar quadros. Quadros cuja orientacao salta
 mais de 0.3 rad (ou o erro lateral mais de 8 cm) em relacao a trajetoria
 prevista sao descartados da mesma forma, no maximo 3 seguidos; o CSV marca
 `line_outlier`.

@@ -250,6 +250,14 @@ class MissionTests(unittest.TestCase):
                                     display=False)
         self.assertEqual(mission.parameters['steering_sign'], 1.)
 
+    def test_cli_sets_line_loss_frames(self):
+        with patch.object(sys, 'argv', ['main.py', '--loss-frames', '12']), \
+                patch.object(mission, 'run_mission') as run:
+            mission.main()
+        run.assert_called_once_with({'velocity_reference': mission.MAIN_VEL, 'line_loss_frames': 12},
+                                    display=False)
+        self.assertEqual(mission.parameters['line_loss_frames'], 8)
+
     def test_cli_fast_preset_selects_fast_speed_and_conflicts_with_speed(self):
         with patch.object(sys, 'argv', ['main.py', '--fast']), \
                 patch.object(mission, 'run_mission') as run:

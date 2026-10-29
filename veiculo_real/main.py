@@ -65,8 +65,11 @@ parameters = {
     "curve_lateral_accel": 0.4,
     "vision_timeout": 1.0,  # segundos desde o inicio da captura
     # Perdendo a faixa, segue a ultima trajetoria vista (odometria) por ate
-    # este tempo antes de parar; 0 volta a parar no primeiro quadro sem faixa.
-    "line_loss_tolerance": 0.5,
+    # este numero de quadros seguidos sem deteccao (~16-20 quadros/s) antes de
+    # parar; 0 volta a parar no primeiro quadro sem faixa.
+    "line_loss_frames": 8,
+    # Teto em segundos da mesma tolerancia, caso a visao pare de entregar quadros.
+    "line_loss_tolerance": 1.0,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # roi_top=50 descarta a metade de cima (alem de ~0,85 m com a calibracao
@@ -520,6 +523,12 @@ def main():
         help="Amostras do filtro da direcao: padrao 3; 1 desativa a media movel",
     )
     parser.add_argument(
+        "--loss-frames",
+        type=int,
+        metavar="N",
+        help="Quadros seguidos sem faixa em que segue a ultima trajetoria (padrao 8)",
+    )
+    parser.add_argument(
         "--stream",
         type=int,
         nargs="?",
@@ -540,6 +549,8 @@ def main():
         settings["steering_filter_size"] = args.steering_filter
     if args.stream is not None:
         settings["stream_port"] = args.stream
+    if args.loss_frames is not None:
+        settings["line_loss_frames"] = args.loss_frames
     if args.imu_telemetry:
         settings["imu_telemetry"] = True
     if args.encoder_protocol:

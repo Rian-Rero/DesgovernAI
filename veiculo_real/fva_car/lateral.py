@@ -397,7 +397,15 @@ class RealStanleyFollower:
                 raise ValueError(f'{name} deve ser finito e nao negativo (0 desativa).')
             return float(value)
         self.timeout = positive('vision_timeout', .3)
-        self.loss_tolerance = nonnegative('line_loss_tolerance', .5)
+        # Perdendo a faixa, segue a ultima trajetoria por ate line_loss_frames
+        # quadros seguidos sem deteccao. line_loss_tolerance e o teto em
+        # segundos para o caso de a visao parar de entregar quadros.
+        self.loss_frames = self.settings.get('line_loss_frames', 8)
+        if (isinstance(self.loss_frames, (bool, np.bool_))
+                or not isinstance(self.loss_frames, (int, np.integer)) or self.loss_frames < 0):
+            raise ValueError('line_loss_frames deve ser inteiro nao negativo (0 desativa).')
+        self.loss_frames = int(self.loss_frames)
+        self.loss_tolerance = nonnegative('line_loss_tolerance', 1.)
         self.reference = positive('velocity_reference', .5)
         self.min_speed = positive('curve_min_speed', .3)
         self.lateral_accel = positive('curve_lateral_accel', .4)
@@ -439,6 +447,8 @@ class RealStanleyFollower:
         self.frame_at = None
         self.frame_rejected = False
         self.rejected_frames = 0
+        self.counted_at = None
+        self.lost_frames = 0
 
     def _filter_curvature(self, curvature, timestamp):
         """Passa-baixa por quadro novo (o mesmo quadro serve varios passos)."""
@@ -478,7 +488,7 @@ class RealStanleyFollower:
 
     def apply(self, car, observation, now, obstacle_detected=False):
         """Retorna True quando uma observacao atual, ou a faixa vista ha no maximo
-        line_loss_tolerance segundos, autoriza seguir."""
+        line_loss_frames quadros (e line_loss_tolerance segundos), autoriza seguir."""
         age = float('nan')
         errors = None
         stanley_speed = float('nan')
@@ -526,6 +536,16 @@ class RealStanleyFollower:
         outlier = line_seen and self.frame_rejected
         if outlier:
             line_seen, errors = False, None
+        # Conta cada quadro novo uma vez, embora ele sirva a varios passos.
+        frame_time = getattr(observation, 'timestamp', None)
+        if line_seen:
+            self.lost_frames = 0
+        elif (isinstance(frame_time, (int, float, np.number)) and math.isfinite(frame_time)
+                and frame_time != self.counted_at):
+            self.lost_frames += 1
+        if observation is not None:
+            self.counted_at = frame_time
+        lost_frames = self.lost_frames  # reset() abaixo zera o contador
         if line_seen:
             self._filter_curvature(errors[2], float(observation.timestamp))
         if line_seen and self.compensate_latency and finite_sample and age > 0:
@@ -539,7 +559,7 @@ class RealStanleyFollower:
         elif (self.line_memory is not None and finite_sample
                 and isinstance(now, (int, float, np.number)) and math.isfinite(now)):
             lost_for = float(now) - self.line_seen_at
-            if 0 <= lost_for <= self.loss_tolerance:
+            if 0 <= lost_for <= self.loss_tolerance and lost_frames <= self.loss_frames:
                 # Reflexo ou sujeira raramente apagam a faixa de verdade: segue a
                 # ultima trajetoria vista, por odometria, e so para se a perda durar.
                 errors = self.line_memory = self._predict_line(self.line_memory, car)
@@ -578,8 +598,8 @@ class RealStanleyFollower:
         if active and holding and outlier:
             self.status = 'Quadro com salto impossivel descartado; seguindo ultima trajetoria'
         elif active and holding:
-            self.status = (f'Faixa perdida ha {lost_for:.2f} s; seguindo ultima trajetoria'
-                           f' (limite {self.loss_tolerance:.2f} s)')
+            self.status = (f'Faixa perdida ha {lost_frames} quadro(s) ({lost_for:.2f} s);'
+                           f' seguindo ultima trajetoria (limite {self.loss_frames} quadros)')
         elif active:
             self.status = 'Faixa valida; controle liberado'
         elif obstacle_detected:
@@ -602,7 +622,9 @@ class RealStanleyFollower:
             self.status = f'Imagem atrasada: {age:.3f} s; limite {self.timeout:.3f} s'
         else:
             self.status = getattr(observation, 'reason', '') or 'Faixa sem erros metricos validos'
-            if lost_for > self.loss_tolerance:
+            if math.isfinite(lost_for) and lost_frames > self.loss_frames:
+                self.status = f'Faixa perdida por mais de {self.loss_frames} quadros: {self.status}'
+            elif lost_for > self.loss_tolerance:
                 self.status = f'Faixa perdida por mais de {self.loss_tolerance:.2f} s: {self.status}'
         invalid = float('nan')
         lateral, heading, curvature = errors if errors is not None else (invalid, invalid, invalid)
@@ -610,7 +632,7 @@ class RealStanleyFollower:
         # cross_track/heading registram a trajetoria prevista usada no controle.
         car.log(line_valid=int(line_seen), lateral_active=int(active),
                 line_hold=int(holding and active), line_lost_s=lost_for,
-                line_outlier=int(outlier),
+                line_outlier=int(outlier), line_lost_frames=lost_frames,
                 vision_frame_id=getattr(observation, 'sequence', 0),
                 line_color_support=getattr(observation, 'color_support', invalid) if line_seen else invalid,
                 line_dash_fraction=getattr(observation, 'dash_fraction', invalid) if line_seen else invalid,

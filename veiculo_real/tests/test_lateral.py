@@ -280,33 +280,62 @@ class RealFollowerTests(unittest.TestCase):
     def test_resume_after_loss_restarts_the_rate_limiter_from_neutral(self):
         car=fake_car();follower=lateral.RealStanleyFollower({})
         for _ in range(20):follower.apply(car,self.valid_observation(),10.)
-        follower.apply(car,None,10.6)
+        follower.apply(car,None,11.1)  # alem do teto de 1 s
         self.assertEqual(car.st,0.)
-        follower.apply(car,self.valid_observation(-.15,timestamp=10.6),10.6)
+        follower.apply(car,self.valid_observation(-.15,timestamp=11.1),11.1)
         self.assertLess(car.st,0.)
         self.assertLessEqual(abs(car.st),math.radians(60)*car.dt+1e-12)
 
     def test_brief_line_loss_keeps_following_last_trajectory(self):
-        car=fake_car();follower=lateral.RealStanleyFollower({})
+        car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_frames':3})
         for _ in range(20):follower.apply(car,self.valid_observation(),10.)
         steer,vref=car.st,car.vref
-        lost=lateral.LineObservation(timestamp=10.3,reason='Buscando faixa')
-        self.assertTrue(follower.apply(car,lost,10.3))
-        self.assertIn('Faixa perdida ha 0.30 s',follower.status)
+        lost=lateral.LineObservation(timestamp=10.05,reason='Buscando faixa')
+        self.assertTrue(follower.apply(car,lost,10.05))
+        self.assertIn('Faixa perdida ha 1 quadro(s) (0.05 s)',follower.status)
+        self.assertIn('limite 3 quadros',follower.status)
         self.assertGreater(car.vref,0.)
         self.assertAlmostEqual(car.vref,vref,delta=.05)
         self.assertGreater(car.st,0.)
         self.assertAlmostEqual(car.st,steer,delta=math.radians(60)*car.dt+1e-9)
         log=car.log.call_args.kwargs
         self.assertEqual((log['line_valid'],log['line_hold'],log['lateral_active']),(0,1,1))
-        self.assertAlmostEqual(log['line_lost_s'],.3)
-        # Passada a tolerancia, a perda e tratada como real e o carro para.
+        self.assertEqual(log['line_lost_frames'],1)
+        self.assertAlmostEqual(log['line_lost_s'],.05)
+        # O mesmo quadro reaproveitado em varios passos de controle conta uma vez.
+        self.assertTrue(follower.apply(car,lost,10.07))
+        self.assertEqual(car.log.call_args.kwargs['line_lost_frames'],1)
+        # Ate o limite de quadros seguidos sem deteccao, continua na trajetoria.
+        for index in (2,3):
+            now=10.+.05*index
+            self.assertTrue(follower.apply(car,lateral.LineObservation(timestamp=now,reason='Buscando faixa'),now))
+        self.assertEqual(car.log.call_args.kwargs['line_lost_frames'],3)
+        # O quadro seguinte sem faixa excede o limite e o carro para.
         car.set_vel.reset_mock()
-        self.assertFalse(follower.apply(car,lost,10.51))
+        self.assertFalse(follower.apply(car,lateral.LineObservation(timestamp=10.2,reason='Buscando faixa'),10.2))
         self.assert_neutral(car)
-        self.assertIn('Faixa perdida por mais de 0.50 s: Buscando faixa',follower.status)
+        self.assertIn('Faixa perdida por mais de 3 quadros: Buscando faixa',follower.status)
         # A memoria e esquecida: uma nova perda curta nao reutiliza a faixa antiga.
-        self.assertFalse(follower.apply(car,lost,10.52))
+        self.assertFalse(follower.apply(car,lateral.LineObservation(timestamp=10.25),10.25))
+
+    def test_detection_resets_lost_frame_count(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_frames':2})
+        now=10.
+        for seen in (True,False,False,True,False,False,True):
+            now+=.05
+            observation=(self.valid_observation(timestamp=now) if seen
+                         else lateral.LineObservation(timestamp=now))
+            self.assertTrue(follower.apply(car,observation,now))
+
+    def test_time_cap_stops_if_vision_stops_delivering_frames(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_frames':100,'vision_timeout':5.})
+        follower.apply(car,self.valid_observation(),10.)
+        lost=lateral.LineObservation(timestamp=10.05)
+        self.assertTrue(follower.apply(car,lost,10.9))
+        car.set_vel.reset_mock()
+        self.assertFalse(follower.apply(car,lost,11.01))
+        self.assert_neutral(car)
+        self.assertIn('Faixa perdida por mais de 1.00 s',follower.status)
 
     def test_prediction_moves_last_line_with_vehicle_motion(self):
         follower=lateral.RealStanleyFollower({})
@@ -439,6 +468,12 @@ class RealFollowerTests(unittest.TestCase):
         for value in (-.1,float('nan'),True,'0.5'):
             with self.subTest(value=value),self.assertRaises(ValueError):
                 lateral.RealStanleyFollower({'line_loss_tolerance':value})
+        car=fake_car();follower=lateral.RealStanleyFollower({'line_loss_frames':0})
+        follower.apply(car,self.valid_observation(),10.)
+        self.assertFalse(follower.apply(car,lateral.LineObservation(timestamp=10.02),10.02))
+        for value in (-1,1.5,True,'8'):
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                lateral.RealStanleyFollower({'line_loss_frames':value})
 
     def test_safety_stops_are_not_bridged_by_line_memory(self):
         car=fake_car();follower=lateral.RealStanleyFollower({})
