@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from fva_car import Car
 from fva_car.speed_controller import CONTROL_SAMPLE_TIME
 from fva_car.lateral import YellowLineFollower
+from fva_car.cones import ConeCenterFollower
 
 VELOCITY_REFERENCE = 1.5  # m/s
 DISPLAY_RATE = 10.0  # Hz
@@ -22,6 +23,7 @@ TELEMETRY_RESOLUTION = (2304, 1344)  # pixels
 TELEMETRY_DPI = 100
 parameters = {
     "ts": 120.0,
+    "navigation_mode": "cones",  # geometria dos cones na cena; "line" segue pintura
     "save": True,
     "logfile": "logs/",
     "beep": True,
@@ -45,7 +47,11 @@ parameters = {
 
 def control_func(car):
     if not hasattr(car, 'line_follower'):
-        car.line_follower = YellowLineFollower(car)
+        mode = car.parameters.get("navigation_mode", "cones")
+        followers = {"cones": ConeCenterFollower, "line": YellowLineFollower}
+        if mode not in followers:
+            raise ValueError("navigation_mode deve ser cones ou line")
+        car.line_follower = followers[mode](car)
     car.line_follower(car)
 
 
@@ -80,7 +86,7 @@ class TelemetryPlot:
         self.lateral_axis.set(
             xlabel="Tempo de simulacao (s)", ylabel="Erro lateral (m)",
             xlim=(0, duration), ylim=(-0.5, 0.5),
-            title="Erros do Stanley (+ linha a esquerda)",
+            title="Erros do Stanley (+ centro a esquerda)",
         )
         self.heading_axis.set(ylabel="Erro de orientacao (graus)", ylim=(-10, 10))
         self.heading_axis.tick_params(axis="y", colors="tab:orange", labelsize=12)
@@ -173,9 +179,11 @@ class TelemetryPlot:
                               for state in trajectory])
         self.title.set_text(
             f"t = {car.t:.2f} s | ritmo = {car.t/max(elapsed, 1e-9):.2f}x"
-            + (f" | linha: {'OK' if car.traj[-1].get('line_valid') else 'PERDIDA - PARANDO'}"
+            + (f" | referencia: {'OK' if car.traj[-1].get('line_valid') else 'PERDIDA - PARANDO'}"
                f" | erro = {car.traj[-1].get('cross_track_m', float('nan')):.3f} m"
                if 'line_valid' in car.traj[-1] else '')
+            + (f" | largura = {car.traj[-1]['corridor_width_m']:.2f} m"
+               if 'corridor_width_m' in car.traj[-1] else '')
         )
         self.figure.canvas.draw_idle()
         self.figure.canvas.flush_events()
