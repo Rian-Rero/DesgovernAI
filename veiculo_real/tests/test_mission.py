@@ -87,6 +87,22 @@ class MissionTests(unittest.TestCase):
             mission.run_mission(self.settings if settings is None else settings,
                                 car_factory=lambda _:self.car,clock=lambda:10.)
 
+    def test_cone_mode_selects_camera_detector_and_disables_blind_search(self):
+        detector = Mock()
+        captured = {}
+        real_follower = mission.RealStanleyFollower
+        def follower(settings):
+            captured.update(settings)
+            return real_follower(settings)
+        with patch.object(mission, 'RealConeDetector', return_value=detector) as factory, \
+                patch.object(mission, 'RealStanleyFollower', side_effect=follower):
+            self.run_fake(dict(self.settings, navigation_mode='cones', save=False))
+        factory.assert_called_once()
+        self.assertEqual(captured['line_loss_frames'], 0)
+        self.assertEqual(captured['line_loss_tolerance'], 0.)
+        self.assertEqual(captured['line_search_rate_deg_s'], 0.)
+        self.car.close.assert_called_once()
+
     def test_stream_publishes_each_step_and_is_closed_with_the_mission(self):
         from fva_car import stream as stream_module
         stream = Mock(port=8080)

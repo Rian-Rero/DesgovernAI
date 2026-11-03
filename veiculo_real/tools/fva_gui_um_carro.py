@@ -39,7 +39,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 SSH_USER = "alunos"
 DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp123"
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
-SPEED_PRESETS = ("0.7", "1.5")  # m/s; mesmos MAIN_VEL e FAST_VEL de main.py
+SPEED_PRESETS = ("0.7", "1.0", "1.5")  # m/s; mesmos MAIN_VEL e FAST_VEL de main.py
 STREAM_PORT = 8080  # main.py --stream
 
 
@@ -449,8 +449,8 @@ class RsyncGUI(tk.Tk):
 
         self.cmd_text.insert(
             "end",
-            f"python3 -u main.py --vision-width 320 --steering-filter 3"
-            f" --speed {SPEED_PRESETS[0]} --stream\n",
+            f"python3 -u main.py --navigation cones --vision-width 320 --steering-filter 3"
+            f" --speed {SPEED_PRESETS[0]} --stream {STREAM_PORT}\n",
         )
         self.cmd_text.pack(fill="x", pady=4)
 

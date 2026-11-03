@@ -32,6 +32,7 @@ class LineObservation:
     path_result: PathResult | None = None
     processing_size: tuple | None = None
     sequence: int = 0
+    reference_source: str = "line"
 
     @property
     def valid(self):

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stanley no veiculo real, com a percepcao HSV de tools/yellow_path.py."""
+"""Stanley no veiculo real: linha amarela ou centro de cones pela camera."""
 
 import argparse
 from dataclasses import replace
@@ -14,6 +14,7 @@ import time
 import numpy as np
 import cv2
 
+from fva_car.cones import RealConeDetector, PriorityNavigationDetector
 from fva_car.lateral import (
     GroundCalibration,
     LineObservation,
@@ -31,6 +32,8 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 
 parameters = {
     "ts": 30.0,
+    "navigation_mode": "line",  # --navigation cones ativa o corredor pela camera
+    "cone_settings": {},  # cores HSV OpenCV e limites metricos; ver README_cones.md
     "save": True,
     "logfile": "logs/",
     "camera": True,
@@ -221,6 +224,8 @@ def save_vision_snapshot(car, observation, status, now):
 def stream_text(car, status, observation):
     """Legenda do quadro transmitido: o que o controle decidiu neste passo."""
     lines = [status[:48]]
+    if observation is not None:
+        lines.append("Referencia: " + ("cones" if observation.reference_source == "cones" else "linha amarela"))
     if observation is not None and observation.valid:
         lateral, heading, curvature = observation.errors
         lines.append(f"e={lateral:+.3f}m psi={np.degrees(heading):+.1f} k={curvature:+.2f}")
@@ -260,13 +265,32 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         raise ValueError("steering_filter_size deve ser inteiro positivo.")
     # Valida geometria e ajustes antes de abrir sensores ou atuar nos motores.
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
-    detector = RealLineDetector(
-        calibration,
-        path_settings=config.get("path_settings", {}),
-        anchor=config.get("path_anchor", 0.5),
-        render_preview=False,
-        processing_width=config.get("vision_width", 0),
-    )
+    mode = config.get("navigation_mode", "line")
+    if mode == "cones":
+        detector = RealConeDetector(
+            calibration, settings=config.get("cone_settings"), render_preview=False,
+            processing_width=config.get("vision_width", 0),
+        )
+        detector = PriorityNavigationDetector(detector, RealLineDetector(
+            calibration, path_settings=config.get("path_settings", {}),
+            anchor=config.get("path_anchor", .5), render_preview=False,
+            processing_width=config.get("vision_width", 0),
+        ))
+        # A busca da linha pode aumentar o esterco sem observacao. No corredor
+        # de cones, perder as duas referencias neutraliza no primeiro quadro.
+        config["line_loss_frames"] = 0
+        config["line_loss_tolerance"] = 0.
+        config["line_search_rate_deg_s"] = 0.
+    elif mode == "line":
+        detector = RealLineDetector(
+            calibration,
+            path_settings=config.get("path_settings", {}),
+            anchor=config.get("path_anchor", 0.5),
+            render_preview=False,
+            processing_width=config.get("vision_width", 0),
+        )
+    else:
+        raise ValueError("navigation_mode deve ser line ou cones")
     follower = RealStanleyFollower(config)
     stream = None
     if config.get("stream_port"):
@@ -296,10 +320,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     observation = None
     control_status = "Missao ainda nao iniciada"
     last_control_at = None
+    last_reference_source = None
     try:
         car.start_mission()
         print(
-            f"Stanley HSV | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s",
+            f"Stanley {mode} | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s",
             flush=True,
         )
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
@@ -377,6 +402,14 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                     flush=True,
                 )
             observation = vision_data["observation"]
+            if mode == "cones" and observation is not None and observation.valid:
+                source = observation.reference_source
+                if source != last_reference_source:
+                    # Memoria e rejeicao de saltos pertencem a uma referencia.
+                    # Nao comparar o centro dos cones com a antiga linha amarela.
+                    follower.reset()
+                    last_reference_source = source
+
             manual = (
                 getattr(car, "sel_direcao", 1) == 0
                 and getattr(car, "sel_tracao", 1) == 0
@@ -402,6 +435,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                     car, observation, clock(), obstacle_detected=obstacle_detected
                 )
                 control_status = follower.status
+            if mode == "cones" and observation is not None:
+                car.log(navigation_cones=int(observation.reference_source == "cones"),
+                        cone_red_count=len(getattr(observation, "red_pixels", ())),
+                        cone_green_count=len(getattr(observation, "green_pixels", ())),
+                        corridor_width_m=getattr(observation, "corridor_width_m", float("nan")))
             car.log(
                 obstacle_stop=int(obstacle_detected),
                 distance_m=dist,
@@ -544,8 +582,12 @@ def main():
         action="store_true",
         help="Reativar leituras extras da IMU no CSV",
     )
+    parser.add_argument("--navigation", choices=("line", "cones"),
+                        help="line: linha amarela; cones: prioriza cones, senao segue a linha amarela")
     args = parser.parse_args()
     settings = {"velocity_reference": args.speed}
+    if args.navigation is not None:
+        settings["navigation_mode"] = args.navigation
     if args.vision_width is not None:
         settings["vision_width"] = args.vision_width
     if args.steering_filter is not None:
