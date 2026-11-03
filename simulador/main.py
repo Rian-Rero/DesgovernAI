@@ -6,6 +6,7 @@
 # DELT – Escola de Engenharia
 # Universidade Federal de Minas Gerais
 ########################################
+import argparse
 import os
 import math
 import time
@@ -14,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 import matplotlib.pyplot as plt
 from fva_car import Car
 from fva_car.speed_controller import CONTROL_SAMPLE_TIME
-from fva_car.lateral import YellowLineFollower
+from fva_car.path_follower import HierarchicalPathFollower
 
 VELOCITY_REFERENCE = 1.5  # m/s
 DISPLAY_RATE = 10.0  # Hz
@@ -37,6 +38,7 @@ parameters = {
     "curve_lateral_accel": 0.6,  # m/s^2: limite nominal v^2*|curvatura|
     "steering_sign": -1.0,  # juntas positivas da cena Car viram para a direita
     "line_ground_z": 0.005,  # altura da pintura da pista no mundo, em metros
+    "cone_ground_z": 0.005,  # plano de contato das bases dos cones
     # Segmentacao amarela em HSV: H em graus (0..360), S/V entre 0 e 1.
     "yellow_hsv_lower": (40.0, 0.4, 0.2),
     "yellow_hsv_upper": (75.0, 1.0, 1.0),
@@ -44,9 +46,14 @@ parameters = {
 
 
 def control_func(car):
-    if not hasattr(car, 'line_follower'):
-        car.line_follower = YellowLineFollower(car)
-    car.line_follower(car)
+    if not hasattr(car, 'path_follower'):
+        car.path_follower = HierarchicalPathFollower(car)
+    previous_source = getattr(car, 'path_source', None)
+    car.path_follower(car)
+    if car.path_source != previous_source:
+        labels = {"cones": "cones", "yellow": "linha amarela", "none": "sem referencia; freando"}
+        print(f"t = {car.t:.2f} s | referencia: {labels[car.path_source]}"
+              f" | {car.path_reason}", flush=True)
 
 
 def vision_func(car):
@@ -80,7 +87,7 @@ class TelemetryPlot:
         self.lateral_axis.set(
             xlabel="Tempo de simulacao (s)", ylabel="Erro lateral (m)",
             xlim=(0, duration), ylim=(-0.5, 0.5),
-            title="Erros do Stanley (+ linha a esquerda)",
+            title="Erros do Stanley (+ trajetoria a esquerda)",
         )
         self.heading_axis.set(ylabel="Erro de orientacao (graus)", ylim=(-10, 10))
         self.heading_axis.tick_params(axis="y", colors="tab:orange", labelsize=12)
@@ -148,16 +155,16 @@ class TelemetryPlot:
         stride = max(1, len(car.traj) // 2000)
         trajectory = car.traj[::stride]
         t = [state["t"] for state in trajectory]
-        # NaN interrompe a curva quando a linha nao foi detectada.
+        # NaN interrompe a curva quando nenhuma referencia foi detectada.
         errors = [state.get("cross_track_m", float("nan"))
-                  if state.get("line_valid") == 1 else float("nan")
+                  if state.get("path_valid", state.get("line_valid")) == 1 else float("nan")
                   for state in trajectory]
         self.lateral_error.set_data(t, errors)
         finite = [abs(error) for error in errors if math.isfinite(error)]
         limit = max(0.5, 1.15 * max(finite, default=0.0))
         self.lateral_axis.set_ylim(-limit, limit)
         headings = [math.degrees(state.get("heading_error_rad", float("nan")))
-                    if state.get("line_valid") == 1 else float("nan")
+                    if state.get("path_valid", state.get("line_valid")) == 1 else float("nan")
                     for state in trajectory]
         self.heading_error.set_data(t, headings)
         finite_headings = [abs(error) for error in headings if math.isfinite(error)]
@@ -171,11 +178,15 @@ class TelemetryPlot:
                              (self.steering_right, "steer_right_rad")):
             line.set_data(t, [math.degrees(state.get(column, float("nan")))
                               for state in trajectory])
+        state = car.traj[-1]
+        source = {2: "CONES", 1: "LINHA AMARELA", 0: "SEM REFERENCIA - PARANDO"}
+        label = source.get(state.get("path_source"), "")
         self.title.set_text(
             f"t = {car.t:.2f} s | ritmo = {car.t/max(elapsed, 1e-9):.2f}x"
-            + (f" | linha: {'OK' if car.traj[-1].get('line_valid') else 'PERDIDA - PARANDO'}"
-               f" | erro = {car.traj[-1].get('cross_track_m', float('nan')):.3f} m"
-               if 'line_valid' in car.traj[-1] else '')
+            + (f" | {label} | erro = {state.get('cross_track_m', float('nan')):.3f} m"
+               f" | vermelho = {state.get('red_lateral_m', float('nan')):+.2f} m"
+               f" | verde = {state.get('green_lateral_m', float('nan')):+.2f} m"
+               if label else '')
         )
         self.figure.canvas.draw_idle()
         self.figure.canvas.flush_events()
@@ -215,5 +226,31 @@ def run_mission(settings=None, display=True, control=None):
             car.close()
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description="Segue o centro dos cones; usa a linha amarela como alternativa."
+    )
+    parser.add_argument("--duration", type=float, default=parameters["ts"],
+                        help="Duracao da missao em segundos de simulacao")
+    parser.add_argument("--speed", type=float, default=VELOCITY_REFERENCE,
+                        help="Velocidade maxima de referencia em m/s")
+    parser.add_argument("--port", type=int, default=23000,
+                        help="Porta da API do CoppeliaSim")
+    parser.add_argument("--host", default="127.0.0.1", help="Endereco da API do CoppeliaSim")
+    parser.add_argument("--no-display", action="store_true", help="Executar sem graficos")
+    parser.add_argument("--no-real-time", action="store_true",
+                        help="Executar na velocidade disponivel do simulador")
+    args = parser.parse_args()
+    if not math.isfinite(args.duration) or args.duration <= 0:
+        parser.error("--duration deve ser finito e positivo")
+    if not math.isfinite(args.speed) or args.speed <= 0:
+        parser.error("--speed deve ser finito e positivo")
+    if not 1 <= args.port <= 65535:
+        parser.error("--port deve estar entre 1 e 65535")
+    run_mission(dict(parameters, ts=args.duration, velocity_reference=args.speed,
+                     host=args.host, port=args.port, real_time=not args.no_real_time),
+                display=not args.no_display)
+
+
 if __name__ == "__main__":
-    run_mission()
+    main()

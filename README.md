@@ -11,6 +11,10 @@
 
 #### Veículo no simulador CoppeliaSim
 
+O controle prioriza o centro do corredor de cones vermelhos e verdes, com a linha
+amarela como alternativa. Consulte [Cones e Stanley no simulador](simulador/CONES_STANLEY.md)
+para executar, ajustar e interpretar a visão e a telemetria.
+
 <p align="center">
   <img src="https://github.com/GTI-UFMG/fundamentos_veiculos_autonomos/assets/64908110/b34f42c4-b19c-490e-b646-385c06bc5b52" alt="Alt text" width="400">
 </p>

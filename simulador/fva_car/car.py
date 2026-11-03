@@ -108,7 +108,8 @@ class Car:
 	def init_coppelia_sim(self):
 			
 		# Cria o cliente
-		self.client = RemoteAPIClient(port=self.parameters.get('port', 23000))
+		self.client = RemoteAPIClient(host=self.parameters.get('host', '127.0.0.1'),
+								  port=self.parameters.get('port', 23000))
 		self.sim = self.client.getObject('sim')
 		self.sim.stopSimulation()
 		while self.sim.getSimulationState() != self.sim.simulation_stopped:
