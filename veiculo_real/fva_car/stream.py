@@ -43,6 +43,8 @@ class VisionStream:
                     self._send(200, 'text/html; charset=utf-8', PAGE)
                 elif self.path == '/stream':
                     self._stream()
+                elif self.path == '/frame.png':
+                    self._snapshot()
                 else:
                     self._send(404, 'text/plain', b'Nao encontrado')
 
@@ -53,6 +55,20 @@ class VisionStream:
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _snapshot(self):
+                latest = stream.latest
+                if latest is not None:
+                    try:
+                        image = stream.render(*latest)
+                        if image is not None:
+                            ok, encoded = cv2.imencode('.png', image)
+                            if ok:
+                                self._send(200, 'image/png', encoded.tobytes())
+                                return
+                    except (cv2.error, ValueError, TypeError):
+                        pass
+                self._send(503, 'text/plain', b'Aguardando quadro da missao')
 
             def _stream(self):
                 self.send_response(200)

@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+import urllib.error
 import urllib.request
 
 import cv2
@@ -16,6 +17,41 @@ from test_lateral import lateral, calibration_data, calibration_from, metric_lin
 
 
 class VisionStreamTests(unittest.TestCase):
+    def test_gui_receives_png_after_the_mission_publishes_a_frame(self):
+        rendered = []
+
+        def render(observation, text):
+            rendered.append(text)
+            if observation is None:
+                return None
+            return np.full((60, 80, 3), observation, np.uint8)
+
+        stream = VisionStream(render, port=0, host='127.0.0.1').start()
+        try:
+            url = f'http://127.0.0.1:{stream.port}/frame.png'
+            with self.assertRaises(urllib.error.HTTPError) as unavailable:
+                urllib.request.urlopen(url, timeout=5)
+            self.assertEqual(unavailable.exception.code, 503)
+            unavailable.exception.close()
+            self.assertEqual(rendered, [])
+
+            stream.publish(200, 'controle Stanley')
+            with urllib.request.urlopen(url, timeout=5) as response:
+                self.assertEqual(response.headers['Content-Type'], 'image/png')
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                image = cv2.imdecode(np.frombuffer(response.read(), np.uint8), cv2.IMREAD_COLOR)
+            self.assertEqual(image.shape, (60, 80, 3))
+            self.assertEqual(float(image.mean()), 200)
+            self.assertEqual(rendered, ['controle Stanley'])
+
+            stream.publish(None, 'sem imagem')
+            with self.assertRaises(urllib.error.HTTPError) as missing:
+                urllib.request.urlopen(url, timeout=5)
+            self.assertEqual(missing.exception.code, 503)
+            missing.exception.close()
+        finally:
+            stream.close()
+
     def test_browser_receives_rendered_jpeg_and_page(self):
         rendered = []
 

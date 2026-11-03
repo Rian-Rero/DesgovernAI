@@ -24,6 +24,7 @@ import queue
 import csv
 import base64
 import webbrowser
+import urllib.request
 from collections import deque
 
 import paramiko
@@ -176,9 +177,10 @@ class RsyncGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("FVA - gerenciador de controle")
-        self.geometry("1024x720")
-        # self.attributes("-fullscreen", True)
-        # self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
+        self.geometry("1120x760")
+        self.minsize(940, 620)
+        #self.attributes("-fullscreen", True)
+        #self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
         self.devices = {}
         self.selected_files = []
         self.active_device = None
@@ -193,30 +195,41 @@ class RsyncGUI(tk.Tk):
         self.camera_window = None
         self.camera_label = None
         self.camera_photo = None
+        self.camera_frame = None
+        self.live_video_running = False
+        self.live_video_generation = 0
+        self.live_video_photo = None
+        self.live_video_frame = None
+        self.live_video_queue = queue.Queue(maxsize=2)
         self.test_output_queue = queue.Queue()
         self.test_status_pending = None
         self.test_status_mark = None
 
+        # Estilo definido antes de criar as abas para evitar larguras excessivas.
+        style = ttk.Style(self)
+        style.configure(".", font=("Arial", 12))
+        style.configure("TButton", font=("Arial", 11))
+        style.configure("TLabel", font=("Arial", 12))
+        style.configure("TCheckbutton", font=("Arial", 12))
+        style.configure("TNotebook.Tab", font=("Arial", 11, "bold"), padding=[7, 7])
+
         self._build_ui()
         self.after(50, self._flush_test_output)
+        self.after(100, self._refresh_live_video)
         # preenche a senha padrão (se houver)
         if DEFAULT_PASS:
             self.pass_entry.insert(0, DEFAULT_PASS)
         self.after(
-            200, lambda: threading.Thread(target=self.refresh_ips, daemon=True).start()
-        )
+                    200,
+                    lambda: threading.Thread(
+                        target=self.refresh_ips,
+                        daemon=True
+                    ).start()
+                )
 
         self.telemetry = {}
         self.telemetry_queue = queue.Queue()
         self.after(200, self._refresh_live_plot)
-
-        # aumenta fontes
-        style = ttk.Style()
-        style.configure(".", font=("Arial", 14))
-        style.configure("TButton", font=("Arial", 14))
-        style.configure("TLabel", font=("Arial", 14))
-        style.configure("TCheckbutton", font=("Arial", 14))
-        style.configure("TNotebook.Tab", font=("Arial", 14, "bold"), padding=[12, 8])
 
     ########################################
     def _build_ui(self):
@@ -234,13 +247,13 @@ class RsyncGUI(tk.Tk):
         ttk.Label(
             title_frame,
             text="FVA — Fundamentos de Veículos Autônomos",
-            font=("Arial", 18, "bold"),
+            font=("Arial", 18, "bold")
         ).pack(anchor="w")
 
         ttk.Label(
             title_frame,
             text="Gerenciador dos Veículos Experimentais",
-            font=("Arial", 12),
+            font=("Arial", 12)
         ).pack(anchor="w")
 
         # logo UFMG
@@ -250,7 +263,10 @@ class RsyncGUI(tk.Tk):
         # reduz a imagem pela metade
         self.ufmg_logo = self.ufmg_logo.subsample(6, 6)
 
-        ttk.Label(header, image=self.ufmg_logo).pack(side="right")
+        ttk.Label(
+            header,
+            image=self.ufmg_logo
+        ).pack(side="right")
 
         ########################################
         # Pasta remota global
@@ -262,9 +278,7 @@ class RsyncGUI(tk.Tk):
         self.dest_entry = ttk.Entry(workdir_frame)
         self.dest_entry.insert(0, DEFAULT_DEST)
         self.dest_entry.pack(side="left", fill="x", expand=True, padx=(8, 6))
-        ttk.Button(
-            workdir_frame, text="Restaurar padrão", command=self.restore_default_workdir
-        ).pack(side="left")
+        ttk.Button(workdir_frame, text="Restaurar padrão", command=self.restore_default_workdir).pack(side="left")
 
         ########################################
         # Abas
@@ -275,19 +289,22 @@ class RsyncGUI(tk.Tk):
         self.tab_home = tk.Frame(notebook, bg="black")
         self.tab_files = ttk.Frame(notebook)
         self.tab_cmds = ttk.Frame(notebook)
+        self.tab_video = ttk.Frame(notebook)
         self.tab_tests = ttk.Frame(notebook)
         self.tab_data = ttk.Frame(notebook)
 
-        notebook.add(self.tab_home, text="🏠 Início")
-        notebook.add(self.tab_files, text="📂 Enviar Arquivos")
-        notebook.add(self.tab_cmds, text="💻 Executar Comandos")
-        notebook.add(self.tab_data, text="📊 Coletar Dados")
-        notebook.add(self.tab_tests, text="🧪 Testar Módulos")
+        notebook.add(self.tab_home,     text="🏠 Início")
+        notebook.add(self.tab_files,    text="📂 Enviar Arquivos")
+        notebook.add(self.tab_cmds,     text="💻 Comandos")
+        notebook.add(self.tab_video,    text="📷 Câmera")
+        notebook.add(self.tab_data,     text="📊 Coletar Dados")
+        notebook.add(self.tab_tests,    text="🧪 Módulos de Teste")
 
         self._build_tab_home(self.tab_home)
         self._build_tab_files(self.tab_files)
         self._build_tab_cmds(self.tab_cmds)
         self._build_tab_tests(self.tab_tests)
+        self._build_tab_video(self.tab_video)
         self._build_tab_data(self.tab_data)
 
     ########################################
@@ -458,10 +475,6 @@ class RsyncGUI(tk.Tk):
             cmd_buttons, text="Executar", command=self.run_cmds_on_selected
         ).pack(side="left", padx=(0, 6))
 
-        ttk.Button(cmd_buttons, text="Gravar Arduino", command=self.flash_arduino).pack(
-            side="left", padx=(0, 6)
-        )
-
         ttk.Button(
             cmd_buttons, text="Ver câmera", command=self.open_camera_stream
         ).pack(side="left", padx=(0, 6))
@@ -553,22 +566,169 @@ class RsyncGUI(tk.Tk):
 
         self.after(100, set_initial_panes)
 
+    def _build_tab_video(self, parent):
+        controls = ttk.Frame(parent)
+        controls.pack(fill="x", padx=10, pady=10)
+        ttk.Label(controls, text="Porta HTTP:").pack(side="left")
+        self.video_port = tk.StringVar(value="8080")
+        ttk.Entry(controls, textvariable=self.video_port, width=7).pack(side="left", padx=6)
+        ttk.Button(controls, text="Conectar", command=self.start_live_video).pack(side="left", padx=5)
+        ttk.Button(controls, text="Parar", command=self.stop_live_video).pack(side="left", padx=5)
+        self.video_status = ttk.Label(parent, text="Execute main.py com a camera habilitada e clique em Conectar.")
+        self.video_status.pack(anchor="w", padx=10)
+        self.live_video_label = tk.Label(parent, text="Sem video", bg="black", fg="white")
+        self.live_video_label.pack(fill="both", expand=True, padx=10, pady=10)
+        self.live_video_label.bind("<Configure>", self._resize_live_video)
+
+
+    def start_live_video(self):
+        targets = self.get_selected_devices()
+        if not targets:
+            messagebox.showinfo("Video", "Nenhum veiculo detectado.")
+            return
+        try:
+            port = int(self.video_port.get())
+            if not 1 <= port <= 65535:
+                raise ValueError()
+        except ValueError:
+            messagebox.showerror("Video", "Porta HTTP invalida.")
+            return
+        self.stop_live_video()
+        self.live_video_running = True
+        self.live_video_generation += 1
+        generation = self.live_video_generation
+        ip = targets[0][1]
+        self.video_status.config(text=f"Conectando a {ip}:{port} ...")
+        threading.Thread(target=self._live_video_worker, args=(ip, port, generation), daemon=True).start()
+
+
+    def stop_live_video(self):
+        self.live_video_running = False
+        self.live_video_generation += 1
+        self.live_video_frame = None
+        if hasattr(self, "video_status"):
+            self.video_status.config(text="Video desconectado.")
+
+
+    def _live_video_worker(self, ip, port, generation):
+        url = f"http://{ip}:{port}/frame.png"
+        while self.live_video_running and generation == self.live_video_generation:
+            try:
+                with urllib.request.urlopen(url, timeout=1.5) as response:
+                    data = response.read(2_000_000)
+                if generation != self.live_video_generation:
+                    break
+                try:
+                    self.live_video_queue.put_nowait((generation, data, None))
+                except queue.Full:
+                    pass
+                time.sleep(0.10)  # ate ~10 FPS; nao bloqueia a GUI
+            except Exception as exc:
+                try:
+                    self.live_video_queue.put_nowait((generation, None, str(exc)))
+                except queue.Full:
+                    pass
+                time.sleep(0.7)
+
+
+    def _resize_live_video(self, event=None):
+        """Ajusta a imagem ao espaço disponível sem distorcer a proporção."""
+        if self.live_video_frame is None or not self.live_video_running:
+            return
+        try:
+            width = max(1, self.live_video_label.winfo_width() - 12)
+            height = max(1, self.live_video_label.winfo_height() - 12)
+            src_w = self.live_video_frame.width()
+            src_h = self.live_video_frame.height()
+            if src_w < 1 or src_h < 1:
+                return
+            # Zoom inteiro usando Tk nativo: sem Pillow e sem alterar o stream.
+            zoom = max(1, min(width // src_w, height // src_h))
+            photo = self.live_video_frame.zoom(zoom, zoom) if zoom > 1 else self.live_video_frame
+            # Se a área disponível for menor que a imagem original, reduz proporcionalmente.
+            if photo.width() > width or photo.height() > height:
+                shrink = max((photo.width() + width - 1) // width,
+                             (photo.height() + height - 1) // height)
+                photo = photo.subsample(shrink, shrink)
+            self.live_video_photo = photo
+            self.live_video_label.config(image=photo, text="")
+        except tk.TclError:
+            pass
+
+
+    def _refresh_live_video(self):
+        latest = None
+        try:
+            while True:
+                latest = self.live_video_queue.get_nowait()
+        except queue.Empty:
+            pass
+        if latest is not None:
+            generation, data, error = latest
+            if self.live_video_running and generation == self.live_video_generation:
+                if data:
+                    try:
+                        self.live_video_frame = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"), format="png")
+                        self._resize_live_video()
+                        self.video_status.config(text="Video conectado (imagem publicada pelo main.py)")
+                    except Exception as exc:
+                        self.video_status.config(text=f"Erro ao exibir quadro: {exc}")
+                elif error:
+                    self.video_status.config(text=f"Aguardando video: {error}")
+        self.after(100, self._refresh_live_video)
+
+
+    def _update_camera_mode_visibility(self, event=None):
+        """Mostra a escolha de visao apenas para o teste da camera USB."""
+        if self.test_module_var.get() == "Câmera USB":
+            self.camera_mode_frame.pack(side="left", padx=(0, 12), before=self.test_run_button)
+        else:
+            self.camera_mode_frame.pack_forget()
+
+
+    def _resize_camera_test(self, event=None):
+        """Amplia a prévia do teste preservando a proporção, sem Pillow."""
+        if self.camera_frame is None or self.camera_label is None:
+            return
+        try:
+            if not self.camera_label.winfo_exists():
+                return
+            width = max(1, self.camera_label.winfo_width() - 12)
+            height = max(1, self.camera_label.winfo_height() - 12)
+            src_w = self.camera_frame.width()
+            src_h = self.camera_frame.height()
+            if src_w < 1 or src_h < 1:
+                return
+            zoom = max(1, min(width // src_w, height // src_h))
+            photo = self.camera_frame.zoom(zoom, zoom) if zoom > 1 else self.camera_frame
+            if photo.width() > width or photo.height() > height:
+                shrink = max((photo.width() + width - 1) // width,
+                             (photo.height() + height - 1) // height)
+                photo = photo.subsample(shrink, shrink)
+            self.camera_photo = photo
+            self.camera_label.configure(image=photo, text="")
+        except tk.TclError:
+            pass
+
+
     ########################################
     def _build_tab_tests(self, parent):
 
         ttk.Label(
-            parent, text="Testar módulos individuais da biblioteca fva_car."
+            parent,
+            text="Testar módulos individuais da biblioteca fva_car."
         ).pack(anchor="w", padx=10, pady=(10, 4))
 
         self.test_device_label = ttk.Label(
-            parent, text="Veículo: aguardando detecção..."
+            parent,
+            text="Veículo: aguardando detecção..."
         )
         self.test_device_label.pack(anchor="w", padx=10, pady=(0, 8))
 
         hint = ttk.Label(
             parent,
             text="O teste é executado na pasta remota definida no topo da janela.",
-            foreground="#888",
+            foreground="#888"
         )
         hint.pack(anchor="w", padx=10, pady=(0, 8))
 
@@ -582,65 +742,89 @@ class RsyncGUI(tk.Tk):
         self.test_modules = {
             "Encoder / RC / Chaves": "fva_car/encoder.py",
             "Ultrassom": "fva_car/ultrasonic.py",
-            "Carro completo": "fva_car/car.py",
             "Câmera USB": "__camera__",
+            "Carro completo": "fva_car/car.py",
         }
 
-        self.test_module_var = tk.StringVar(value="Encoder / RC / Chaves")
+        self.test_module_var = tk.StringVar(
+            value="Encoder / RC / Chaves"
+        )
 
         self.test_module_combo = ttk.Combobox(
             controls,
             textvariable=self.test_module_var,
             values=list(self.test_modules.keys()),
             state="readonly",
-            width=28,
+            width=28
         )
         self.test_module_combo.pack(side="left", padx=(8, 16))
 
+        # Exibe o seletor de visao somente quando o modulo Camera USB estiver selecionado.
+        self.camera_mode_frame = ttk.Frame(controls)
+        ttk.Label(self.camera_mode_frame, text="Visão:").pack(side="left")
+        self.camera_mode_var = tk.StringVar(value="Normal")
+        self.camera_mode_combo = ttk.Combobox(
+            self.camera_mode_frame, textvariable=self.camera_mode_var,
+            values=["Normal", "ArUco", "Placas"], state="readonly", width=10
+        )
+        self.camera_mode_combo.pack(side="left", padx=(6, 0))
+        self.camera_mode_frame.pack(side="left", padx=(0, 12))
+        self.test_module_combo.bind("<<ComboboxSelected>>", self._update_camera_mode_visibility)
+        self._update_camera_mode_visibility()
+
         self.test_run_button = ttk.Button(
-            controls, text="▶ Executar", command=self.run_module_test
+            controls,
+            text="▶ Executar",
+            command=self.run_module_test
         )
         self.test_run_button.pack(side="left", padx=4)
 
         self.test_stop_button = ttk.Button(
-            controls, text="■ Parar", command=self.stop_module_test, state="disabled"
+            controls,
+            text="■ Parar",
+            command=self.stop_module_test,
+            state="disabled"
         )
         self.test_stop_button.pack(side="left", padx=4)
 
-        ttk.Button(controls, text="Limpar", command=self.clear_test_log).pack(
-            side="left", padx=4
-        )
+        ttk.Button(
+            controls,
+            text="Gravar Arduino",
+            command=self.flash_arduino
+        ).pack(side="left", padx=4)
 
-        ttk.Label(parent, text="Saída do teste:").pack(
-            anchor="w", padx=10, pady=(10, 2)
-        )
+        ttk.Button(
+            controls,
+            text="Limpar",
+            command=self.clear_test_log
+        ).pack(side="left", padx=4)
+
+        ttk.Label(
+            parent,
+            text="Saída do teste:"
+        ).pack(anchor="w", padx=10, pady=(10, 2))
 
         self.test_log = scrolledtext.ScrolledText(
             parent,
             bg="black",
             fg="white",
             insertbackground="white",
-            font=("Courier", 11),
+            font=("Courier", 11)
         )
-        self.test_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.test_log.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=(0, 10)
+        )
         # Cores ANSI usadas pelos módulos remotos
         for code, color in {
-            "30": "#555555",
-            "31": "#ff5555",
-            "32": "#55ff55",
-            "33": "#ffff55",
-            "34": "#5555ff",
-            "35": "#ff55ff",
-            "36": "#55ffff",
-            "37": "#ffffff",
-            "90": "#555555",
-            "91": "#ff5555",
-            "92": "#55ff55",
-            "93": "#ffff55",
-            "94": "#5555ff",
-            "95": "#ff55ff",
-            "96": "#55ffff",
-            "97": "#ffffff",
+            "30": "#555555", "31": "#ff5555", "32": "#55ff55",
+            "33": "#ffff55", "34": "#5555ff", "35": "#ff55ff",
+            "36": "#55ffff", "37": "#ffffff",
+            "90": "#555555", "91": "#ff5555", "92": "#55ff55",
+            "93": "#ffff55", "94": "#5555ff", "95": "#ff55ff",
+            "96": "#55ffff", "97": "#ffffff",
         }.items():
             self.test_log.tag_configure(f"ansi_{code}", foreground=color)
         self.test_log.configure(state="disabled")
@@ -749,13 +933,20 @@ class RsyncGUI(tk.Tk):
         self.test_log.configure(state="disabled")
         self.test_status_pending = None
         self.test_status_mark = None
+        # Descarta mensagens pendentes de execuções anteriores.
+        while True:
+            try:
+                self.test_output_queue.get_nowait()
+            except queue.Empty:
+                break
 
     ########################################
     def run_module_test(self):
 
         if self.test_running:
             messagebox.showinfo(
-                "Teste em execução", "Já existe um teste de módulo em execução."
+                "Teste em execução",
+                "Já existe um teste de módulo em execução."
             )
             return
 
@@ -764,7 +955,7 @@ class RsyncGUI(tk.Tk):
         if not targets:
             messagebox.showinfo(
                 "Nenhum alvo",
-                "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.",
+                "Nenhum veículo foi detectado. Atualize os IPs e tente novamente."
             )
             return
 
@@ -773,12 +964,15 @@ class RsyncGUI(tk.Tk):
 
         if not module_path:
             messagebox.showerror(
-                "Módulo inválido", "O módulo selecionado não foi encontrado."
+                "Módulo inválido",
+                "O módulo selecionado não foi encontrado."
             )
             return
 
         name, ip = targets[0]
 
+        # Cada novo teste começa com o terminal limpo.
+        self.clear_test_log()
         self.test_running = True
         self.test_remote_pid = None
         self.test_remote_ip = ip
@@ -787,7 +981,9 @@ class RsyncGUI(tk.Tk):
         self.test_status_mark = None
         self.test_run_button.configure(state="disabled")
         self.test_stop_button.configure(state="normal")
-        self.test_device_label.configure(text=f"Veículo: {name.upper()} — {ip}")
+        self.test_device_label.configure(
+            text=f"Veículo: {name.upper()} — {ip}"
+        )
 
         self.testlog_write("")
         self.testlog_write("=" * 60)
@@ -797,15 +993,14 @@ class RsyncGUI(tk.Tk):
 
         if module_path == "__camera__":
             self._open_camera_window()
+            camera_mode = self.camera_mode_var.get()
+        else:
+            camera_mode = None
 
         threading.Thread(
-            target=(
-                self._run_camera_test
-                if module_path == "__camera__"
-                else self._run_module_test
-            ),
-            args=(name, ip) if module_path == "__camera__" else (name, ip, module_path),
-            daemon=True,
+            target=self._run_camera_test if module_path == "__camera__" else self._run_module_test,
+            args=(name, ip, camera_mode) if module_path == "__camera__" else (name, ip, module_path),
+            daemon=True
         ).start()
 
     ########################################
@@ -817,14 +1012,10 @@ class RsyncGUI(tk.Tk):
         window.geometry("680x560")
         window.protocol("WM_DELETE_WINDOW", self._close_camera_window)
         self.camera_window = window
-        self.camera_label = tk.Label(
-            window, text="Aguardando imagem...", bg="black", fg="white"
-        )
+        self.camera_label = tk.Label(window, text="Aguardando imagem...", bg="black", fg="white")
         self.camera_label.pack(fill="both", expand=True, padx=10, pady=10)
-        ttk.Label(
-            window,
-            text="Prévia remota (até 3 FPS). Fechar a janela interrompe o teste.",
-        ).pack(pady=(0, 8))
+        self.camera_label.bind("<Configure>", self._resize_camera_test)
+        ttk.Label(window, text="Prévia HTTP (até 10 FPS, 320×240). Fechar a janela interrompe o teste.").pack(pady=(0, 8))
 
     def _close_camera_window(self):
         self.stop_module_test()
@@ -833,151 +1024,85 @@ class RsyncGUI(tk.Tk):
         self.camera_window = None
         self.camera_label = None
         self.camera_photo = None
+        self.camera_frame = None
 
     def _show_camera_frame(self, image_bytes):
         if self.camera_label is None or not self.camera_label.winfo_exists():
             return
         try:
-            photo = tk.PhotoImage(
-                data=base64.b64encode(image_bytes).decode("ascii"), format="png"
-            )
-            self.camera_photo = photo
-            self.camera_label.configure(image=photo, text="")
+            self.camera_frame = tk.PhotoImage(data=base64.b64encode(image_bytes).decode("ascii"), format="png")
+            self._resize_camera_test()
         except tk.TclError as exc:
             self._queue_test_output(f"Falha ao exibir imagem PNG: {exc}")
 
     ########################################
-    def _run_camera_test(self, name, ip):
-        """Publica quadros na Raspberry e os lê por SFTP, sem X11 remoto."""
+    def _run_camera_test(self, name, ip, camera_mode):
+        """Inicia camera.py --stream por SSH e exibe /frame.png na janela Tkinter."""
         workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         run_id = self.test_run_id
-        base = f"/tmp/fva_camera_{run_id}"
+        base = f"/tmp/fva_camera_http_{run_id}"
         log_path, exit_path = base + ".log", base + ".exit"
-        client = sftp = None
+        port = 8081  # independente da porta 8080 utilizada pelo main.py
+        client = None
         pid = None
-        finished = False
-        last_seq = 0
         log_offset = 0
-        log_buffer = b""
-        errors = 0
+        last_error = None
         try:
             client = self._connect_ssh(ip)
-            sftp = client.open_sftp()
-            # Teste implementado diretamente no modulo camera.py da Raspberry.
-            command = (
-                f"cd {shlex.quote(workdir)} && python3 -u fva_car/camera.py "
-                f"--remote --prefix {shlex.quote(base)} --seconds 60 --fps 3 --aruco"
-            )
-            inner = (
-                f"{command}; rc=$?; printf '%s\\n' \"$rc\" > {shlex.quote(exit_path)}"
-            )
-            launch = f"nohup setsid sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null & echo FVA_PID:$!"
+            mode_flag = {"Normal": "--normal", "ArUco": "--aruco", "Placas": "--placas"}[camera_mode]
+            command = (f"cd {shlex.quote(workdir)} && python3 -u fva_car/camera.py "
+                       f"--stream --port {port} --fps 10 --scale 0.5 --seconds 60 {mode_flag}")
+            inner = f"{command}; rc=$?; printf '%s\\n' \"$rc\" > {shlex.quote(exit_path)}"
+            launch = (f"nohup setsid sh -c {shlex.quote(inner)} "
+                      f"> {shlex.quote(log_path)} 2>&1 < /dev/null & echo FVA_PID:$!")
             _, out, err = client.exec_command(launch, timeout=20)
             response = out.readline().strip()
             if not response.startswith("FVA_PID:"):
-                raise RuntimeError(
-                    f"Não iniciou a câmera: {response} {err.read(300).decode(errors='replace')}"
-                )
+                raise RuntimeError(f"Falha ao iniciar câmera: {response} {err.read(300).decode(errors='replace')}")
             pid = int(response.split(":", 1)[1])
             self.test_remote_pid = pid
-            self._queue_test_output("Captura iniciada; prévia na janela da câmera.")
+            self._queue_test_output(f"$ {command}")
+            self._queue_test_output(f"Visualização HTTP: {ip}:{port} (10 FPS, escala 0.5)")
             if not self.test_running:
-                self._stop_remote_test_process(ip, pid)
-            while self.test_running and not finished:
+                return
+            url = f"http://{ip}:{port}/frame.png"
+            while self.test_running and self.test_run_id == run_id:
                 try:
-                    if (
-                        client is None
-                        or not client.get_transport()
-                        or not client.get_transport().is_active()
-                    ):
-                        if client:
-                            client.close()
-                        client = self._connect_ssh(ip)
-                        sftp = None
-                    if sftp is None:
-                        sftp = client.open_sftp()
-                        sftp.get_channel().settimeout(10)
-                    try:
-                        with sftp.open(base + ".seq", "r") as f:
-                            seq = int(f.read().strip())
-                        if seq > last_seq:
-                            with sftp.open(base + ".png", "rb") as f:
-                                frame = f.read()
-                            last_seq = seq
-                            self.ui(self._show_camera_frame, frame)
-                    except IOError:
-                        pass  # primeiro quadro ainda não existe
-                    try:
-                        with sftp.open(log_path, "rb") as f:
-                            f.seek(log_offset)
-                            chunk = f.read(32768)
-                        if chunk:
-                            log_offset += len(chunk)
-                            log_buffer += chunk
-                            while b"\n" in log_buffer:
-                                line, log_buffer = log_buffer.split(b"\n", 1)
-                                if line:
-                                    self._queue_test_output(
-                                        line.decode(errors="replace")
-                                    )
-                    except IOError:
-                        pass
-                    try:
-                        with sftp.open(exit_path, "r") as f:
-                            status = f.read().strip()
-                        rc = int(status)
-                        finished = True
-                    except (IOError, ValueError):
-                        pass
-                    errors = 0
-                except (OSError, EOFError, paramiko.SSHException) as exc:
-                    errors += 1
-                    if sftp:
-                        try:
-                            sftp.close()
-                        except Exception:
-                            pass
-                    sftp = None
-                    if client:
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-                    client = None
-                    if errors == 1:
-                        self._queue_test_output(f"Reconectando câmera: {exc}")
-                    if errors >= 15:
-                        raise RuntimeError(
-                            "Sem comunicação com a câmera após 15 tentativas"
-                        )
-                time.sleep(0.35)
-            if log_buffer:
-                self._queue_test_output(log_buffer.decode(errors="replace"))
-            self._queue_test_output(
-                f"Teste de câmera finalizado (código {rc})."
-                if finished
-                else "Teste de câmera interrompido."
-            )
+                    with urllib.request.urlopen(url, timeout=1.5) as response:
+                        frame = response.read(2_000_000)
+                    if self.test_running and self.test_run_id == run_id:
+                        self.ui(self._show_camera_frame, frame)
+                    last_error = None
+                except Exception as exc:
+                        if str(exc) != last_error:
+                            self._queue_test_output(f"Aguardando câmera HTTP: {exc}")
+                            last_error = str(exc)
+                        time.sleep(0.4)
+                # Se o processo terminou, encerra o teste (sem SFTP/PNG).
+                try:
+                    _, stdout, _ = client.exec_command(
+                        f"test -f {shlex.quote(exit_path)} && cat {shlex.quote(exit_path)}", timeout=4)
+                    status = stdout.read().decode().strip()
+                    if status:
+                        self._queue_test_output(f"Teste da câmera encerrado (código {status}).")
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.10)
         except Exception as exc:
             self._queue_test_output(f"Erro no teste da câmera: {exc}")
         finally:
-            if sftp:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-            if not finished and pid is not None:
+            if pid is not None:
                 self._stop_remote_test_process(ip, pid)
-            self.test_remote_pid = None
-            self.test_remote_ip = None
-            self.test_running = False
-            self.ui(self.test_run_button.configure, state="normal")
-            self.ui(self.test_stop_button.configure, state="disabled")
+            if client:
+                try: client.close()
+                except Exception: pass
+            if self.test_run_id == run_id:
+                self.test_remote_pid = None
+                self.test_remote_ip = None
+                self.test_running = False
+                self.ui(self.test_run_button.configure, state="normal")
+                self.ui(self.test_stop_button.configure, state="disabled")
 
     ########################################
     def _run_module_test(self, name, ip, module_path):
@@ -1735,15 +1860,13 @@ class RsyncGUI(tk.Tk):
         """Compila e grava o firmware do Nano via Arduino CLI na Raspberry."""
         targets = self.get_selected_devices()
         if not targets:
-            messagebox.showinfo(
-                "Nenhum veículo", "Nenhum veículo foi detectado. Atualize os IPs."
-            )
+            messagebox.showinfo("Nenhum veículo", "Nenhum veículo foi detectado. Atualize os IPs.")
             return
         if not messagebox.askyesno(
             "Gravar Arduino Nano",
             "Gravar firmware/odometer.ino no Arduino Nano (Old Bootloader)?\n\n"
             "O programa atual do Arduino será substituído. "
-            "Verifique se o veículo está imobilizado e seguro.",
+            "Verifique se o veículo está imobilizado e seguro."
         ):
             return
 
@@ -1751,46 +1874,46 @@ class RsyncGUI(tk.Tk):
         # A cópia temporária respeita a exigência da Arduino CLI de pasta/sketch homônimos.
         script = r"""set -eu
 if ! command -v arduino-cli >/dev/null 2>&1; then
-	echo 'ERRO: arduino-cli não instalado na Raspberry.'
-	echo 'Instale o Arduino CLI e o core arduino:avr antes de gravar.'
-	exit 1
+    echo 'ERRO: arduino-cli não instalado na Raspberry.'
+    echo 'Instale o Arduino CLI e o core arduino:avr antes de gravar.'
+    exit 1
 fi
 if [ ! -f firmware/odometer.ino ]; then
-	echo 'ERRO: firmware/odometer.ino não encontrado na pasta remota.'
-	exit 1
+    echo 'ERRO: firmware/odometer.ino não encontrado na pasta remota.'
+    exit 1
 fi
 if ! arduino-cli core list | grep -q 'arduino:avr'; then
-	echo 'ERRO: core arduino:avr não instalado.'
-	echo 'Execute: arduino-cli core install arduino:avr'
-	exit 1
+    echo 'ERRO: core arduino:avr não instalado.'
+    echo 'Execute: arduino-cli core install arduino:avr'
+    exit 1
 fi
 # Preferir o caminho persistente por-id; sem ele, usar a única ttyUSB/ttyACM.
 set -- /dev/serial/by-id/*
 if [ -e "$1" ]; then
-	candidates=''
-	for port in "$@"; do
-		case "$(readlink -f "$port")" in
-			/dev/ttyUSB*|/dev/ttyACM*) candidates="$candidates $port" ;;
-		esac
-	done
-	set -- $candidates
+    candidates=''
+    for port in "$@"; do
+        case "$(readlink -f "$port")" in
+            /dev/ttyUSB*|/dev/ttyACM*) candidates="$candidates $port" ;;
+        esac
+    done
+    set -- $candidates
 else
-	set -- /dev/ttyUSB* /dev/ttyACM*
+    set -- /dev/ttyUSB* /dev/ttyACM*
 fi
 ports=''
 for port in "$@"; do
-	[ -e "$port" ] && ports="$ports $port"
+    [ -e "$port" ] && ports="$ports $port"
 done
 set -- $ports
 if [ "$#" -ne 1 ]; then
-	echo "ERRO: esperado exatamente um dispositivo serial Arduino; encontrados $# ($ports)."
-	exit 1
+    echo "ERRO: esperado exatamente um dispositivo serial Arduino; encontrados $# ($ports)."
+    exit 1
 fi
 port="$1"
 if command -v fuser >/dev/null 2>&1 && fuser "$port" >/dev/null 2>&1; then
-	echo "ERRO: porta $port está sendo usada por outro processo."
-	fuser -v "$port" || true
-	exit 1
+    echo "ERRO: porta $port está sendo usada por outro processo."
+    fuser -v "$port" || true
+    exit 1
 fi
 sketch_dir="$(mktemp -d /tmp/fva_arduino_XXXXXX)"
 trap 'rm -rf "$sketch_dir"' EXIT
@@ -1803,11 +1926,12 @@ echo 'Gravando Arduino...'
 arduino-cli upload --fqbn arduino:avr:nano:cpu=atmega328old -p "$port" "$sketch_dir/odometer"
 echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         command = "sh -c " + shlex.quote(script)
-        self.ui(
-            self.cmdlog_write, "Solicitada compilação e gravação do Arduino Nano..."
-        )
+        # A gravação também utiliza o terminal da aba Testar Módulos.
+        self.clear_test_log()
         threading.Thread(
-            target=self._run_remote_cmds, args=(targets, [command]), daemon=True
+            target=self._run_remote_cmds,
+            args=(targets, [command], True),
+            daemon=True
         ).start()
 
     ########################################
@@ -1827,19 +1951,24 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         else:
             self.ui(self.cmdlog_write, f"[{name.upper()}] {line}")
 
-    def _run_remote_cmds(self, targets, cmds):
+    def _run_remote_cmds(self, targets, cmds, arduino_flash=False):
         """Executa no Raspberry e lê log persistente via SFTP com retomada por offset.
 
         O processo não depende da sessão que lê a saída. O marcador .exit
         indica a conclusão, mesmo se a conexão de leitura cair.
         """
         remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+        def report(message):
+            if arduino_flash:
+                self.ui(self.testlog_write, message)
+            else:
+                self.ui(self.cmdlog_write, message)
         for name, ip in targets:
-            self.ui(self.cmdlog_write, "\n" + "=" * 60)
-            self.ui(
-                self.cmdlog_write,
-                f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}",
-            )
+            if arduino_flash:
+                report( f"🔄 {name.upper()}: compilando e gravando Arduino Nano...")
+            else:
+                report( "\n" + "=" * 60)
+                report( f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
             for raw_cmd in cmds:
                 client = None
                 sftp = None
@@ -1849,7 +1978,8 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                     base = f"/tmp/fva_gui_{run_id}"
                     log_path = base + ".log"
                     exit_path = base + ".exit"
-                    self.ui(self.cmdlog_write, f"$ cd {remote_workdir} && {raw_cmd}")
+                    if not arduino_flash:
+                        report( f"$ cd {remote_workdir} && {raw_cmd}")
                     # Processo remoto em segundo plano: grava stdout/stderr na Raspberry.
                     # O status é escrito em arquivo separado APÓS a saída terminar.
                     inner = (
@@ -1865,10 +1995,10 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                     _, out, err = client.exec_command(launch, timeout=20)
                     response = out.readline().strip()
                     if not response.startswith("FVA_PID:"):
-                        raise RuntimeError(
-                            f"Não foi possível iniciar comando remoto: {response} {err.read(500).decode(errors='replace')}"
-                        )
-                    self.ui(self.cmdlog_write, f"📄 Saída persistente: {log_path}")
+                        raise RuntimeError(f"Não foi possível iniciar comando remoto: {response} {err.read(500).decode(errors='replace')}")
+                    if not arduino_flash:
+                        report( f"📄 Saída persistente: {log_path}")
+                    flash_lines = []
                     # Reabre SFTP se necessário; mantém offset para não duplicar dados.
                     offset = 0
                     buffer = b""
@@ -1876,11 +2006,7 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                     connection_errors = 0
                     while not finished:
                         try:
-                            if (
-                                client is None
-                                or not client.get_transport()
-                                or not client.get_transport().is_active()
-                            ):
+                            if client is None or not client.get_transport() or not client.get_transport().is_active():
                                 if client:
                                     client.close()
                                 client = self._connect_ssh(ip)
@@ -1895,9 +2021,11 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                                 buffer += chunk
                                 while b"\n" in buffer:
                                     line, buffer = buffer.split(b"\n", 1)
-                                    self._handle_remote_log_line(
-                                        name, line.decode("utf-8", errors="replace")
-                                    )
+                                    decoded = line.decode("utf-8", errors="replace")
+                                    if arduino_flash:
+                                        flash_lines.append(decoded)
+                                    else:
+                                        self._handle_remote_log_line(name, decoded)
                             try:
                                 with sftp.open(exit_path, "r") as status_file:
                                     rc = int(status_file.read().strip())
@@ -1908,56 +2036,46 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                         except (OSError, EOFError, paramiko.SSHException) as exc:
                             connection_errors += 1
                             if sftp:
-                                try:
-                                    sftp.close()
-                                except Exception:
-                                    pass
+                                try: sftp.close()
+                                except Exception: pass
                             sftp = None
                             if client:
-                                try:
-                                    client.close()
-                                except Exception:
-                                    pass
+                                try: client.close()
+                                except Exception: pass
                             client = None
                             if connection_errors == 1:
-                                self.ui(
-                                    self.cmdlog_write,
-                                    f"⚠️ Comunicação interrompida; tentando recuperar saída: {exc}",
-                                )
+                                report( f"⚠️ Comunicação interrompida; tentando recuperar saída: {exc}")
                             if connection_errors >= 15:
-                                raise RuntimeError(
-                                    "Sem comunicação SSH após 15 tentativas. O processo remoto pode continuar; log: "
-                                    + log_path
-                                ) from exc
+                                raise RuntimeError("Sem comunicação SSH após 15 tentativas. O processo remoto pode continuar; log: " + log_path) from exc
                         time.sleep(0.25 if finished else 0.5)
                     if buffer:
-                        self._handle_remote_log_line(
-                            name, buffer.decode("utf-8", errors="replace")
-                        )
-                    if rc != 0:
-                        self.ui(
-                            self.cmdlog_write,
-                            f"⚠️ Retorno {rc} para comando: {raw_cmd}",
-                        )
+                        if arduino_flash:
+                            flash_lines.append(buffer.decode("utf-8", errors="replace"))
+                        else:
+                            self._handle_remote_log_line(name, buffer.decode("utf-8", errors="replace"))
+                    if arduino_flash:
+                        if rc == 0 and any("SUCESSO: firmware gravado" in line for line in flash_lines):
+                            report( f"✅ {name.upper()}: firmware gravado com sucesso.")
+                        else:
+                            errors = [line.strip() for line in flash_lines if "ERRO:" in line or "Error" in line or "error:" in line or "avrdude:" in line]
+                            reason = errors[-1] if errors else f"Código de retorno: {rc}"
+                            report( f"❌ {name.upper()}: falha na gravação. {reason} (log: {log_path})")
+                    elif rc != 0:
+                        report( f"⚠️ Retorno {rc} para comando: {raw_cmd}")
                     else:
-                        self.ui(self.cmdlog_write, f"✅ Comando finalizado (código 0)")
+                        report( f"✅ Comando finalizado (código 0)")
                 except Exception as exc:
-                    self.ui(
-                        self.cmdlog_write, f"❌ Erro em {name.upper()} ({ip}): {exc}"
-                    )
+                    report( f"❌ Erro em {name.upper()} ({ip}): {exc}")
                     break
                 finally:
                     if sftp:
-                        try:
-                            sftp.close()
-                        except Exception:
-                            pass
+                        try: sftp.close()
+                        except Exception: pass
                     if client:
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-            self.ui(self.cmdlog_write, f"🏁 Execução encerrada para {name.upper()}")
+                        try: client.close()
+                        except Exception: pass
+            if not arduino_flash:
+                report( f"🏁 Execução encerrada para {name.upper()}")
 
     ########################################
     # Execução remota (aba 3)

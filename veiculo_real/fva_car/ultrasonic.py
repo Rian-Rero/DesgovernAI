@@ -28,6 +28,8 @@ TRIGGER_PIN = 24
 ECHO_PIN = 8
 SAMPLE_TIME = 0.1  # 100 ms -> 10 Hz
 SENSOR_TIMEOUT = 0.30  # tempo maximo sem medida [s]
+MIN_RANGE = 0.0  # [m]
+MAX_RANGE = 4.0  # [m]
 
 
 ############################################
@@ -37,7 +39,7 @@ class Ultrasonic:
     ########################################
     # Constructor
     ########################################
-    def __init__(self, trigger_pin=None, echo_pin=None, min_range=0.0, max_range=4.0):
+    def __init__(self, trigger_pin=None, echo_pin=None, min_range=MIN_RANGE, max_range=MAX_RANGE):
         """
         Initializes the ultrasonic sensor with given trigger and echo pins.
         Configures GPIO settings and set sensor limits
@@ -260,17 +262,7 @@ if __name__ == "__main__":
         while True:
 
             distance, valid = us.get_distance()
-
-            if valid:
-                print(
-                    f"Distancia = {distance:.2f} m | Obstaculo = SIM ({us.get_status()})",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"Distancia = {distance:.2f} m | Obstaculo = NAO ({us.get_status()})",
-                    flush=True,
-                )
+            print(f"Distancia = {distance:.2f} m | (status: {us.get_status()})", flush=True)
 
             time.sleep(SAMPLE_TIME)
 
