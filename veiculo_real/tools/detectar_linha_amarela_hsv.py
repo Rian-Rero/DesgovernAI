@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Interface USB para acompanhar faixas amarelas em retas, curvas e pontilhados.
+"""Interface USB com modos de faixa amarela e pista de cones verdes/vermelhos.
 
 Execute: venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py
 Dependencias: numpy, pillow, opencv-python OU opencv-python-headless, tkinter.
-Mantenha yellow_path.py ao lado deste arquivo. Consulte README_linha_hsv.md.
+Mantenha yellow_path.py e cone_path.py ao lado deste arquivo. Consulte README_linha_hsv.md.
 """
 
 import argparse
@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from yellow_path import PathSettings, YellowPathDetector, render_path
+from cone_path import ConeSettings, ConePathDetector, render_cones
 
 
 def camera_source(value):
@@ -144,7 +145,10 @@ class CameraApp:
 
         self.tk, self.ttk, self.Image, self.ImageTk = tk, ttk, Image, ImageTk
         self.root = root
-        self.detector = YellowPathDetector()
+        self.yellow_detector = YellowPathDetector()
+        self.cone_detector = ConePathDetector()
+        self.mode = tk.StringVar(value=getattr(args, "mode", "amarela"))
+        self.detector = self.yellow_detector if self.mode.get() == "amarela" else self.cone_detector
         self.worker = CaptureThread(args.width, args.height, args.fps)
         self.generation = 0
         self.closed = False
@@ -161,12 +165,17 @@ class CameraApp:
         self.camera_var = tk.StringVar()
         self.variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool)
                                else tk.IntVar(value=value)) for key, value in asdict(PathSettings()).items()}
-        root.title("Faixa amarela | Visao do carrinho")
+        self.cone_variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool)
+                                    else tk.IntVar(value=value)) for key, value in asdict(ConeSettings()).items()}
+        self.hint = tk.StringVar()
+        self.legend = tk.StringVar()
+        root.title("Faixa amarela / Cones | Visao do carrinho")
         root.geometry("1240x820")
         root.minsize(1000, 720)
         root.configure(bg="#0c1421")
         self._style()
         self._build()
+        self.switch_mode()
         self.refresh_cameras()
         selected = next((label for label, value in self.cameras.items()
                          if value == args.camera or value == f"/dev/video{args.camera}"), None)
@@ -198,8 +207,13 @@ class CameraApp:
         tk, ttk = self.tk, self.ttk
         header = ttk.Frame(self.root, padding=(22, 18, 22, 10))
         header.pack(fill="x")
-        ttk.Label(header, text="FAIXA AMARELA", font=("DejaVu Sans", 21, "bold")).pack(anchor="w")
-        ttk.Label(header, text="Uma trajetoria continua para retas e curvas", foreground="#9bb1c9").pack(anchor="w", pady=(3, 0))
+        ttk.Label(header, text="VISAO DO CARRINHO", font=("DejaVu Sans", 21, "bold")).pack(anchor="w")
+        operation = ttk.Frame(header)
+        operation.pack(fill="x", pady=(5, 0))
+        ttk.Label(operation, text="Modo de operacao:").pack(side="left", padx=(0, 12))
+        for label, value in (("Faixa amarela", "amarela"), ("Cones verdes / vermelhos", "cones")):
+            ttk.Radiobutton(operation, text=label, value=value, variable=self.mode,
+                            command=self.switch_mode).pack(side="left")
         toolbar = ttk.Frame(self.root, padding=(22, 4, 22, 12))
         toolbar.pack(fill="x")
         ttk.Label(toolbar, text="Camera").pack(side="left", padx=(0, 9))
@@ -223,19 +237,21 @@ class CameraApp:
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda _: self.redraw())
         self.canvas.bind("<Button-1>", self.select_path)
-        ttk.Label(visual, text="Clique perto da base da faixa desejada para selecionar o caminho.",
+        ttk.Label(visual, textvariable=self.hint,
                   foreground="#9bb1c9", wraplength=650).pack(anchor="w", pady=(9, 3))
-        ttk.Label(visual, text="Verde: observado   •   Azul: entre tracos   •   Laranja: buracos   •   Branco: centro",
+        ttk.Label(visual, textvariable=self.legend,
                   foreground="#9bb1c9", wraplength=650).pack(anchor="w")
         sidebar = ttk.Frame(body, width=300)
         sidebar.grid(row=0, column=1, sticky="ns")
         notebook = ttk.Notebook(sidebar, width=300)
+        self.notebook = notebook
         notebook.pack(fill="both", expand=True)
         geometry, color = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
         dashed = ttk.Frame(notebook, padding=12)
         notebook.add(geometry, text="Caminho")
         notebook.add(color, text="Cor e luz")
         notebook.add(dashed, text="Gaps")
+        self.yellow_tabs = (geometry, color, dashed)
         self.slider(geometry, "roi_top", "Ignorar topo", 0, 65, "%", "Recorta objetos fora da pista.")
         self.slider(geometry, "max_gap", "Conectar falhas", 0, 90, "px", "Limite vertical em imagem de 480 px.")
         self.slider(geometry, "max_width", "Largura maxima", 3, 40, "%", "Reduza para rejeitar objetos largos.")
@@ -263,6 +279,38 @@ class CameraApp:
                         command=self.changed).pack(anchor="w", pady=8)
         ttk.Label(color, text="Tinta desbotada: reduza S. Sombras: reduza V. A recuperacao tolerante so vale dentro de uma trajetoria aceita.",
                   foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
+        cone_geometry, cone_color = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
+        notebook.add(cone_geometry, text="Pista de cones")
+        notebook.add(cone_color, text="HSV cones")
+        self.cone_tabs = (cone_geometry, cone_color)
+        ttk.Checkbutton(cone_geometry, text="Verdes a esquerda", variable=self.cone_variables["green_left"],
+                        command=self.changed).pack(anchor="w")
+        ttk.Label(cone_geometry, text="Desmarcado: vermelhos a esquerda.",
+                  foreground="#9bb1c9", wraplength=270).pack(anchor="w")
+        for key, label, low, high, suffix in (
+                ("roi_top", "Ignorar topo", 0, 65, "%"),
+                ("min_area", "Area minima do cone", 5, 500, "px²"),
+                ("max_gap", "Espaco vertical maximo", 40, 300, "px"),
+                ("min_span", "Extensao minima", 2, 50, "%"),
+                ("min_width", "Largura minima da pista", 3, 40, "%"),
+                ("reference_y", "Altura da medicao", 40, 98, "%"),
+                ("camera_center", "Eixo do carrinho (coluna)", 10, 90, "%")):
+            self.slider(cone_geometry, key, label, low, high, suffix, variables=self.cone_variables)
+        ttk.Label(cone_geometry, text="Distancias em pixels na secao indicada. Roxo = centro entre bordas. "
+                  "Necessarios 3 cones por lado; nao prolonga alem das observacoes.",
+                  foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
+        for key, label, low, high in (
+                ("green_h_min", "Verde: H minimo", 20, 100),
+                ("green_h_max", "Verde: H maximo", 40, 120),
+                ("red_hue", "Vermelho: faixa junto a 0/179", 1, 25),
+                ("s_min", "Saturacao minima (S)", 25, 255),
+                ("v_min", "Brilho minimo (V)", 15, 255)):
+            self.slider(cone_color, key, label, low, high, "", variables=self.cone_variables)
+        ttk.Checkbutton(cone_color, text="Compensar brilho local (CLAHE)", variable=self.cone_variables["clahe"],
+                        command=self.changed).pack(anchor="w", pady=8)
+        ttk.Label(cone_color, text="HSV mostra vermelho e verde separados. A forma afunilada e a continuidade "
+                  "filtram manchas, mas nao substituem um classificador de cones.",
+                  foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
         ttk.Button(sidebar, text="Restaurar todos os ajustes", command=self.restore).pack(fill="x", pady=(12, 0))
         footer = ttk.Frame(self.root, padding=(22, 14, 22, 16))
         footer.pack(fill="x")
@@ -273,13 +321,13 @@ class CameraApp:
         ttk.Label(row, textvariable=self.fps_text).pack(side="left", padx=14)
         ttk.Label(row, textvariable=self.support_text).pack(side="left")
 
-    def slider(self, parent, key, label, low, high, suffix, hint=None):
+    def slider(self, parent, key, label, low, high, suffix, hint=None, *, variables=None):
         row = self.ttk.Frame(parent)
         row.pack(fill="x", pady=(9, 0))
         self.ttk.Label(row, text=label).pack(side="left")
         value_label = self.ttk.Label(row, foreground="#77e2c6", width=7, anchor="e")
         value_label.pack(side="right")
-        variable = self.variables[key]
+        variable = (self.variables if variables is None else variables)[key]
 
         def update(value):
             variable.set(round(float(value)))
@@ -293,7 +341,29 @@ class CameraApp:
                            wraplength=270).pack(anchor="w", pady=(1, 2))
 
     def settings(self):
+        if self.mode.get() == "cones":
+            return ConeSettings(**{name: var.get() for name, var in self.cone_variables.items()})
         return PathSettings(**{name: var.get() for name, var in self.variables.items()})
+
+    def switch_mode(self):
+        cones = self.mode.get() == "cones"
+        self.yellow_detector.reset()
+        self.cone_detector.reset()
+        self.detector = self.cone_detector if cones else self.yellow_detector
+        hidden, shown = (self.yellow_tabs, self.cone_tabs) if cones else (self.cone_tabs, self.yellow_tabs)
+        for tab in hidden:
+            self.notebook.hide(tab)
+        for tab in shown:
+            self.notebook.add(tab)
+        self.notebook.select(shown[0])
+        self.hint.set("Ajuste qual cor fica a esquerda e alinhe a coluna do eixo do carrinho."
+                      if cones else "Clique perto da base da faixa desejada para selecionar o caminho.")
+        self.legend.set("Verde / vermelho: bordas   •   Roxo: trajetoria central   •   Cruz branca: eixo do carrinho"
+                        if cones else "Verde: observado   •   Azul: entre tracos   •   Laranja: buracos   •   Branco: centro")
+        self.last_result = None
+        self.support_text.set("— cones" if cones else "— suporte de cor")
+        self.state.set("Modo cones selecionado" if cones else "Modo faixa amarela selecionado")
+        self.changed()
 
     def refresh_cameras(self):
         self.cameras = available_cameras()
@@ -302,13 +372,14 @@ class CameraApp:
             self.camera_var.set(next(iter(self.cameras)))
 
     def clear_stream(self):
-        self.detector.reset()
+        self.yellow_detector.reset()
+        self.cone_detector.reset()
         self.last_frame = self.last_result = None
         self.last_arrival = self.previous_time = None
         self.streaming = False
         self.fps = 0.
         self.fps_text.set("— FPS")
-        self.support_text.set("— suporte de cor")
+        self.support_text.set("— cones" if self.mode.get() == "cones" else "— suporte de cor")
         self.redraw()
 
     def connect(self):
@@ -340,15 +411,18 @@ class CameraApp:
     def restore(self):
         for name, value in asdict(PathSettings()).items():
             self.variables[name].set(value)
-        self.detector.reset(anchor=.5)
+        for name, value in asdict(ConeSettings()).items():
+            self.cone_variables[name].set(value)
+        self.yellow_detector.reset(anchor=.5)
+        self.cone_detector.reset()
         self.changed()
 
     def recenter(self):
-        self.detector.reset(anchor=.5)
+        self.yellow_detector.reset(anchor=.5)
         self.changed()
 
     def select_path(self, event):
-        if self.display_bounds is None or self.view.get() not in ("Destaque", "Original"):
+        if self.mode.get() == "cones" or self.display_bounds is None or self.view.get() not in ("Destaque", "Original"):
             return
         left, top, width, height = self.display_bounds
         if left <= event.x < left + width and top <= event.y < top + height:
@@ -358,7 +432,14 @@ class CameraApp:
     def update_status(self):
         if self.last_result is not None:
             self.state.set(self.last_result.status)
-            self.support_text.set(f"{self.last_result.support:.0%} suporte de cor" if self.last_result.valid else "Sem caminho valido")
+            if self.mode.get() == "cones":
+                result = self.last_result
+                self.support_text.set(f"{len(result.green_points)} verdes | {len(result.red_points)} vermelhos")
+                if result.valid:
+                    self.state.set(f"{result.status} | E {result.left_distance_px:.0f} px | "
+                                   f"D {result.right_distance_px:.0f} px | Erro {result.lateral_error_px:+.0f} px")
+            else:
+                self.support_text.set(f"{self.last_result.support:.0%} suporte de cor" if self.last_result.valid else "Sem caminho valido")
 
     def tick(self):
         if self.closed:
@@ -413,6 +494,13 @@ class CameraApp:
         mode, result = self.view.get(), self.last_result
         if mode == "Original":
             bgr = self.last_frame
+        elif self.mode.get() == "cones":
+            if mode == "HSV":
+                bgr = np.zeros_like(self.last_frame)
+                bgr[result.green_mask > 0] = (50, 220, 50)
+                bgr[result.red_mask > 0] = (50, 50, 240)
+            else:
+                bgr = render_cones(self.last_frame, result, self.settings(), path_only=mode == "Caminho")
         elif mode == "HSV":
             bgr = cv2.cvtColor(result.raw_mask, cv2.COLOR_GRAY2BGR)
         elif mode == "Caminho":
@@ -449,6 +537,8 @@ def main():
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--mode", choices=("amarela", "cones"), default="amarela",
+                        help="Modo inicial de operacao; tambem pode ser trocado na interface")
     args = parser.parse_args()
     if min(args.width, args.height, args.fps) <= 0:
         parser.error("width, height e fps devem ser positivos")
