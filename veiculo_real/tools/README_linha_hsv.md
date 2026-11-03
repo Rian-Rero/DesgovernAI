@@ -1,4 +1,4 @@
-# Camera USB: faixa amarela em retas e curvas
+# Camera USB: faixa amarela ou pista de cones
 
 Na raiz do projeto:
 
@@ -25,9 +25,65 @@ python veiculo_real/tools/detectar_linha_amarela_hsv.py
 
 O Python precisa de Tkinter e de uma sessao grafica. No Ubuntu/Debian, se o
 modulo `tkinter` estiver ausente, instale `python3-tk` pelo gerenciador do
-sistema. Mantenha `yellow_path.py` na mesma pasta do programa principal.
+sistema. Mantenha `yellow_path.py` e `cone_path.py` na mesma pasta do programa principal.
 
-## Como usar
+## Modo de operacao
+
+O seletor no topo alterna **Faixa amarela** e **Cones verdes / vermelhos** sem
+reconectar a camera. O padrao continua sendo a faixa amarela. Cada modo conserva
+seus proprios ajustes; a troca limpa a deteccao anterior e processa a imagem
+atual com o novo detector. Para iniciar diretamente com cones:
+
+```bash
+venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py --mode cones
+```
+
+### Pista delimitada por cones
+
+1. Selecione **Cones verdes / vermelhos**. Posicione cones de uma cor em cada
+   borda da pista, com pelo menos **3 cones visiveis por lado**. Na aba
+   **Pista de cones**, o padrao e **Verdes a esquerda**; desmarque se os
+   vermelhos estiverem a esquerda. A referencia e a imagem exibida pela camera.
+2. Use **HSV cones** para ajustar os limites de verde, a faixa de vermelho,
+   saturacao e brilho. O vermelho inclui os dois extremos do H do OpenCV.
+   **HSV** mostra as mascaras vermelha e verde para conferir a segmentacao.
+3. Em **Destaque**, as bases e as bordas aparecem nas respectivas cores.
+   A **linha roxa** e a trajetoria central continua, incluindo curvas e curvas
+   em S. **Caminho** mostra essa geometria sobre fundo preto; **Original**
+   continua exibindo a imagem sem anotacoes. O clique para selecionar uma
+   faixa funciona somente no modo amarelo.
+4. A cruz branca marca o **Eixo do carrinho (coluna)** na **Altura da medicao**.
+   Ajuste a coluna caso o eixo longitudinal do carrinho nao coincida com o
+   meio da imagem. As linhas horizontais e os valores **E / D** medem a
+   distancia desse eixo a cada borda na mesma linha da imagem. O **Erro** e
+   a diferenca entre o centro da pista e o eixo: positivo pede deslocamento
+   para a direita, negativo para a esquerda; zero indica centralizacao nessa
+   secao. Uma distancia negativa indica que o eixo esta fora do corredor.
+5. Ajuste **Espaco vertical maximo** se os cones estiverem mais separados,
+   **Area minima do cone** para filtrar manchas pequenas e **Extensao minima**
+   / **Largura minima da pista** para rejeitar corredores inconsistentes.
+   Area e espacamento usam como referencia 640 x 480 px e sao escalados com
+   a resolucao. A altura de medicao e limitada ao intervalo observado nas
+   duas bordas; a linha efetiva `y` aparece na imagem.
+
+O detector usa HSV, componentes com formato afunilado e cadeias geometricas
+continuas de bases dos cones. Cada borda e interpolada por trechos cubicos com
+derivadas limitadas. O centro e a media horizontal das bordas **na mesma
+altura y**, permitindo cones alternados em profundidade, sem parear cones
+apenas pela ordem ou pela distancia aparente. A trajetoria termina no intervalo
+comum observado; nao extrapola ate o carrinho nem alem dos ultimos cones.
+Se faltar uma borda, houver poucos cones, cruzamento das bordas ou grandes
+lacunas, o caminho e invalidado; nao reutiliza uma trajetoria antiga.
+
+**As medidas sao em pixels da imagem processada, nao em metros.** O centro e
+uma referencia visual no plano da imagem. Converter para distancias fisicas e
+obter o centro no plano do solo exige calibracao de perspectiva/pose da camera.
+Este modo ainda e uma ferramenta de percepcao e visualizacao, sem comandos
+de direcao ou velocidade. Objetos de cor e forma semelhantes, cones unidos a
+outras regioes coloridas, oclusoes e retornos sobrepostos em y podem prejudicar
+a deteccao; valide os limites HSV com imagens da pista real antes da integracao.
+
+## Como usar a faixa amarela
 
 1. Escolha o dispositivo no seletor **Camera** e clique **Conectar / trocar**.
    No Linux, a lista mostra `/dev/videoN` e o nome do dispositivo. Algumas
@@ -119,10 +175,14 @@ nao prolonga uma linha antiga indefinidamente. Ele nao envia comandos ao carrinh
 
 ```bash
 venv/bin/python -m unittest discover -s veiculo_real/tools/tests -p 'test_yellow_path.py' -v
+venv/bin/python -m unittest discover -s veiculo_real/tools/tests -p 'test_cone_path.py' -v
 ```
 
 As regressoes cobrem retas/curvas, falhas curtas e longas, pontilhados retos e
 curvos com preenchimento azul, rejeicao de tracos desalinhados, objetos fora
 da faixa, tinta desbotada, selecao entre duas faixas, perda de deteccao e troca
-de camera com captura simulada. A webcam e o aspecto da janela devem ser
+de camera com captura simulada. Os testes de cones cobrem retas, curvas em S,
+cones alternados, inversao das cores, os dois extremos do vermelho HSV,
+distancias/erro lateral, perda de bordas, filtragem de manchas, resolucoes e
+troca de modo sem display. A webcam e o aspecto da janela devem ser
 conferidos em uma sessao grafica real.

@@ -25,6 +25,9 @@ sincronizados. `--host`/`--port` selecionam a API (padrao `127.0.0.1:23000`); `-
 os graficos; `--no-real-time` remove a espera para acompanhar o relogio real.
 
 As dependencias estao em `simulador/requirements.txt`.
+A missao ajusta a abertura horizontal da camera virtual para 150 graus
+(`vision_angle_deg`), para observar as duas bordas do corredor largo nas curvas.
+O valor anterior do sensor e restaurado ao encerrar a missao; a cena nao e salva.
 
 ## Da imagem ao comando
 
@@ -32,6 +35,8 @@ A entrada e uma imagem **RGB** do sensor, corrigida verticalmente pelo `Car`.
 A segmentacao por cor identifica regioes vermelhas e verdes e encontra a base
 visivel de cada cone. A base e mais adequada que o centro da mancha porque
 corresponde aproximadamente ao contato com o chao.
+Quando um cone vermelho toca a pintura vermelha do meio-fio, a segmentacao
+separa o corpo vertical da faixa de cor e recupera o contato na mascara original.
 
 A perspectiva e a pose da camera convertem cada base de pixels para metros,
 intersectando o raio visual com o plano da pista. O controle usa apenas essas
@@ -55,15 +60,20 @@ Os ajustes ficam no dicionario `parameters` passado a `run_mission`:
 | `cone_max_distance` | 12 m | Alcance longitudinal usado no corredor |
 | `cone_memory_horizon` | 6 s | Idade maxima dos pontos de apoio ja vistos |
 | `cone_freshness` | 0,5 s | Tempo maximo sem deteccao nova de cada cor |
+| `cone_single_side_timeout` | 12 s | Validade da largura aprendida para oclusao de uma borda |
 | `cone_min_span` | 1 m | Comprimento minimo de apoio por borda |
 | `cone_max_near_distance` | 6 m | Distancia maxima do apoio mais proximo |
 | `cone_min_width` / `cone_max_width` | 0,75 / 7 m | Intervalo de largura aceitavel |
 | `cone_ground_z` | 0,005 m | Altura do plano de contato no mundo |
 
-E necessario apoio de pelo menos dois cones de cada cor, comprimento e
+Para iniciar a estimativa da largura, e necessario apoio de pelo menos dois cones de cada cor, comprimento e
 sobreposicao longitudinal suficientes e bordas sem cruzamento. A estimativa
 curva requer mais apoio que uma reta. A memoria conserva a geometria proxima,
-mas cada cor precisa continuar sendo vista dentro do intervalo de frescor.
+e exige deteccoes recentes. Se uma borda ficar oculta, o controle pode continuar
+com pelo menos tres pontos consistentes da borda visivel e a largura previamente
+observada nas duas cores, durante no maximo 12 s sem renovar essa largura. Uma
+unica cor nunca inicializa o corredor. Se o apoio ou o prazo acabarem, a referencia
+e rejeitada e a hierarquia procura a linha amarela.
 
 O caminho central fornece tres medidas no eixo dianteiro:
 
@@ -92,6 +102,8 @@ A imagem mostra as bases detectadas, o caminho central e a fonte selecionada.
 As distancias vermelha e verde sao laterais assinadas em metros, relativas ao
 eixo dianteiro: esquerda positiva e direita negativa. A igualdade de seus modulos
 indica centralizacao em um trecho aproximadamente reto.
+Durante uma oclusao, a distancia da borda ausente e **estimada pela largura aprendida**;
+essa condicao aparece na imagem e na coluna `cone_inferred_side`.
 
 Os graficos mostram os erros do caminho selecionado, a velocidade de referencia,
 a velocidade medida e o esterco. O CSV `logs/<experimento>/car.csv` inclui:
@@ -101,6 +113,7 @@ a velocidade medida e o esterco. O CSV `logs/<experimento>/car.csv` inclui:
 | `path_source` | 2 = cones; 1 = linha amarela; 0 = sem referencia |
 | `path_valid` | Validade da referencia efetivamente utilizada |
 | `cones_valid` | Validade do corredor reconstruido |
+| `cone_inferred_side` | 0 = duas bordas; 1 = vermelha estimada; 2 = verde estimada |
 | `line_valid` | Linha amarela selecionada e valida |
 | `yellow_evaluated` | Segmentacao amarela executada neste passo |
 | `red_cones`, `green_cones` | Quantidade de bases detectadas na imagem atual |
@@ -123,3 +136,30 @@ Para executar as verificacoes automaticas:
 ```bash
 MPLBACKEND=Agg venv/bin/python -m unittest discover -s simulador/tests -v
 ```
+
+## Validacao em 3 de novembro de 2026
+
+As verificacoes automaticas incluem segmentacao, contato com o meio-fio,
+associacao temporal, rejeicao de outros ramos, prioridade, troca de referencia,
+oclusao e expiracao da largura, frenagem e exportacao de CSV. Os testes em malha
+fechada tambem percorrem curvas completas para esquerda e direita com modelo
+bicicleta, incluindo uma cadeia que renderiza imagens antes de detectar os cones.
+
+Foram realizados estes ensaios na instancia isolada do CoppeliaSim, sem salvar
+alteracoes nas cenas originais:
+
+| Ensaio | Condicoes | Resultado |
+| --- | --- | --- |
+| Retorno pelos cones, sem linha | 30 s, passo de 50 ms, abertura 150 graus, velocidade nominal 1,5 m/s | 29,9 m percorridos; mudanca de orientacao de aproximadamente 177 graus |
+| Fonte utilizada no retorno | 600 amostras controladas | 580 com cones; 20 sem referencia; 17 usaram largura aprendida durante oclusao |
+| Erro visual no retorno | Amostras validas | Media absoluta de 0,18 m; pico de 1,81 m, incluindo transitorios e estimativas ruidosas |
+| Afastamento dos cones no retorno | Medicao da cena apenas para avaliacao | Distancia minima de 1,79 m entre o centro do carro e o centro dos cones |
+| Alternativa amarela | Cena com linha, cones ocultos para o teste, passo padrao de 10 ms | 301 de 301 amostras usando a linha; 2,79 m percorridos em 3 s |
+
+O erro visual e a estimativa que o controlador recebe, nao uma medida independente
+do erro real em relacao a um mapa. As posicoes dos cones usadas para avaliar o
+afastamento nao sao fornecidas a percepcao nem ao Stanley. O ensaio cobre um
+retorno completo e um trecho com a alternativa amarela; nao certifica uma volta
+completa em toda a pista.
+
+![Trajetoria e imagem do ensaio no CoppeliaSim](ensaios/cones_stanley_validacao.png)

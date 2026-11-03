@@ -20,6 +20,7 @@ def _empty(n=3):
 def _validate(parameters):
     defaults = {'cone_max_distance': 12., 'cone_max_lateral': 8.,
                 'cone_memory_horizon': 6., 'cone_freshness': .5,
+                'cone_single_side_timeout': 12.,
                 'cone_min_span': 1., 'cone_max_near_distance': 6.,
                 'cone_min_width': .75, 'cone_max_width': 7.}
     for name, default in defaults.items():
@@ -46,6 +47,7 @@ class ConeObservation:
     red_lateral_m: float = math.nan
     green_lateral_m: float = math.nan
     reason: str = 'Cones insuficientes nas duas bordas'
+    inferred_color: str | None = None
 
     @property
     def valid(self):
@@ -76,10 +78,39 @@ def detect_cones(image, min_area=3):
         bases = []
         for label in range(1, count):
             x, y, w, h, area = stats[label]
-            if (area < min_area or h < 3 or w < 2 or w > 1.5*h
-                    or y+h >= height or x == 0 or x+w >= width):
+            if area < min_area or h < 3 or y+h >= height:
                 continue
             component = labels[y:y+h, x:x+w] == label
+            if w > 1.5*h:
+                # A base de um cone vermelho pode tocar a zebra vermelha.
+                # Retira apenas a faixa horizontal comprida para separar o
+                # corpo vertical; depois recupera seu contato na mascara original.
+                stripe = cv2.morphologyEx(component.astype(np.uint8), cv2.MORPH_OPEN,
+                                          np.ones((1, max(7, int(.6*h))), np.uint8))
+                bodies = component & ~stripe.astype(bool)
+                bodies = cv2.morphologyEx(bodies.astype(np.uint8), cv2.MORPH_CLOSE,
+                                           np.ones((5, 1), np.uint8)).astype(bool) & component
+                n, body_labels, body_stats, _ = cv2.connectedComponentsWithStats(bodies.astype(np.uint8), 8)
+                for body_id in range(1, n):
+                    bx, by, bw, bh, ba = body_stats[body_id]
+                    if ba < min_area or bh < 5 or bw < 2 or bw > 1.5*bh:
+                        continue
+                    body = body_labels[by:by+bh, bx:bx+bw] == body_id
+                    top = np.count_nonzero(np.any(body[:max(1, bh//3)], axis=0))
+                    bottom = np.count_nonzero(np.any(body[-max(1, bh//3):], axis=0))
+                    if top >= .95*bottom:
+                        continue
+                    cx, row = x+bx+(bw-1)/2, y+by+bh-1
+                    for candidate in range(row+1, y+h):
+                        if mask[candidate, int(round(cx))]:
+                            row = candidate
+                        else:
+                            break
+                    if 0 < cx < width-1:
+                        bases.append((cx, float(row)))
+                continue
+            if w < 2 or x == 0 or x+w >= width:
+                continue
             if h >= 7:
                 top = np.flatnonzero(np.any(component[:max(1, h//3)], axis=0))
                 bottom = np.flatnonzero(np.any(component[-max(1, h//3):], axis=0))
@@ -147,14 +178,18 @@ def _boundary(points, max_distance, max_lateral):
     points = np.asarray(selected)
     if len(points) < 2:
         return points
-    # Remover salto lateral isolado; curvas suaves conservam seu andamento.
-    keep = [0]
-    for index in range(1, len(points)):
-        previous = points[keep[-1]]
-        dx, dy = points[index]-previous
-        if abs(dy) <= max(.7, 1.7*dx):
-            keep.append(index)
-    return points[keep]
+    # Ancora no cone espacialmente mais proximo. Comecar pelo menor x podia
+    # selecionar outro trecho da pista quase ao lado do carro, mas a 5 m.
+    anchor = int(np.argmin(np.linalg.norm(points, axis=1)))
+    keep = [anchor]
+    for indices in (range(anchor+1, len(points)), range(anchor-1, -1, -1)):
+        previous = points[anchor]
+        for index in indices:
+            dx, dy = points[index]-previous
+            if abs(dy) <= max(.7, 1.3*abs(dx)):
+                keep.append(index)
+                previous = points[index]
+    return points[sorted(keep)]
 
 
 def _fit_boundary(points):
@@ -332,6 +367,70 @@ class ConePathDetector:
         if not all(math.isfinite(v) and v > 0 for v in (horizon, freshness)):
             raise ValueError('Tempos da memoria de cones devem ser finitos e positivos.')
         self.memory = {color: _ConeMemory(horizon, freshness) for color in ('red', 'green')}
+        self.width = None
+        self.width_time = -math.inf
+        self.sides = {}
+
+    def _single_side(self, color, points, front, forward, ground_z):
+        """Compensa uma oclusao com a largura medida antes nas DUAS bordas."""
+        forward = np.asarray(forward, dtype=float)[:2].copy()
+        if not np.isfinite(forward).all() or np.linalg.norm(forward) < 1e-9 or not np.isfinite(front).all():
+            return None
+        forward /= np.linalg.norm(forward)
+        local = _boundary(_local(points, front, forward),
+                          self.parameters.get('cone_max_distance', 12.),
+                          self.parameters.get('cone_max_lateral', 8.))
+        if len(local) < 3 or np.ptp(local[:, 0]) < 1.5:
+            return None
+        if np.min(local[:, 0]) > self.parameters.get('cone_max_near_distance', 6.):
+            return None
+        local = local[local[:, 0] <= max(5., float(np.min(local[:, 0]))+4.)]
+        if len(local) < 3:
+            return None
+        coefficients, support, rms = _fit_boundary(local)
+        if len(support) < 3 or rms > .2:
+            return None
+        side, half_width = self.sides[color], self.width/2
+        arc = _circle(support)
+        if arc is not None and arc[1] < 20.:
+            origin, radius, _ = arc
+            distance = float(np.linalg.norm(origin))
+            if distance < .1:
+                return None
+            tangent = np.array([origin[1], -origin[0]])/distance
+            if tangent[0] < 0:
+                tangent = -tangent
+            turn = math.copysign(1., float(origin@np.array([-tangent[1], tangent[0]])))
+            center_radius = radius+side*turn*half_width
+            if not .8 < center_radius < 30.:
+                return None
+            errors = (turn*(distance-center_radius), math.atan2(tangent[1], tangent[0]),
+                      turn/center_radius)
+            lateral = turn*(distance-radius)
+            radial = -origin/distance
+            angles = turn*np.linspace(0., min(4., float(np.max(support[:, 0])))/center_radius, 45)
+            local_path = origin+center_radius*np.column_stack((
+                np.cos(angles)*radial[0]-np.sin(angles)*radial[1],
+                np.sin(angles)*radial[0]+np.cos(angles)*radial[1]))
+        else:
+            xs = np.linspace(0., min(4., float(np.max(support[:, 0]))), 45)
+            slopes = np.polyval(np.polyder(coefficients), xs)
+            normals = np.column_stack((-slopes, np.ones(len(xs))))/np.sqrt(1+slopes**2)[:, None]
+            local_path = np.column_stack((xs, np.polyval(coefficients, xs)))-side*half_width*normals
+            lateral = float(np.polyval(coefficients, 0.))/math.sqrt(1+float(np.polyval(np.polyder(coefficients), 0.))**2)
+            errors = None
+        left = np.array([-forward[1], forward[0]])
+        xy = np.asarray(front)[:2]+local_path[:, 0, None]*forward+local_path[:, 1, None]*left
+        path = np.column_stack((xy, np.full(len(xy), ground_z)))
+        if errors is None:
+            errors = fit_line_errors(path, front, forward, with_curvature=True)
+        if errors is None or abs(errors[0]) > self.width/2 or abs(errors[1]) > 1.:
+            return None
+        distances = {color: lateral, 'green' if color == 'red' else 'red': lateral-side*self.width}
+        return ConeObservation(errors=errors, path=path, red_lateral_m=distances['red'],
+                               green_lateral_m=distances['green'],
+                               inferred_color='green' if color == 'red' else 'red',
+                               reason='Oclusao: centro pela borda visivel e largura ja medida')
 
     def observe(self, image, camera_matrix, angle, ground_z, front, forward, time):
         if not math.isfinite(time):
@@ -344,8 +443,23 @@ class ConePathDetector:
             clouds[color] = self.memory[color].update(time, points)
         observation = reconstruct_cone_path(clouds['red'], clouds['green'], front, forward,
                                              ground_z, self.parameters)
+        if observation.valid:
+            width = abs(observation.red_lateral_m-observation.green_lateral_m)
+            if self.width is None or .75*self.width <= width <= 1.25*self.width:
+                self.width = width if self.width is None else .9*self.width+.1*width
+                self.width_time = time
+                self.sides = {'red': math.copysign(1., observation.red_lateral_m-observation.green_lateral_m)}
+                self.sides['green'] = -self.sides['red']
+        elif (self.width is not None
+              and time-self.width_time <= self.parameters.get('cone_single_side_timeout', 12.)):
+            for color, other in (('red', 'green'), ('green', 'red')):
+                if len(clouds[color]) >= 3 and len(clouds[other]) < 2:
+                    inferred = self._single_side(color, clouds[color], front, forward, ground_z)
+                    if inferred is not None:
+                        observation = inferred
+                        break
         observation.red_pixels, observation.green_pixels = pixels['red'], pixels['green']
         observation.red_points, observation.green_points = clouds['red'], clouds['green']
-        if not len(clouds['red']) or not len(clouds['green']):
+        if not observation.valid and (not len(clouds['red']) or not len(clouds['green'])):
             observation.reason = 'Cones vermelhos e verdes recentes insuficientes'
         return observation

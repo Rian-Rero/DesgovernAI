@@ -53,6 +53,10 @@ class Car:
 	def __init__(self, parameters):
 		
 		self.parameters = parameters
+		if 'vision_angle_deg' in parameters:
+			angle = parameters['vision_angle_deg']
+			if not np.isfinite(angle) or not 1.0 < angle < 179.0:
+				raise ValueError('vision_angle_deg deve estar entre 1 e 179 graus.')
 		
 		# inicia simulador
 		self.init_coppelia_sim()
@@ -155,6 +159,12 @@ class Car:
 		if self.ultra == -1:
 			print('Erro: ultrassônico não encontrado')
 		self.remote = CarRemoteAPI(self.sim, self.robot)
+		self._vision_angle = None
+		if 'vision_angle_deg' in self.parameters:
+			self._vision_angle = self.sim.getObjectFloatParam(
+				self.cam, self.sim.visionfloatparam_perspective_angle)
+			self.sim.setObjectFloatParam(self.cam, self.sim.visionfloatparam_perspective_angle,
+				float(np.deg2rad(self.parameters['vision_angle_deg'])))
 		self._vision_handling = None
 		if self.parameters.get('explicit_vision', False):
 			self._vision_handling = self.sim.getExplicitHandling(self.cam)
@@ -631,6 +641,9 @@ class Car:
 					time.sleep(0.01)
 				if self._vision_handling is not None:
 					self.sim.setExplicitHandling(self.cam, self._vision_handling)
+				if getattr(self, '_vision_angle', None) is not None:
+					self.sim.setObjectFloatParam(self.cam, self.sim.visionfloatparam_perspective_angle,
+						self._vision_angle)
 				self.remote.close()
 			except:
 				pass

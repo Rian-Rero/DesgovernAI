@@ -14,6 +14,27 @@ from main import parameters, run_mission
 
 
 class SimulationLoopTests(unittest.TestCase):
+    def test_invalid_camera_aperture_is_rejected_before_connecting(self):
+        with patch.object(Car, 'init_coppelia_sim') as connect:
+            for angle in (0., 180., float('nan')):
+                with self.subTest(angle=angle), self.assertRaises(ValueError):
+                    Car(dict(parameters, vision_angle_deg=angle))
+            connect.assert_not_called()
+
+    def test_camera_aperture_is_restored_after_the_mission(self):
+        car = Car.__new__(Car)
+        car.sim = Mock()
+        car.sim.getSimulationState.return_value = car.sim.simulation_stopped
+        car.remote = Mock()
+        car.stop_mission = Mock()
+        car.cam = 10
+        car._vision_handling = None
+        car._vision_angle = np.pi/3
+        car.close()
+        car.sim.setObjectFloatParam.assert_called_once_with(
+            car.cam, car.sim.visionfloatparam_perspective_angle, np.pi/3)
+        car.remote.close.assert_called_once()
+
     def test_interrupted_mission_saves_log_and_closes_car(self):
         for interrupted in [True, False]:
             car = Mock()

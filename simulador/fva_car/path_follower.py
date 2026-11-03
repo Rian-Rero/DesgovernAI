@@ -112,6 +112,7 @@ class HierarchicalPathFollower(YellowLineFollower):
         car.log(
             path_valid=int(valid), path_source=PATH_SOURCE_CODES[source],
             cones_valid=int(observation is not None and _finite_errors(observation.errors)),
+            cone_inferred_side={'red': 1, 'green': 2}.get(getattr(observation, 'inferred_color', None), 0),
             line_valid=int(source == 'yellow'), yellow_evaluated=int(yellow_evaluated),
             red_cones=len(observation.red_pixels) if observation is not None else 0,
             green_cones=len(observation.green_pixels) if observation is not None else 0,
@@ -149,6 +150,8 @@ class HierarchicalPathFollower(YellowLineFollower):
         if observation is not None:
             lines.append(f'Vermelhos: {observation.red_lateral_m:+.2f} m | '
                          f'Verdes: {observation.green_lateral_m:+.2f} m')
+            if getattr(observation, 'inferred_color', None):
+                lines.append('Borda oculta estimada pela largura observada')
         for index, text in enumerate(lines):
             origin = (8, 18 + index*18)
             cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, .43, (0, 0, 0), 3, cv2.LINE_AA)

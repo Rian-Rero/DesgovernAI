@@ -3,6 +3,7 @@ import math
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -19,6 +20,14 @@ def world_points(x, y):
 
 
 class ConeDetectionTests(unittest.TestCase):
+    def test_red_cone_touching_a_red_curb_keeps_its_ground_contact(self):
+        image = np.zeros((100, 160, 3), np.uint8)
+        cv2.fillConvexPoly(image, np.array([[80, 35], [70, 75], [90, 75]]), (255, 0, 0))
+        image[73:76, 10:150] = (255, 0, 0)
+        pixels = detect_cones(image)
+        self.assertEqual(len(pixels['red']), 1)
+        np.testing.assert_allclose(pixels['red'][0], [80., 75.], atol=1.)
+
     def test_bases_use_ground_contact_and_red_hue_wrap(self):
         image = np.zeros((160, 240, 3), np.uint8)
         cv2.fillConvexPoly(image, np.array([[30, 40], [19, 90], [41, 90]]), (255, 0, 0))
@@ -42,6 +51,48 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(len(detect_cones(image)['red']), 0)
 
 class ConeGeometryTests(unittest.TestCase):
+    def test_one_visible_border_uses_learned_width_then_expires(self):
+        detector = ConePathDetector()
+        image = np.zeros((10, 10, 3), np.uint8)
+        pixels = np.array([[1., 1.], [2., 2.], [3., 3.]])
+        empty = np.empty((0, 2))
+        red, green = world_points([1., 3., 5.], 2.), world_points([1., 3., 5.], -2.)
+        with patch('fva_car.cones.detect_cones', return_value={'red': pixels, 'green': pixels}), \
+                patch('fva_car.cones.project_ground', side_effect=[red, green]):
+            both = detector.observe(image, np.eye(3, 4), math.pi/3, 0., [0, 0, 0], [1, 0], 0.)
+        self.assertTrue(both.valid)
+        with patch('fva_car.cones.detect_cones', return_value={'red': empty, 'green': pixels}), \
+                patch('fva_car.cones.project_ground', return_value=green):
+            inferred = detector.observe(image, np.eye(3, 4), math.pi/3, 0., [0, 0, 0], [1, 0], 1.)
+            self.assertTrue(inferred.valid, inferred.reason)
+            self.assertEqual(inferred.inferred_color, 'red')
+            self.assertAlmostEqual(inferred.errors[0], 0., places=6)
+            self.assertAlmostEqual(inferred.red_lateral_m, 2., places=6)
+            expired = detector.observe(image, np.eye(3, 4), math.pi/3, 0., [0, 0, 0], [1, 0], 13.)
+            self.assertFalse(expired.valid)
+            fresh = ConePathDetector().observe(image, np.eye(3, 4), math.pi/3, 0., [0, 0, 0], [1, 0], 0.)
+            self.assertFalse(fresh.valid)  # uma unica cor nunca inicializa a largura
+
+    def test_visible_outer_border_recovers_curved_center_during_occlusion(self):
+        detector = ConePathDetector()
+        detector.width, detector.sides = 4., {'red': 1., 'green': -1.}
+        angles = np.array([.15, .35, .55, .75])
+        green = world_points(8*np.sin(angles), 6-8*np.cos(angles))
+        observation = detector._single_side('green', green, [0, 0, 0], [1, 0], 0.)
+        self.assertIsNotNone(observation)
+        self.assertTrue(observation.valid)
+        self.assertAlmostEqual(observation.errors[0], 0., places=6)
+        self.assertAlmostEqual(observation.errors[2], 1/6, places=6)
+
+    def test_side_branch_near_the_front_does_not_replace_the_nearest_border(self):
+        red = world_points([-.06, 2.48, 2.97, 4.5], [5.51, 1.74, 1.9, 2.35])
+        green = world_points([-.8, 1.35, 3.63], [-1.91, -2., -2.07])
+        observation = reconstruct_cone_path(red, green, [0, 0, 0], [1, 0])
+        self.assertTrue(observation.valid, observation.reason)
+        without_branch = reconstruct_cone_path(red[1:], green, [0, 0, 0], [1, 0])
+        np.testing.assert_allclose(observation.errors, without_branch.errors)
+        self.assertLess(abs(observation.errors[1]), .3)
+
     def test_camera_bobble_keeps_one_metric_landmark_per_cone(self):
         memory = _ConeMemory(6., .5)
         points = world_points([2., 4., 6.], 2.)

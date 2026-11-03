@@ -28,6 +28,7 @@ parameters = {
     "beep": True,
     "sample_time": CONTROL_SAMPLE_TIME,
     "explicit_vision": True,
+    "vision_angle_deg": 150.0,  # corredor largo: mantem a borda interna visivel nas curvas
     "real_time": True,
     "velocity_reference": VELOCITY_REFERENCE,
     "stanley_gain": 1.5,  # 1/s: peso do erro de distancia lateral
