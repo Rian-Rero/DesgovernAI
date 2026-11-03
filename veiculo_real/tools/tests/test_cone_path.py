@@ -2,10 +2,12 @@
 
 from dataclasses import asdict
 from pathlib import Path
+import json
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -138,17 +140,18 @@ class ConePathTests(unittest.TestCase):
                 self.assertTrue(result.valid, result.status)
                 self.assertEqual(len(result.red_points), 5)
 
-    def test_loss_of_either_side_or_entire_frame_clears_path(self):
+    def test_loss_without_memory_clears_path(self):
         detector = ConePathDetector()
+        settings = ConeSettings(tracking=False)
         for missing in ("green", "red", "all"):
-            self.assertTrue(detector.process(track(), timestamp=1.).valid)
+            self.assertTrue(detector.process(track(), settings, timestamp=1.).valid)
             frame = track()
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             mask = hsv[:, :, 0] > 30 if missing == "green" else hsv[:, :, 0] < 15
             if missing == "all":
                 mask[:] = True
             frame[mask] = 35
-            result = detector.process(frame, timestamp=1.05)
+            result = detector.process(frame, settings, timestamp=1.05)
             self.assertFalse(result.valid)
             self.assertIsNone(result.left_distance_px)
             self.assertIsNone(result.lateral_error_px)
@@ -255,6 +258,7 @@ class ModeSwitchTests(unittest.TestCase):
         app.notebook = Mock()
         app.yellow_tabs, app.cone_tabs = ("geometry", "color", "gaps"), ("cones", "hsv")
         app.hint, app.legend, app.support_text, app.state = (Variable() for _ in range(4))
+        app.ground_text, app.root = Variable(), Mock()
         app.last_frame, app.last_result = track(), None
         app.redraw = Mock()
         return app
@@ -293,6 +297,31 @@ class ModeSwitchTests(unittest.TestCase):
         result = app.last_result
         app.select_path(SimpleNamespace(x=100, y=100))
         self.assertIs(app.last_result, result)
+
+    def test_load_and_clear_calibration_reprocesses_frame(self):
+        app = self.make_app()
+        app.mode.set('cones')
+        app.switch_mode()
+        app.cone_variables['memory_ms'].set(450)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'camera.json'
+            path.write_text(json.dumps({'image_size': [640, 480], 'homography': np.eye(3).tolist()}))
+            with patch('tkinter.filedialog.askopenfilename', return_value=str(path)):
+                app.load_ground()
+            self.assertIsNotNone(app.cone_detector.calibration)
+            self.assertIn('camera.json', app.ground_text.get())
+            self.assertEqual(app.settings().memory_ms, 450)
+            previous = app.cone_detector.calibration
+            path.write_text('{}')
+            with patch('tkinter.filedialog.askopenfilename', return_value=str(path)), \
+                    patch('tkinter.messagebox.showerror') as error:
+                app.load_ground()
+                error.assert_called_once()
+            self.assertIs(app.cone_detector.calibration, previous)
+        app.clear_ground()
+        self.assertIsNone(app.cone_detector.calibration)
+        self.assertTrue(app.last_result.valid)
+        self.assertEqual(app.last_result.source, 'imagem')
 
 
 if __name__ == "__main__":

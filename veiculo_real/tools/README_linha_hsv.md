@@ -25,7 +25,9 @@ python veiculo_real/tools/detectar_linha_amarela_hsv.py
 
 O Python precisa de Tkinter e de uma sessao grafica. No Ubuntu/Debian, se o
 modulo `tkinter` estiver ausente, instale `python3-tk` pelo gerenciador do
-sistema. Mantenha `yellow_path.py` e `cone_path.py` na mesma pasta do programa principal.
+sistema. Mantenha `yellow_path.py`, `cone_path.py`, `cone_geometry.py` e
+`cone_tracking.py` na mesma pasta do programa principal. O carregamento da
+calibracao reutiliza `veiculo_real/fva_car/lateral.py`, sem abrir atuadores.
 
 ## Modo de operacao
 
@@ -41,18 +43,19 @@ venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py --mode cones
 ### Pista delimitada por cones
 
 1. Selecione **Cones verdes / vermelhos**. Posicione cones de uma cor em cada
-   borda da pista, com pelo menos **3 cones visiveis por lado**. Na aba
-   **Pista de cones**, o padrao e **Verdes a esquerda**; desmarque se os
+   borda da pista, com pelo menos **3 cones visiveis por lado para iniciar**. Na aba
+   **Pista**, o padrao e **Verdes a esquerda**; desmarque se os
    vermelhos estiverem a esquerda. A referencia e a imagem exibida pela camera.
-2. Use **HSV cones** para ajustar os limites de verde, a faixa de vermelho,
+2. Use a aba **HSV** para ajustar os limites de verde, a faixa de vermelho,
    saturacao e brilho. O vermelho inclui os dois extremos do H do OpenCV.
    **HSV** mostra as mascaras vermelha e verde para conferir a segmentacao.
 3. Em **Destaque**, as bases e as bordas aparecem nas respectivas cores.
-   A **linha roxa** e a trajetoria central continua, incluindo curvas e curvas
-   em S. **Caminho** mostra essa geometria sobre fundo preto; **Original**
+   A **linha roxa continua** e a trajetoria central observada, incluindo curvas
+   em S. **Roxo tracejado** identifica uso de memoria/borda estimada, com o
+   indice de confianca no video. **Caminho** mostra a geometria sobre fundo preto; **Original**
    continua exibindo a imagem sem anotacoes. O clique para selecionar uma
    faixa funciona somente no modo amarelo.
-4. A cruz branca marca o **Eixo do carrinho (coluna)** na **Altura da medicao**.
+4. Sem calibracao, a cruz branca marca o **Eixo do carrinho (coluna)** na **Altura da medicao**.
    Ajuste a coluna caso o eixo longitudinal do carrinho nao coincida com o
    meio da imagem. As linhas horizontais e os valores **E / D** medem a
    distancia desse eixo a cada borda na mesma linha da imagem. O **Erro** e
@@ -65,6 +68,12 @@ venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py --mode cones
    Area e espacamento usam como referencia 640 x 480 px e sao escalados com
    a resolucao. A altura de medicao e limitada ao intervalo observado nas
    duas bordas; a linha efetiva `y` aparece na imagem.
+6. Na aba **Memoria**, ajuste a memoria por cone (padrao **350 ms**), a
+   suavizacao temporal e a confianca minima (padrao **20%**). Cada cone expira
+   individualmente: ver outros cones nao renova uma observacao perdida. Uma
+   perda breve pode conservar a trajetoria como estimada; perdas prolongadas
+   removem a referencia. Desmarcar **Rastrear cones entre frames** desativa
+   tanto a memoria dos cones quanto a reconstrucao por largura.
 
 Para cameras baixas, os cones podem ocupar somente uma faixa estreita perto
 do horizonte, mesmo com muito piso visivel. Os padroes do modo cones sao
@@ -76,18 +85,72 @@ de bases para aceitar bordas comprimidas verticalmente, mantendo a rejeicao
 de saltos de direcao. As mensagens distinguem ausencia de cones, quantidade
 insuficiente e falta de continuidade/extensao nas bordas.
 
-O detector usa HSV, componentes com formato afunilado e cadeias geometricas
-continuas de bases dos cones. Cada borda e interpolada por trechos cubicos com
-derivadas limitadas. O centro e a media horizontal das bordas **na mesma
-altura y**, permitindo cones alternados em profundidade, sem parear cones
-apenas pela ordem ou pela distancia aparente. A trajetoria termina no intervalo
-comum observado; nao extrapola ate o carrinho nem alem dos ultimos cones.
-Se faltar uma borda, houver poucos cones, cruzamento das bordas ou grandes
-lacunas, o caminho e invalidado; nao reutiliza uma trajetoria antiga.
+O detector usa HSV, componentes afunilados e cadeias geometricas de bases dos
+cones. O mapa associa observacoes por cor e proximidade, com atualizacao de
+Kalman para reduzir oscilacoes. O fluxo optico no piso, validado por RANSAC e
+consistencia ida/volta, estima o movimento entre frames. Se faltar textura,
+nao inventa movimento: reduz a confianca da memoria e mantem a expiracao.
+O indice de confianca e heuristico, nao uma probabilidade calibrada.
 
-**As medidas sao em pixels da imagem processada, nao em metros.** O centro e
-uma referencia visual no plano da imagem. Converter para distancias fisicas e
-obter o centro no plano do solo exige calibracao de perspectiva/pose da camera.
+**Sem calibracao**, as medidas continuam em pixels. As bordas usam cubicas
+com derivadas limitadas, e o centro e a media horizontal **na mesma altura y**,
+sem associar pares de cones. A memoria compensa o deslocamento da imagem
+quando ha fluxo optico confiavel. Nao ha reconstrucao de largura metrica nesse
+modo, nem extrapolacao da trajetoria ate a base da imagem.
+
+### Centro entre curvas no piso (metros)
+
+Na aba **Solo**, use **Carregar calibracao JSON** ou inicie com:
+
+```bash
+venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py --mode cones --calibration veiculo_real/calibracao/camera_lateral.json
+```
+
+O arquivo precisa ter sido medido **para esta camera, fixa na mesma pose**.
+O programa nao carrega automaticamente o JSON do repositorio. Se precisar
+medir uma nova calibracao, feche/desconecte a camera no visualizador e execute:
+
+```bash
+venv/bin/python veiculo_real/tools/calibrar_camera_lateral.py --camera 0 --output /tmp/camera_cones.json
+```
+
+Troque `0` pelo indice do dispositivo. Clique em pelo menos quatro pontos
+distribuidos no chao e informe frente/esquerda em metros a partir do centro
+do eixo dianteiro, conforme as instrucoes do calibrador. Depois carregue o
+JSON no visualizador. O chao deve ser aproximadamente plano e a resolucao
+deve manter a proporcao calibrada; redimensionamento preserva centros de pixel.
+
+No modo metrica, as bases sao projetadas para (frente, esquerda). Cada borda
+vira uma curva parametrica por comprimento de arco. O centro e refinado por
+secoes **perpendiculares a trajetoria**, cruzando as duas curvas continuamente:
+fica equidistante delas nessa secao, em vez de usar o meio de dois cones ou
+uma media horizontal de pixels. Isso permite cones alternados e curvas em S.
+Secoes sem intersecao suportada nao sao prolongadas; bordas cruzadas, largura
+inconsistente e trajetoria com raio abaixo do configurado sao rejeitadas.
+
+A largura e aprendida somente quando as duas bordas estao observadas. Se uma
+delas desaparecer alem da memoria dos cones, mas a outra continuar visivel,
+uma borda virtual e deslocada **perpendicularmente** pela largura aprendida.
+Esse recurso expira em **1500 ms** desde a ultima observacao completa, ou antes
+se a confianca cair abaixo do limite. Uma estimativa nao renova a validade da
+largura. Sem largura aprendida, nao ha reconstrucao de uma borda no inicio.
+
+Os valores E/D em metros usam uma secao normal proxima do carro dentro do
+trecho observado; erro positivo indica centro a direita. `ground_center`,
+`heading_rad`, `curvature_m_inv` e `corridor_width_m` ficam disponiveis no
+resultado. Altura/coluna da aba Pista valem apenas para o modo em pixels.
+Configure margem, limites de largura e raio minimo na aba Solo conforme a
+geometria do carrinho. A margem e a distancia minima do centro a borda;
+considere metade da largura do veiculo mais a folga desejada.
+
+Para integrar encoder/IMU futuramente, a API aceita
+`detector.process(frame, settings, timestamp=t, motion=(frente_m, esquerda_m, yaw_rad))`.
+O delta deve cobrir exatamente o intervalo desde o frame anterior, expresso
+no referencial anterior do carro, com yaw positivo para a esquerda. A entrada
+requer calibracao e tem prioridade sobre o fluxo optico. A GUI USB usa o fluxo
+optico e nao abre encoder/IMU. Trocar camera, modo, ajustes, calibracao ou
+resolucao limpa o mapa; horarios nao crescentes tambem limpam a memoria.
+
 Este modo ainda e uma ferramenta de percepcao e visualizacao, sem comandos
 de direcao ou velocidade. Objetos de cor e forma semelhantes, cones unidos a
 outras regioes coloridas, oclusoes e retornos sobrepostos em y podem prejudicar
@@ -186,6 +249,7 @@ nao prolonga uma linha antiga indefinidamente. Ele nao envia comandos ao carrinh
 ```bash
 venv/bin/python -m unittest discover -s veiculo_real/tools/tests -p 'test_yellow_path.py' -v
 venv/bin/python -m unittest discover -s veiculo_real/tools/tests -p 'test_cone_path.py' -v
+venv/bin/python -m unittest discover -s veiculo_real/tools/tests -p 'test_cone_navigation.py' -v
 ```
 
 As regressoes cobrem retas/curvas, falhas curtas e longas, pontilhados retos e
@@ -194,6 +258,8 @@ da faixa, tinta desbotada, selecao entre duas faixas, perda de deteccao e troca
 de camera com captura simulada. Os testes de cones cobrem retas, curvas em S,
 cones alternados, inversao das cores, os dois extremos do vermelho HSV,
 distancias/erro lateral, perda de bordas, filtragem de manchas, resolucoes,
-camera baixa com cores desbotadas, diagnostico de recorte/extensao e
-troca de modo sem display. A webcam e o aspecto da janela devem ser
+camera baixa com cores desbotadas, diagnostico de recorte/extensao,
+troca de modo, curvas metricas com secoes normais, compensacao de movimento,
+perdas breves/totais, reconstrucao por largura e expiracao da memoria sem
+display. A webcam e o aspecto da janela devem ser
 conferidos em uma sessao grafica real.

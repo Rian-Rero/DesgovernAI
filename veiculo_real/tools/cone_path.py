@@ -1,13 +1,20 @@
 """Cones BGR/HSV -> bordas da pista -> centro em pixels, sem depender da GUI.
 
-Usa o contato com o chao e interpola x(y) somente entre cones observados nas
-duas bordas. Nao converte pixels em metros nem envia comandos ao carrinho.
+Rastreia contatos com o chao em um mapa local com expiracao. Sem calibracao,
+interpola x(y) na imagem. Com calibracao, estima o centro entre curvas por
+secoes normais no piso e tolera uma borda ausente pela largura aprendida.
+Nao envia comandos ao carrinho.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import math
+import time
 
 import cv2
 import numpy as np
+
+from cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
+from cone_geometry import image_homography, metric_corridor, normals, project_curve, virtual_boundary
 
 
 PURPLE = (230, 40, 210)  # BGR
@@ -35,6 +42,15 @@ class ConeSettings:
     s_min: int = 65           # Tolera cores desbotadas pela webcam/luz ambiente.
     v_min: int = 45
     clahe: bool = False
+    tracking: bool = True
+    memory_ms: int = 350
+    smoothing: int = 35
+    min_confidence: int = 20
+    width_memory_ms: int = 1500
+    margin_cm: int = 10
+    min_radius_cm: int = 30
+    min_width_cm: int = 40
+    max_width_cm: int = 500
 
 
 @dataclass
@@ -52,6 +68,18 @@ class ConePathResult:
     lateral_error_px: float | None = None  # Positivo: centro da pista a direita.
     reference_y: int | None = None
     status: str = "Buscando cones nas duas bordas"
+    confidence: float = 0.
+    estimated: bool = False
+    source: str = "imagem"
+    motion_source: str = "sem odometria"
+    ground_center: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
+    left_distance_m: float | None = None
+    right_distance_m: float | None = None
+    lateral_error_m: float | None = None  # Positivo: centro a direita do carro.
+    heading_rad: float | None = None     # Positivo: curva orientada a esquerda.
+    curvature_m_inv: float | None = None
+    corridor_width_m: float | None = None
+    measurement_pixels: np.ndarray = field(default_factory=_points)
 
     @property
     def valid(self):
@@ -84,12 +112,23 @@ def _interpolate(points, rows):
 
 
 class ConePathDetector:
-    def __init__(self):
+    def __init__(self, calibration=None):
         self.clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8))
+        self.calibration = calibration
+        self.tracker = ConeTracker()
+        self.motion = FloorMotion()
+        self.reset()
 
     def reset(self):
-        # Sem memoria de trajetoria: perder uma borda invalida o caminho atual.
-        pass
+        self.tracker.reset()
+        self.motion.reset()
+        self.signature = None
+        self.learned_width = None
+        self.width_time = -math.inf
+
+    def set_calibration(self, calibration):
+        self.calibration = calibration
+        self.reset()
 
     def segment(self, frame, settings):
         height, width = frame.shape[:2]
@@ -176,23 +215,79 @@ class ConePathDetector:
         chosen = max(eligible, key=lambda i: scores[i] + points[chains[i][0], 1]/height)
         return points[chains[chosen]][::-1]  # y crescente, sem duplicatas.
 
-    def process(self, frame, settings=None, timestamp=None):
+    def process(self, frame, settings=None, timestamp=None, *, motion=None):
+        """motion opcional: delta (frente m, esquerda m, yaw rad), desde o frame anterior.
+
+        Com calibracao, aceita odometria externa ou estima movimento pelo piso.
+        Sem calibracao, a memoria permanece em pixels e usa fluxo optico.
+        """
         settings = settings or ConeSettings()
+        now = time.monotonic() if timestamp is None else float(timestamp)
         green, red = self.segment(frame, settings)
         result = ConePathResult(cv2.bitwise_or(green, red), green, red)
         gp, rp = self._bases(green, settings), self._bases(red, settings)
         result.green_points, result.red_points = gp, rp
-        left, right = (gp, rp) if settings.green_left else (rp, gp)
-        if len(gp) == 0 and len(rp) == 0:
+        if not math.isfinite(now):
+            self.reset()
+            result.status = "Horario de captura invalido"
+            return result
+        signature = (tuple(asdict(settings).items()), green.shape)
+        if self.signature != signature or self.tracker.timestamp is not None and now <= self.tracker.timestamp:
+            self.reset()
+        self.signature = signature
+        matrix = None
+        try:
+            ground_h = None if self.calibration is None else image_homography(self.calibration, green.shape)
+            if motion is not None and ground_h is None:
+                raise ValueError('Odometria em metros requer calibracao.')
+            optical = self.motion.update(frame) if settings.tracking else None
+            if motion is not None:
+                matrix = ego_transform(motion)
+                result.motion_source = 'odometria'
+            elif optical is not None:
+                matrix = optical if ground_h is None else ground_h @ optical @ np.linalg.inv(ground_h)
+                result.motion_source = 'fluxo optico'
+        except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
+            self.reset()
+            result.status = str(error)
+            return result
+        observations = {'green': gp, 'red': rp}
+        if ground_h is not None:
+            observations = {color: self._ground_points(points, ground_h) for color, points in observations.items()}
+            result.source = 'solo'
+        ttl = settings.memory_ms/1000 if settings.tracking else 0.
+        if not settings.tracking:
+            self.tracker.reset()
+        self.tracker.update(observations, now, ttl, matrix=matrix,
+                            metric=ground_h is not None, smoothing=settings.smoothing)
+        age = self.tracker.age(now)
+        result.estimated = age > 1e-6
+        result.confidence = math.exp(-age/max(ttl, .001))
+        if result.estimated and matrix is None:
+            result.confidence *= .7
+        mapped = {color: self.tracker.points(color) for color in observations}
+        if ground_h is None:
+            pixel_points = mapped
+        else:
+            inverse = np.linalg.inv(ground_h)
+            pixel_points = {color: transform_points(points, inverse) for color, points in mapped.items()}
+            pixel_points = {color: points[np.all(np.isfinite(points), axis=1)]
+                            for color, points in pixel_points.items()}
+        left_points, right_points = ((pixel_points['green'], pixel_points['red']) if settings.green_left
+                                    else (pixel_points['red'], pixel_points['green']))
+        left = self._boundary(left_points, green.shape, settings)
+        right = self._boundary(right_points, green.shape, settings)
+        if ground_h is not None:
+            return self._metric_result(result, left, right, ground_h, settings, now, observations)
+        if not len(pixel_points['green']) and not len(pixel_points['red']):
+            result.confidence = 0.
             result.status = "Nenhum cone aceito: reduza Ignorar topo e confira HSV cones"
             return result
-        if len(gp) < 3 or len(rp) < 3:
-            result.status = f"Cones insuficientes: {len(gp)} verdes / {len(rp)} vermelhos (minimo 3 por cor)"
-            return result
-        left = self._boundary(left, green.shape, settings)
-        right = self._boundary(right, green.shape, settings)
         if not len(left) or not len(right):
             result.status = "Bordas curtas/descontinuas: confira Extensao minima e Espaco vertical"
+            return result
+        if result.confidence < settings.min_confidence/100:
+            result.status = "Memoria sem confianca suficiente; aguardando cones atuais"
             return result
         height, width = green.shape
         start = int(np.ceil(max(left[0, 1], right[0, 1])))
@@ -218,9 +313,86 @@ class ConePathDetector:
         result.left_distance_px = float(axis-lx[y-start])
         result.right_distance_px = float(rx[y-start]-axis)
         result.lateral_error_px = float(cx[y-start]-axis)
-        result.status = "Trajetoria por cones | " + (
+        result.measurement_pixels = np.array([[lx[y-start], y], [axis, y], [rx[y-start], y]]).round().astype(np.int32)
+        result.status = ("ESTIMADA por memoria (px) | " if result.estimated else "Curvas observadas (px) | ") + (
             "eixo fora do corredor" if min(result.left_distance_px, result.right_distance_px) < 0
             else "centro entre as duas bordas")
+        return result
+
+    @staticmethod
+    def _ground_points(points, homography):
+        points = transform_points(points, homography)
+        return points[np.all(np.isfinite(points), axis=1) & (points[:, 0] > .03)
+                      & (points[:, 0] < 10.) & (abs(points[:, 1]) < 10.)]
+
+    def _metric_result(self, result, left, right, homography, settings, now, observations):
+        # A cadeia da imagem esta do fundo para perto; no piso queremos avancar.
+        left = self._ground_points(left[::-1], homography)
+        right = self._ground_points(right[::-1], homography)
+        virtual = False
+        if (settings.tracking and (not len(left) or not len(right))
+                and self.learned_width is not None):
+            width_age = now-self.width_time
+            width_ttl = settings.width_memory_ms/1000
+            left_color = 'green' if settings.green_left else 'red'
+            right_color = 'red' if settings.green_left else 'green'
+            if width_age <= width_ttl and width_ttl > 0:
+                if len(left) >= 3 and len(observations[left_color]) >= 3 and not len(right):
+                    right = virtual_boundary(left, self.learned_width, True)
+                    virtual = True
+                elif len(right) >= 3 and len(observations[right_color]) >= 3 and not len(left):
+                    left = virtual_boundary(right, self.learned_width, False)
+                    virtual = True
+                if virtual:
+                    result.estimated = True
+                    result.confidence = min(result.confidence, .6*math.exp(-width_age/width_ttl))
+        if len(left) < 3 or len(right) < 3:
+            result.status = "Sem curvas suficientes no piso; confira cones e calibracao"
+            return result
+        if result.confidence < settings.min_confidence/100:
+            result.status = "Estimativa expirada ou com baixa confianca"
+            return result
+        geometry = metric_corridor(left, right, margin=settings.margin_cm/100,
+                                   min_width=settings.min_width_cm/100,
+                                   max_width=settings.max_width_cm/100,
+                                   min_radius=settings.min_radius_cm/100)
+        if geometry is None:
+            result.status = "Curvas no piso inconsistentes: largura, margem ou raio minimo"
+            return result
+        center, left, right, widths, curvature = geometry
+        try:
+            inverse = np.linalg.inv(homography)
+            cp = project_curve(center, inverse, result.raw_mask.shape)
+            lp = project_curve(left, inverse, result.raw_mask.shape)
+            rp = project_curve(right, inverse, result.raw_mask.shape)
+        except (ValueError, np.linalg.LinAlgError) as error:
+            result.status = str(error)
+            return result
+        result.center, result.left_boundary, result.right_boundary = cp, lp, rp
+        result.ground_center = center
+        width = float(np.median(widths))
+        if not result.estimated and not virtual:
+            self.learned_width = width if self.learned_width is None else .7*self.learned_width+.3*width
+            self.width_time = now
+        index = int(np.argmin(np.linalg.norm(center, axis=1)))
+        normal = normals(center)[index]
+        offset = float(center[index] @ normal)
+        result.left_distance_m = float(widths[index]/2+offset)
+        result.right_distance_m = float(widths[index]/2-offset)
+        result.lateral_error_m = -offset
+        tangent = np.array([normal[1], -normal[0]])
+        result.heading_rad = float(np.arctan2(tangent[1], tangent[0]))
+        result.curvature_m_inv = float(curvature[index])
+        result.corridor_width_m = width
+        axis = center[index]-offset*normal
+        try:
+            result.measurement_pixels = project_curve(np.array([left[index], axis, right[index]]),
+                                                      inverse, result.raw_mask.shape)
+        except ValueError:
+            pass  # A secao no piso pode cruzar o eixo fora do campo da camera.
+        result.status = ("ESTIMADA: uma borda + largura aprendida (m)" if virtual else
+                         "ESTIMADA: mapa temporal (m)" if result.estimated else
+                         "Centro entre curvas no piso (m)")
         return result
 
 
@@ -236,15 +408,25 @@ def render_cones(frame, result, settings=None, *, path_only=False):
     lc, rc = (GREEN, RED) if settings.green_left else (RED, GREEN)
     cv2.polylines(output, [result.left_boundary], False, lc, 2, cv2.LINE_AA)
     cv2.polylines(output, [result.right_boundary], False, rc, 2, cv2.LINE_AA)
-    y = result.reference_y
-    index = y-int(result.center[0, 1])
-    axis = round((frame.shape[1]-1)*settings.camera_center/100)
-    for border, color in ((result.left_boundary, lc), (result.right_boundary, rc)):
-        cv2.line(output, (axis, y), tuple(border[index]), color, 2, cv2.LINE_AA)
-    cv2.drawMarker(output, (axis, y), (255, 255, 255), cv2.MARKER_CROSS, 17, 2)
-    cv2.polylines(output, [result.center], False, PURPLE, 4, cv2.LINE_AA)
-    caption = (f"E: {result.left_distance_px:.0f}px  D: {result.right_distance_px:.0f}px  "
-               f"Erro: {result.lateral_error_px:+.0f}px  y={y}")
+    if len(result.measurement_pixels) == 3:
+        left, axis, right = result.measurement_pixels
+        cv2.line(output, tuple(axis), tuple(left), lc, 2, cv2.LINE_AA)
+        cv2.line(output, tuple(axis), tuple(right), rc, 2, cv2.LINE_AA)
+        cv2.drawMarker(output, tuple(axis), (255, 255, 255), cv2.MARKER_CROSS, 17, 2)
+    if result.estimated:
+        for start in range(0, len(result.center)-1, 12):
+            cv2.polylines(output, [result.center[start:start+8]], False, PURPLE, 4, cv2.LINE_AA)
+    else:
+        cv2.polylines(output, [result.center], False, PURPLE, 4, cv2.LINE_AA)
+    if result.source == 'solo':
+        caption = (f"E:{result.left_distance_m:.2f}m D:{result.right_distance_m:.2f}m "
+                   f"Erro:{result.lateral_error_m:+.2f}m")
+    else:
+        caption = (f"E:{result.left_distance_px:.0f}px D:{result.right_distance_px:.0f}px "
+                   f"Erro:{result.lateral_error_px:+.0f}px y={result.reference_y}")
     cv2.putText(output, caption, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(output, caption, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 255, 255), 1, cv2.LINE_AA)
+    caption = f"{'ESTIMADA' if result.estimated else 'OBSERVADA'}  {result.confidence:.0%}  {result.motion_source}"
+    cv2.putText(output, caption, (10, 46), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(output, caption, (10, 46), cv2.FONT_HERSHEY_SIMPLEX, .45, PURPLE, 1, cv2.LINE_AA)
     return output

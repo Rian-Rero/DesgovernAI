@@ -3,7 +3,7 @@
 
 Execute: venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py
 Dependencias: numpy, pillow, opencv-python OU opencv-python-headless, tkinter.
-Mantenha yellow_path.py e cone_path.py ao lado deste arquivo. Consulte README_linha_hsv.md.
+Mantenha yellow_path.py e os modulos cone_*.py ao lado deste arquivo. Consulte README_linha_hsv.md.
 """
 
 import argparse
@@ -19,6 +19,7 @@ import numpy as np
 
 from yellow_path import PathSettings, YellowPathDetector, render_path
 from cone_path import ConeSettings, ConePathDetector, render_cones
+from cone_geometry import load_calibration
 
 
 def camera_source(value):
@@ -146,7 +147,9 @@ class CameraApp:
         self.tk, self.ttk, self.Image, self.ImageTk = tk, ttk, Image, ImageTk
         self.root = root
         self.yellow_detector = YellowPathDetector()
-        self.cone_detector = ConePathDetector()
+        self.cone_detector = ConePathDetector(getattr(args, "ground_calibration", None))
+        self.ground_text = tk.StringVar(value=("Solo em metros: calibracao carregada" if self.cone_detector.calibration
+                                             else "Imagem em pixels: carregue a calibracao para medir no piso"))
         self.mode = tk.StringVar(value=getattr(args, "mode", "amarela"))
         self.detector = self.yellow_detector if self.mode.get() == "amarela" else self.cone_detector
         self.worker = CaptureThread(args.width, args.height, args.fps)
@@ -280,9 +283,8 @@ class CameraApp:
         ttk.Label(color, text="Tinta desbotada: reduza S. Sombras: reduza V. A recuperacao tolerante so vale dentro de uma trajetoria aceita.",
                   foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
         cone_geometry, cone_color = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
-        notebook.add(cone_geometry, text="Pista de cones")
-        notebook.add(cone_color, text="HSV cones")
-        self.cone_tabs = (cone_geometry, cone_color)
+        notebook.add(cone_geometry, text="Pista")
+        notebook.add(cone_color, text="HSV")
         ttk.Checkbutton(cone_geometry, text="Verdes a esquerda", variable=self.cone_variables["green_left"],
                         command=self.changed).pack(anchor="w")
         ttk.Label(cone_geometry, text="Desmarcado: vermelhos a esquerda.",
@@ -296,8 +298,8 @@ class CameraApp:
                 ("reference_y", "Altura da medicao", 40, 98, "%"),
                 ("camera_center", "Eixo do carrinho (coluna)", 10, 90, "%")):
             self.slider(cone_geometry, key, label, low, high, suffix, variables=self.cone_variables)
-        ttk.Label(cone_geometry, text="Distancias em pixels na secao indicada. Roxo = centro entre bordas. "
-                  "Necessarios 3 cones por lado; nao prolonga alem das observacoes.",
+        ttk.Label(cone_geometry, text="Roxo = centro entre curvas. Tracejado = estimativa temporaria. "
+                  "Inicialize com 3 cones por lado. Ajuste memoria e calibracao nas outras abas.",
                   foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
         for key, label, low, high in (
                 ("green_h_min", "Verde: H minimo", 20, 100),
@@ -310,6 +312,35 @@ class CameraApp:
                         command=self.changed).pack(anchor="w", pady=8)
         ttk.Label(cone_color, text="HSV mostra vermelho e verde separados. A forma afunilada e a continuidade "
                   "filtram manchas, mas nao substituem um classificador de cones.",
+                  foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
+        memory, ground = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
+        notebook.add(memory, text="Memoria")
+        notebook.add(ground, text="Solo")
+        self.cone_tabs = (cone_geometry, cone_color, memory, ground)
+        ttk.Checkbutton(memory, text="Rastrear cones entre frames", variable=self.cone_variables["tracking"],
+                        command=self.changed).pack(anchor="w")
+        for key, label, low, high, suffix in (
+                ("memory_ms", "Memoria de cada cone", 0, 1000, "ms"),
+                ("smoothing", "Suavizacao temporal", 0, 80, "%"),
+                ("min_confidence", "Confianca minima", 5, 80, "%"),
+                ("width_memory_ms", "Validade da largura no solo", 0, 3000, "ms")):
+            self.slider(memory, key, label, low, high, suffix, variables=self.cone_variables)
+        ttk.Label(memory, text="O mapa acompanha o movimento estimado pelo piso. Cones ausentes expiram "
+                  "individualmente. Com solo calibrado, uma borda atual pode usar a largura aprendida "
+                  "por tempo limitado. Confianca e um indice heuristico, nao probabilidade de acerto.",
+                  foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=10)
+        ttk.Label(ground, textvariable=self.ground_text, foreground="#77e2c6", wraplength=270).pack(anchor="w")
+        ttk.Button(ground, text="Carregar calibracao JSON", command=self.load_ground).pack(fill="x", pady=(10, 4))
+        ttk.Button(ground, text="Usar somente pixels", command=self.clear_ground).pack(fill="x", pady=(0, 8))
+        for key, label, low, high in (
+                ("margin_cm", "Margem de cada borda", 0, 40),
+                ("min_radius_cm", "Raio minimo da trajetoria", 10, 300),
+                ("min_width_cm", "Largura minima no piso", 20, 200),
+                ("max_width_cm", "Largura maxima no piso", 50, 800)):
+            self.slider(ground, key, label, low, high, "cm", variables=self.cone_variables)
+        ttk.Label(ground, text="Use a calibracao desta camera fixa, na mesma pose. Origem: centro do eixo "
+                  "dianteiro. As curvas sao medidas perpendicularmente no piso. Ajuste raio e margens "
+                  "ao carrinho. Os controles de coluna/altura em Pista valem somente para pixels.",
                   foreground="#9bb1c9", wraplength=270).pack(anchor="w", pady=8)
         ttk.Button(sidebar, text="Restaurar todos os ajustes", command=self.restore).pack(fill="x", pady=(12, 0))
         footer = ttk.Frame(self.root, padding=(22, 14, 22, 16))
@@ -358,11 +389,31 @@ class CameraApp:
         self.notebook.select(shown[0])
         self.hint.set("Ajuste qual cor fica a esquerda e alinhe a coluna do eixo do carrinho."
                       if cones else "Clique perto da base da faixa desejada para selecionar o caminho.")
-        self.legend.set("Verde / vermelho: bordas   •   Roxo: trajetoria central   •   Cruz branca: eixo do carrinho"
+        self.legend.set("Verde / vermelho: bordas   •   Roxo continuo: observado   •   Roxo tracejado: estimado"
                         if cones else "Verde: observado   •   Azul: entre tracos   •   Laranja: buracos   •   Branco: centro")
         self.last_result = None
         self.support_text.set("— cones" if cones else "— suporte de cor")
         self.state.set("Modo cones selecionado" if cones else "Modo faixa amarela selecionado")
+        self.changed()
+
+    def load_ground(self):
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(parent=self.root, title="Calibracao da camera fixa",
+                                         filetypes=[("Calibracao JSON", "*.json")])
+        if not path:
+            return
+        try:
+            calibration = load_calibration(path)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Calibracao invalida", str(error), parent=self.root)
+            return
+        self.cone_detector.set_calibration(calibration)
+        self.ground_text.set(f"Solo em metros: {Path(path).name}")
+        self.changed()
+
+    def clear_ground(self):
+        self.cone_detector.set_calibration(None)
+        self.ground_text.set("Imagem em pixels: calibracao desativada")
         self.changed()
 
     def refresh_cameras(self):
@@ -436,8 +487,13 @@ class CameraApp:
                 result = self.last_result
                 self.support_text.set(f"{len(result.green_points)} verdes | {len(result.red_points)} vermelhos")
                 if result.valid:
-                    self.state.set(f"{result.status} | E {result.left_distance_px:.0f} px | "
-                                   f"D {result.right_distance_px:.0f} px | Erro {result.lateral_error_px:+.0f} px")
+                    if result.source == 'solo':
+                        measures = (f"E {result.left_distance_m:.2f} m | D {result.right_distance_m:.2f} m | "
+                                    f"Erro {result.lateral_error_m:+.2f} m")
+                    else:
+                        measures = (f"E {result.left_distance_px:.0f} px | D {result.right_distance_px:.0f} px | "
+                                    f"Erro {result.lateral_error_px:+.0f} px")
+                    self.state.set(f"{result.status} | {measures} | {result.confidence:.0%}")
             else:
                 self.support_text.set(f"{self.last_result.support:.0%} suporte de cor" if self.last_result.valid else "Sem caminho valido")
 
@@ -474,8 +530,10 @@ class CameraApp:
             self.previous_time = now
             self.update_status()
             self.redraw()
-        elif self.streaming and self.last_arrival is not None and time.monotonic() - self.last_arrival > 1.:
+        elif (self.streaming and self.last_arrival is not None and time.monotonic()-self.last_arrival
+              > (max(.15, min(1., self.settings().memory_ms/1000)) if self.mode.get() == 'cones' else 1.)):
             self.last_result = self.last_frame = None
+            self.detector.reset()
             self.state.set("Aguardando novas imagens da camera…")
             self.support_text.set("Sem caminho valido")
             self.redraw()
@@ -539,9 +597,15 @@ def main():
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--mode", choices=("amarela", "cones"), default="amarela",
                         help="Modo inicial de operacao; tambem pode ser trocado na interface")
+    parser.add_argument("--calibration", type=Path,
+                        help="JSON medido para esta camera fixa; habilita curvas e medidas no piso")
     args = parser.parse_args()
     if min(args.width, args.height, args.fps) <= 0:
         parser.error("width, height e fps devem ser positivos")
+    try:
+        args.ground_calibration = load_calibration(args.calibration) if args.calibration else None
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     cv2.setNumThreads(2)
     try:
         import tkinter as tk
