@@ -167,7 +167,7 @@ class CameraApp:
         self.view = tk.StringVar(value="Destaque")
         self.camera_var = tk.StringVar()
         self.variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool)
-                               else tk.IntVar(value=value)) for key, value in asdict(PathSettings()).items()}
+                               else tk.IntVar(value=value)) for key, value in asdict(PathSettings(roi_top=0)).items()}
         self.cone_variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool)
                                     else tk.IntVar(value=value)) for key, value in asdict(ConeSettings()).items()}
         self.hint = tk.StringVar()
@@ -305,8 +305,10 @@ class CameraApp:
                 ("green_h_min", "Verde: H minimo", 20, 100),
                 ("green_h_max", "Verde: H maximo", 40, 120),
                 ("red_hue", "Vermelho: faixa junto a 0/179", 1, 25),
-                ("s_min", "Saturacao minima (S)", 25, 255),
-                ("v_min", "Brilho minimo (V)", 15, 255)):
+                ("red_s_min", "Vermelho: saturacao minima", 15, 255),
+                ("red_v_min", "Vermelho: brilho minimo", 15, 255),
+                ("s_min", "Verde: saturacao minima (S)", 25, 255),
+                ("v_min", "Verde: brilho minimo (V)", 15, 255)):
             self.slider(cone_color, key, label, low, high, "", variables=self.cone_variables)
         ttk.Checkbutton(cone_color, text="Compensar brilho local (CLAHE)", variable=self.cone_variables["clahe"],
                         command=self.changed).pack(anchor="w", pady=8)
@@ -460,7 +462,7 @@ class CameraApp:
             self.redraw()
 
     def restore(self):
-        for name, value in asdict(PathSettings()).items():
+        for name, value in asdict(PathSettings(roi_top=0)).items():
             self.variables[name].set(value)
         for name, value in asdict(ConeSettings()).items():
             self.cone_variables[name].set(value)

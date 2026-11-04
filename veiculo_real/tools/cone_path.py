@@ -13,8 +13,12 @@ import time
 import cv2
 import numpy as np
 
-from cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
-from cone_geometry import image_homography, metric_corridor, normals, project_curve, virtual_boundary
+if __package__:
+    from .cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
+    from .cone_geometry import image_homography, metric_corridor, normals, project_curve, virtual_boundary
+else:
+    from cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
+    from cone_geometry import image_homography, metric_corridor, normals, project_curve, virtual_boundary
 
 
 PURPLE = (230, 40, 210)  # BGR
@@ -28,7 +32,7 @@ def _points():
 
 @dataclass
 class ConeSettings:
-    roi_top: int = 10         # Camera baixa: os cones ficam perto do horizonte.
+    roi_top: int = 0         # Camera baixa: os cones ficam perto do horizonte.
     min_area: int = 28        # Pixels na escala de 640 x 480.
     max_gap: int = 200        # Distancia vertical maxima, escala de 480 px.
     min_span: int = 5         # Extensao vertical minima, % da altura.
@@ -38,7 +42,9 @@ class ConeSettings:
     green_left: bool = True
     green_h_min: int = 38
     green_h_max: int = 90
-    red_hue: int = 12         # Vermelho nos dois extremos do H (0..179).
+    red_hue: int = 18         # Vermelho nos dois extremos do H (0..179).
+    red_s_min: int = 45       # Vermelho escuro/desbotado, independente do verde.
+    red_v_min: int = 35
     s_min: int = 65           # Tolera cores desbotadas pela webcam/luz ambiente.
     v_min: int = 45
     clahe: bool = False
@@ -139,8 +145,8 @@ class ConePathDetector:
         low, high = sorted((settings.green_h_min, settings.green_h_max))
         green = cv2.inRange(hsv, (low, settings.s_min, settings.v_min), (high, 255, 255))
         red = cv2.bitwise_or(
-            cv2.inRange(hsv, (0, settings.s_min, settings.v_min), (settings.red_hue, 255, 255)),
-            cv2.inRange(hsv, (179-settings.red_hue, settings.s_min, settings.v_min), (179, 255, 255)))
+            cv2.inRange(hsv, (0, settings.red_s_min, settings.red_v_min), (settings.red_hue, 255, 255)),
+            cv2.inRange(hsv, (179-settings.red_hue, settings.red_s_min, settings.red_v_min), (179, 255, 255)))
         masks = []
         for color in (green, red):
             mask = np.zeros((height, width), np.uint8)
@@ -150,28 +156,92 @@ class ConePathDetector:
         return masks
 
     @staticmethod
-    def _bases(mask, settings):
+    def _bases(mask, settings, split=True):
         height, width = mask.shape
         roi = int(height * settings.roi_top / 100)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         bases = []
         min_area = settings.min_area * height * width / (640 * 480)
-        for label in range(1, count):
-            x, y, w, h, area = stats[label]
-            if area < min_area or h < max(5, height / 100) or w < 3:
-                continue
-            if x <= 0 or x+w >= width or y <= roi or y+h >= height:
-                continue  # Contato oculto/objeto cortado nao define uma borda.
+        def contact(component, x, y):
+            rows, columns = np.nonzero(component)
+            if not len(rows):
+                return None
+            left, top, right, bottom = columns.min(), rows.min(), columns.max(), rows.max()
+            component = component[top:bottom+1, left:right+1]
+            x, y = x+int(left), y+int(top)
+            h, w = component.shape
+            area = np.count_nonzero(component)
+            if area < min_area or h < max(5, height/100) or w < 3:
+                return None
+            # Exige contato inteiro no piso, mesmo ao recuperar uma regiao unida.
+            foot = np.flatnonzero(np.any(component[-max(2, h//10):], axis=0))
+            if (x+foot.min() <= 0 or x+foot.max() >= width-1
+                    or y <= roi or y+h >= height):
+                return None
             if not .18 <= w/h <= 1.5 or w > .2*width:
-                continue
-            component = labels[y:y+h, x:x+w] == label
+                return None
             third = max(1, h//3)
             top_width = np.count_nonzero(np.any(component[:third], axis=0))
             bottom_width = np.count_nonzero(np.any(component[-third:], axis=0))
             if top_width >= .9*bottom_width or area < .25*w*h:
-                continue  # Rejeita faixas, placas retangulares e ruido esparso.
-            columns = np.flatnonzero(np.any(component[-max(2, h//10):], axis=0))
-            bases.append((x + float(np.mean(columns)), float(y+h-1)))
+                return None
+            return x+float(np.mean(foot)), float(y+h-1)
+
+        for label in range(1, count):
+            x, y, w, h, area = stats[label]
+            if area < min_area or y <= roi or y+h >= height:
+                continue
+            component = labels[y:y+h, x:x+w] == label
+            base = contact(component, x, y)
+            if base is None:
+                # Uma sobreposicao pode unir um cone inteiro a outro cortado na
+                # lateral. Tenta somente o cone inferior, cuja base e observada.
+                # Nao cria contatos para os cones ocultos do mesmo componente.
+                for fraction in (.2, .35, .5):
+                    cut = int(h*fraction)
+                    lower = component[cut:]
+                    n, pieces, piece_stats, _ = cv2.connectedComponentsWithStats(lower.astype(np.uint8), 8)
+                    candidates = []
+                    for piece in range(1, n):
+                        candidate = contact(pieces == piece, x, y+cut)
+                        if candidate is not None and candidate[1] == y+h-1:
+                            candidates.append(candidate)
+                    if candidates:
+                        base = max(candidates, key=lambda point: point[1])
+                        break
+            recovered = []
+            if split and w > 12 and h > 12:
+                # Separa os nucleos de cones que se tocam. Cada nucleo e
+                # restaurado separadamente e limitado a cor realmente observada.
+                # A dilatacao conjunta voltaria a fundir os cones.
+                local = component.astype(np.uint8)
+                for nominal in (3, 5, 7, 9, 11, 13, 15, 17):
+                    size = max(3, int(round(nominal*height/480)) | 1)
+                    kernel = np.ones((size, size), np.uint8)
+                    padded = np.pad(local, size)
+                    eroded = cv2.erode(padded, kernel)
+                    n, cores, core_stats, _ = cv2.connectedComponentsWithStats(eroded, 8)
+                    eligible = [i for i in range(1, n) if core_stats[i, -1] >= max(4, min_area*.2)]
+                    if not 2 <= len(eligible) <= 12:
+                        continue
+                    candidates = []
+                    for i in eligible:
+                        restored = cv2.dilate((cores == i).astype(np.uint8), kernel)
+                        restored = restored[size:size+h, size:size+w] & local
+                        full = np.zeros_like(mask)
+                        full[y:y+h, x:x+w] = restored*255
+                        candidates.extend(ConePathDetector._bases(full, settings, split=False))
+                    if len(candidates) > len(recovered):
+                        recovered = candidates
+                if len(recovered) >= 2:
+                    if base is not None:
+                        closest = int(np.argmin([np.linalg.norm(np.asarray(p)-base) for p in recovered]))
+                        if np.linalg.norm(np.asarray(recovered[closest])-base) < .04*width:
+                            recovered[closest] = base
+                    bases.extend(recovered)
+                    continue
+            if base is not None:
+                bases.append(base)
         return np.asarray(bases, float).reshape(-1, 2)
 
     @staticmethod

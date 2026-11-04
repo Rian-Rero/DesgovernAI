@@ -449,7 +449,7 @@ class RsyncGUI(tk.Tk):
 
         self.cmd_text.insert(
             "end",
-            f"python3 -u main.py --navigation cones --vision-width 320 --steering-filter 3"
+            f"python3 -u main.py --navigation cones --vision-width 0 --steering-filter 3"
             f" --speed {SPEED_PRESETS[0]} --stream {STREAM_PORT}\n",
         )
         self.cmd_text.pack(fill="x", pady=4)

@@ -2,7 +2,10 @@
 
 import numpy as np
 
-from cone_tracking import transform_points
+if __package__:
+    from .cone_tracking import transform_points
+else:
+    from cone_tracking import transform_points
 
 
 def load_calibration(path):

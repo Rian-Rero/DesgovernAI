@@ -63,7 +63,7 @@ class MissionTests(unittest.TestCase):
         path.write_text(json.dumps({'image_size':[640,480],
             'image_points_px':[[160,400],[480,400],[260,200],[380,200]],
             'ground_points_m':[[.4,.3],[.4,-.3],[1.5,.3],[1.5,-.3]]}))
-        self.settings={'camera_calibration_file':str(path),'ts':3.,'save':True}
+        self.settings={'camera_calibration_file':str(path),'ts':3.,'save':True,'navigation_mode':'line'}
         self.events=[]
         self.car=FakeCar(self.events)
 
@@ -94,10 +94,12 @@ class MissionTests(unittest.TestCase):
         def follower(settings):
             captured.update(settings)
             return real_follower(settings)
-        with patch.object(mission, 'RealConeDetector', return_value=detector) as factory, \
+        with patch.object(mission, 'RealLineDetector') as line_factory, \
+                patch.object(mission, 'RealConeDetector', return_value=detector) as factory, \
                 patch.object(mission, 'RealStanleyFollower', side_effect=follower):
             self.run_fake(dict(self.settings, navigation_mode='cones', save=False))
         factory.assert_called_once()
+        line_factory.assert_not_called()
         self.assertEqual(captured['line_loss_frames'], 0)
         self.assertEqual(captured['line_loss_tolerance'], 0.)
         self.assertEqual(captured['line_search_rate_deg_s'], 0.)

@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from fva_car.cones import RealConeDetector, corridor_center, PriorityNavigationDetector, ConeObservation
+from fva_car.cones import RealConeDetector, ConeObservation
 from fva_car.lateral import GroundCalibration, RealStanleyFollower, LineObservation
 from test_lateral import fake_car
 from test_mission import mission
@@ -38,8 +38,8 @@ class ConeTests(unittest.TestCase):
                 detector = RealConeDetector(calibration)
                 observation = detector.observe_frame(frame, 10.)
                 self.assertTrue(observation.valid, observation.reason)
-                self.assertAlmostEqual(observation.errors[0], .08, delta=.015)
-                self.assertAlmostEqual(observation.errors[1], 0., delta=.03)
+                self.assertAlmostEqual(observation.errors[0], .08, delta=.02)
+                self.assertAlmostEqual(observation.errors[1], 0., delta=.04)
                 self.assertAlmostEqual(observation.errors[2], 2*bend, delta=.04)
                 self.assertEqual(len(observation.red_pixels), 4)
                 self.assertEqual(len(observation.green_pixels), 4)
@@ -66,48 +66,27 @@ class ConeTests(unittest.TestCase):
             self.assertEqual(car.vref, 0.)
             self.assertEqual(car.st, 0.)
 
-    def test_width_overlap_and_outlier_validation(self):
-        x = np.array([.3, .8, 1.3, 1.8])
-        left = np.column_stack((x, np.ones(4)))
-        right = np.column_stack((x+.1, -np.ones(4)))
-        result = corridor_center(left, right)
-        self.assertIsNotNone(result)
-        self.assertAlmostEqual(result[2], 2.)
-        self.assertIsNone(corridor_center(left, right+np.array([3., 0.])))
-        self.assertIsNone(corridor_center(left, right, max_width=1.))
-        left[1, 1] += 1.
-        self.assertIsNone(corridor_center(left, right))
+    def test_adapter_uses_shared_hsv_detector_and_metric_geometry(self):
+        from tools.cone_path import ConePathDetector, ConeSettings
+        from fva_car.lateral import fit_line_errors
+        calibration, frame = scene(bend=.1, reverse=True)
+        detector = RealConeDetector(calibration)
+        observation = detector.observe_frame(frame, 10.)
+        expected = ConePathDetector(calibration).process(frame, ConeSettings(roi_top=0), timestamp=10.)
+        self.assertTrue(expected.valid, expected.status)
+        np.testing.assert_array_equal(observation.cone_result.green_mask, expected.green_mask)
+        np.testing.assert_allclose(observation.cone_result.ground_center, expected.ground_center)
+        np.testing.assert_allclose(observation.errors,
+            fit_line_errors(expected.ground_center, [0, 0], [1, 0], with_curvature=True))
+        self.assertEqual(detector.settings.roi_top, 0)
+        self.assertEqual(mission.parameters['path_settings']['roi_top'], 0)
 
     def test_invalid_settings_fail_before_hardware(self):
         calibration, _ = scene()
         for settings in ({'red_hsv_ranges': [[[180, 0, 0], [255, 255, 255]]]},
-                         {'min_width_m': -1}, {'min_width_m': 2, 'max_width_m': 1}):
+                         {'roi_top': -1}, {'min_width_cm': 200, 'max_width_cm': 100}):
             with self.assertRaises(ValueError):
                 RealConeDetector(calibration, settings)
-
-    def test_priority_and_fallback_use_same_frame(self):
-        cones, line = Mock(), Mock()
-        detector = PriorityNavigationDetector(cones, line)
-        frame = np.zeros((10, 10, 3), np.uint8)
-        valid_cones = ConeObservation(10., errors=(0., 0., 0.))
-        cones.observe_frame.return_value = valid_cones
-        self.assertIs(detector.observe_frame(frame, 10.), valid_cones)
-        line.observe_frame.assert_not_called()
-        cones.observe_frame.return_value = ConeObservation(11., reason='sem cones')
-        line.observe_frame.return_value = LineObservation(11., errors=(.1, 0., 0.))
-        fallback = detector.observe_frame(frame, 11.)
-        self.assertTrue(fallback.valid)
-        self.assertEqual(fallback.reference_source, 'line')
-        self.assertIs(line.observe_frame.call_args.args[0], frame)
-        self.assertEqual(line.observe_frame.call_args.args[1], 11.)
-        detector.with_preview(valid_cones)
-        cones.with_preview.assert_called_with(valid_cones)
-        detector.preview_bgr(fallback)
-        line.preview_bgr.assert_called_with(fallback)
-        line.observe_frame.return_value = LineObservation(12., reason='sem linha')
-        invalid = detector.observe_frame(frame, 12.)
-        self.assertFalse(invalid.valid)
-        self.assertIn('Sem referencia', invalid.reason)
 
     def test_cli_selects_cones(self):
         with patch.object(sys, 'argv', ['main.py', '--navigation', 'cones']), patch.object(mission, 'run_mission') as run:

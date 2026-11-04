@@ -14,7 +14,7 @@ import time
 import numpy as np
 import cv2
 
-from fva_car.cones import RealConeDetector, PriorityNavigationDetector
+from fva_car.cones import RealConeDetector
 from fva_car.lateral import (
     GroundCalibration,
     LineObservation,
@@ -32,8 +32,8 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 
 parameters = {
     "ts": 30.0,
-    "navigation_mode": "line",  # --navigation cones ativa o corredor pela camera
-    "cone_settings": {},  # cores HSV OpenCV e limites metricos; ver README_cones.md
+    "navigation_mode": "cones",  # somente cones; linha requer selecao explicita
+    "cone_settings": {"roi_top": 0},  # mesmos campos ConeSettings da interface HSV
     "save": True,
     "logfile": "logs/",
     "camera": True,
@@ -78,9 +78,8 @@ parameters = {
     "line_search_rate_deg_s": 40.0,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
-    # roi_top=50 descarta a metade de cima (alem de ~0,85 m com a calibracao
-    # atual): menos linhas para rastrear e sem outras faixas pintadas ao fundo.
-    "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
+    # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
+    "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 0},
     "path_anchor": 0.5,  # preferencia horizontal da faixa, entre 0 e 1
     # Porta HTTP com a visao ao vivo (http://<ip-do-carro>:porta/); 0 desliga.
     "stream_port": 0,
@@ -226,6 +225,8 @@ def stream_text(car, status, observation):
     lines = [status[:48]]
     if observation is not None:
         lines.append("Referencia: " + ("cones" if observation.reference_source == "cones" else "linha amarela"))
+    if observation is not None and observation.reference_source == "cones":
+        lines.append(f"Cones: verdes={len(observation.green_pixels)} vermelhos={len(observation.red_pixels)}")
     if observation is not None and observation.valid:
         lateral, heading, curvature = observation.errors
         lines.append(f"e={lateral:+.3f}m psi={np.degrees(heading):+.1f} k={curvature:+.2f}")
@@ -265,19 +266,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         raise ValueError("steering_filter_size deve ser inteiro positivo.")
     # Valida geometria e ajustes antes de abrir sensores ou atuar nos motores.
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
-    mode = config.get("navigation_mode", "line")
+    mode = config.get("navigation_mode", "cones")
     if mode == "cones":
         detector = RealConeDetector(
             calibration, settings=config.get("cone_settings"), render_preview=False,
             processing_width=config.get("vision_width", 0),
         )
-        detector = PriorityNavigationDetector(detector, RealLineDetector(
-            calibration, path_settings=config.get("path_settings", {}),
-            anchor=config.get("path_anchor", .5), render_preview=False,
-            processing_width=config.get("vision_width", 0),
-        ))
-        # A busca da linha pode aumentar o esterco sem observacao. No corredor
-        # de cones, perder as duas referencias neutraliza no primeiro quadro.
+        # Sem chaveamento para linha: referencia de cones invalida neutraliza.
         config["line_loss_frames"] = 0
         config["line_loss_tolerance"] = 0.
         config["line_search_rate_deg_s"] = 0.
@@ -320,7 +315,6 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     observation = None
     control_status = "Missao ainda nao iniciada"
     last_control_at = None
-    last_reference_source = None
     try:
         car.start_mission()
         print(
@@ -402,14 +396,6 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                     flush=True,
                 )
             observation = vision_data["observation"]
-            if mode == "cones" and observation is not None and observation.valid:
-                source = observation.reference_source
-                if source != last_reference_source:
-                    # Memoria e rejeicao de saltos pertencem a uma referencia.
-                    # Nao comparar o centro dos cones com a antiga linha amarela.
-                    follower.reset()
-                    last_reference_source = source
-
             manual = (
                 getattr(car, "sel_direcao", 1) == 0
                 and getattr(car, "sel_tracao", 1) == 0
@@ -583,7 +569,7 @@ def main():
         help="Reativar leituras extras da IMU no CSV",
     )
     parser.add_argument("--navigation", choices=("line", "cones"),
-                        help="line: linha amarela; cones: prioriza cones, senao segue a linha amarela")
+                        help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
     settings = {"velocity_reference": args.speed}
     if args.navigation is not None:

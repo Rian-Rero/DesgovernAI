@@ -69,6 +69,28 @@ def low_camera_track():
 
 
 class ConePathTests(unittest.TestCase):
+    def test_dark_desaturated_red_is_detected_separately_from_green_thresholds(self):
+        frame = track()
+        color = cv2.cvtColor(np.uint8([[[177, 50, 90]]]), cv2.COLOR_HSV2BGR)[0, 0]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        frame[(hsv[:, :, 0] < 10) & (hsv[:, :, 1] > 150)] = color
+        result = ConePathDetector().process(frame)
+        self.assertEqual(len(result.red_points), 5)
+        self.assertEqual(len(result.green_points), 5)
+
+    def test_visible_red_base_survives_overlap_with_clipped_cone(self):
+        frame = np.full((480, 640, 3), 150, np.uint8)
+        for x, y, h, w in ((600, 237, 105, 70), (530, 190, 70, 44),
+                           (570, 169, 55, 36), (635, 158, 48, 30)):
+            cv2.fillConvexPoly(frame, np.array([[x, y-h], [x-w//2, y], [x+w//2, y]], np.int32),
+                               (80, 80, 145))
+        result = ConePathDetector().process(frame)
+        self.assertTrue(any(abs(x-600) < 3 and y == 237 for x, y in result.red_points))
+        self.assertTrue(any(abs(x-530) < 3 and y == 190 for x, y in result.red_points))
+        # Nao fabrica bases para os cones ocultos ou cortados.
+        self.assertEqual(len(result.red_points), 3)
+        self.assertTrue(any(abs(x-570) < 3 and y == 169 for x, y in result.red_points))
+
     def test_low_camera_and_washed_colors_form_curved_corridor(self):
         frame = low_camera_track()
         result = ConePathDetector().process(frame)
