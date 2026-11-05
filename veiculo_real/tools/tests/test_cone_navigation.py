@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from cone_geometry import (image_homography, load_calibration, metric_corridor,
+from cone_geometry import (calibration_report, image_homography, load_calibration, metric_corridor,
                            normals, virtual_boundary)
 from cone_path import ConePathDetector, ConeSettings, SideEstimator, classify_segment, render_cones
 from cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
@@ -304,7 +304,20 @@ class RobustCorridorTests(unittest.TestCase):
         self.assertFalse(sides.green_left)
         self.assertEqual(sides.flips, 1)
 
+    def test_gate_path_follows_previous_trajectory_between_two_corridors(self):
+        both = rows_scene([(.6, GREEN), (-.6, RED), (-1.4, RED)])
+        for first, expected in (([(.6, GREEN), (-.6, RED)], 0.), ([(.6, GREEN), (-1.4, RED)], .4)):
+            with self.subTest(expected=expected):
+                detector = ConePathDetector(calibration())
+                self.assertTrue(detector.process(rows_scene(first), self.settings, timestamp=1.).valid)
+                result = detector.process(both, self.settings, timestamp=1.05)
+                self.assertTrue(result.valid, result.status)
+                self.assertEqual(result.debug['trajectory']['method'], 'portoes')
+                self.assertAlmostEqual(result.lateral_error_m, expected, delta=.05)
+
     def test_previous_trajectory_has_priority_between_two_valid_corridors(self):
+        # Metodo antigo (curvas por secoes normais), ainda usado como fallback.
+        self.settings = replace(self.settings, gate_path=False)
         both = rows_scene([(.6, GREEN), (-.6, RED), (-1.4, RED)])
         for first, expected in (([(.6, GREEN), (-.6, RED)], 0.), ([(.6, GREEN), (-1.4, RED)], .4)):
             with self.subTest(expected=expected):
@@ -358,6 +371,101 @@ class RobustCorridorTests(unittest.TestCase):
         self.assertEqual(result.debug['detection']['green']['bases'], len(result.green_points))
         self.assertLess(len(text), 8000)  # leve para gravar a cada quadro
 
+
+
+class CalibrationCoverageTests(unittest.TestCase):
+    def test_report_warns_when_points_cover_only_near_floor(self):
+        near = SimpleNamespace(image_size=(640, 480), homography=H,
+                               ground_points_m=((.3, 0.), (.6, .3), (.6, -.3), (.45, 0.)))
+        report = calibration_report(near, max_range_m=2.5)
+        self.assertEqual(report['max_x_m'], .6)
+        self.assertTrue(any('0.60 m' in warning for warning in report['warnings']))
+        far = SimpleNamespace(image_size=(640, 480), homography=H,
+                              ground_points_m=((.3, 0.), (2.5, .6), (2.5, -.6), (1., 0.)))
+        self.assertEqual(calibration_report(far, max_range_m=2.5)['warnings'], [])
+        rows = calibration_report(far)['rows_by_distance_m']
+        self.assertGreater(rows[.5], rows[2.])  # mais longe = mais alto na imagem
+
+    def test_repository_calibration_is_flagged_as_short(self):
+        report = calibration_report(load_calibration(
+            Path(__file__).resolve().parents[2]/'calibracao'/'camera_lateral.json'))
+        self.assertLess(report['max_x_m'], 1.5)
+        self.assertTrue(report['warnings'])
+
+    def test_roi_starts_below_the_useful_horizon_and_ignores_objects_above(self):
+        detector = ConePathDetector(calibration())
+        settings = ConeSettings(max_range_cm=250)
+        roi = detector.roi_row((480, 640), settings)
+        far = transform_points([[2.5, 0.]], np.linalg.inv(H))[0, 1]
+        self.assertGreater(roi, 0)
+        self.assertLess(roi, far)
+        frame = metric_scene()
+        # "placa" vermelha triangular na parede, acima do alcance util
+        cv2.fillConvexPoly(frame, np.array([(300, roi-40), (290, roi-5), (310, roi-5)], np.int32), (0, 0, 240))
+        result = detector.process(frame, settings, timestamp=1.)
+        self.assertTrue(all(y > roi for _, y in result.red_points))
+        self.assertEqual(result.debug['detection']['roi_row'], roi)
+        # Sem calibracao, so o roi_top manual vale.
+        self.assertEqual(ConePathDetector().roi_row((480, 640), ConeSettings(roi_top=10)), 48)
+
+    def test_measured_spacing_far_from_expected_flags_calibration(self):
+        detector = ConePathDetector(calibration())
+        settings = ConeSettings(cone_spacing_cm=500)  # cena tem ~0,5 m entre cones
+        for step in range(12):
+            result = detector.process(metric_scene(), settings, timestamp=1.+.1*step)
+        self.assertTrue(result.debug['calibration']['suspect'])
+        self.assertIn('Calibracao incompativel', result.status)
+        ok = ConePathDetector(calibration())
+        for step in range(12):
+            result = ok.process(metric_scene(), ConeSettings(cone_spacing_cm=60, track_width_cm=120),
+                                timestamp=1.+.1*step)
+        self.assertFalse(result.debug['calibration']['suspect'], result.debug['calibration'])
+        self.assertTrue(result.valid, result.status)
+
+
+class TrackConfirmationTests(unittest.TestCase):
+    def test_new_cone_needs_two_consecutive_frames_after_startup(self):
+        tracker = ConeTracker()
+        base = {'green': np.array([[1., .5], [1.5, .5]]), 'red': np.array([[1., -.5]])}
+        tracker.update(base, 1., 1., metric=True, confirm_hits=2)
+        self.assertEqual(len(tracker.points('green')), 2)  # inicio: aceita
+        noisy = {'green': np.vstack([base['green'], [[1.2, 0.]]]), 'red': base['red']}
+        tracker.update(noisy, 1.05, 1., metric=True, confirm_hits=2)
+        self.assertEqual(len(tracker.points('green')), 2)  # falso positivo de 1 quadro
+        self.assertEqual(len(tracker.points('green', confirmed_only=False)), 3)
+        tracker.update(base, 1.1, 1., metric=True, confirm_hits=2)
+        self.assertEqual(len(tracker.points('green', confirmed_only=False)), 2)  # sumiu
+        tracker.update(noisy, 1.15, 1., metric=True, confirm_hits=2)
+        tracker.update(noisy, 1.2, 1., metric=True, confirm_hits=2)
+        self.assertEqual(len(tracker.points('green')), 3)  # dois quadros seguidos: entra
+
+    def test_cones_behind_the_axle_are_dropped_with_odometry(self):
+        tracker = ConeTracker()
+        tracker.update({'green': np.array([[.3, .5]]), 'red': np.empty((0, 2))}, 1., 5., metric=True)
+        forward = ego_transform((.5, 0., 0.))
+        tracker.update({'green': np.empty((0, 2)), 'red': np.empty((0, 2))}, 1.1, 5., matrix=forward,
+                       metric=True, behind_x=-.4)
+        self.assertEqual(len(tracker.points('green')), 1)  # x = -0,2: ainda ao lado
+        tracker.update({'green': np.empty((0, 2)), 'red': np.empty((0, 2))}, 1.2, 5., matrix=forward,
+                       metric=True, behind_x=-.4)
+        self.assertEqual(len(tracker.points('green')), 0)  # x = -0,7: ficou para tras
+
+    def test_odometry_keeps_the_corridor_through_a_long_blind_stretch(self):
+        detector = ConePathDetector(calibration())
+        settings = ConeSettings()
+        self.assertTrue(detector.process(metric_scene(), settings, timestamp=1.).valid)
+        blank = metric_scene(missing='all')
+        result = None
+        for step in range(1, 13):  # 1,2 s sem cones, carro a 0,1 m/s
+            result = detector.process(blank, settings, timestamp=1.+.1*step, motion=(.01, 0., 0.))
+        self.assertTrue(result.valid, result.status)
+        self.assertEqual(result.motion_source, 'odometria')
+        # Sem odometria, a memoria de 350 ms ja teria expirado.
+        plain = ConePathDetector(calibration())
+        plain.process(metric_scene(), settings, timestamp=1.)
+        for step in range(1, 13):
+            later = plain.process(blank, replace(settings, tracking=True), timestamp=1.+.1*step)
+        self.assertFalse(later.valid)
 
 if __name__ == '__main__':
     unittest.main()

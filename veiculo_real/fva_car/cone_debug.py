@@ -41,9 +41,15 @@ def clean(value):
 
 class ConeDebugRecorder:
     def __init__(self, folder, *, max_event_frames=300, pre_frames=5, post_frames=5,
-                 queue_size=64, frame_size=(320, 240), jpeg_quality=70):
+                 queue_size=64, frame_size=(320, 240), jpeg_quality=70, record_hz=0.):
         self.folder = Path(folder)
         self.frames_folder = self.folder / "cone_frames"
+        # Coleta para rotular/avaliar: quadro original em resolucao cheia, a
+        # record_hz quadros/s (0 desliga). Somente em ensaios de coleta.
+        self.raw_folder = self.folder / "frames"
+        self.record_period = 1. / record_hz if record_hz and record_hz > 0 else None
+        self.last_raw_t = -math.inf
+        self.raw_saved = 0
         self.folder.mkdir(parents=True, exist_ok=True)
         self.file = open(self.folder / "cones_debug.jsonl", "w", encoding="utf-8")
         self.queue = queue.Queue(maxsize=queue_size)
@@ -67,6 +73,7 @@ class ConeDebugRecorder:
         self.first_t = self.last_t = None
         self.timing = {"detection": [0., 0], "processing": [0., 0]}  # soma, quadros
         self.closed = False
+        self.notes = {}  # Informacoes da corrida copiadas para o resumo (ex.: avisos).
         self.thread = threading.Thread(target=self._writer, daemon=True, name="cones-debug")
         self.thread.start()
 
@@ -106,7 +113,14 @@ class ConeDebugRecorder:
             "vision": debug,
         }
         self._put(("json", record))
-        self._frames(sequence, getattr(observation, "source_frame", None), events)
+        frame = getattr(observation, "source_frame", None)
+        self._frames(sequence, frame, events)
+        t = observation.timestamp
+        if (self.record_period is not None and frame is not None
+                and isinstance(t, (int, float)) and t - self.last_raw_t >= self.record_period - 1e-6):
+            if self._put(("raw", sequence, frame)):
+                self.last_raw_t = t
+                self.raw_saved += 1
         return True
 
     def _events(self, state, debug, control):
@@ -189,6 +203,12 @@ class ConeDebugRecorder:
             try:
                 if item[0] == "json":
                     self.file.write(json.dumps(clean(item[1]), separators=(",", ":")) + "\n")
+                elif item[0] == "raw":
+                    _, sequence, frame = item
+                    self.raw_folder.mkdir(exist_ok=True)
+                    ok, data = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    if ok:
+                        (self.raw_folder / f"f{sequence:06d}.jpg").write_bytes(data.tobytes())
                 else:
                     _, sequence, frame, name = item
                     self.frames_folder.mkdir(exist_ok=True)
@@ -219,8 +239,10 @@ class ConeDebugRecorder:
             "mean_detection_s": self._mean("detection"),
             "mean_processing_s": self._mean("processing"),
             "event_frames_saved": self.frames_reserved,
+            "raw_frames_saved": self.raw_saved,
             "dropped_records": self.dropped,
             "write_errors": self.write_errors,
+            **self.notes,
         })
 
     def _mean(self, key):

@@ -16,9 +16,13 @@ import numpy as np
 if __package__:
     from .cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
     from .cone_geometry import image_homography, metric_corridor, normals, project_curve, virtual_boundary
+    from .cone_track_path import (blend_paths, chain_boundary, curve_geometry, fit_path,
+                                  gate_midpoints, virtual_midpoints)
 else:
     from cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
     from cone_geometry import image_homography, metric_corridor, normals, project_curve, virtual_boundary
+    from cone_track_path import (blend_paths, chain_boundary, curve_geometry, fit_path,
+                                 gate_midpoints, virtual_midpoints)
 
 
 PURPLE = (230, 40, 210)  # BGR
@@ -50,6 +54,8 @@ class ConeSettings:
     clahe: bool = False
     tracking: bool = True
     memory_ms: int = 350
+    odometry_memory_ms: int = 2500  # Com odometria o mapa e confiavel por mais tempo.
+    confirm_hits: int = 2           # Quadros seguidos para um cone novo entrar nas bordas.
     smoothing: int = 35
     min_confidence: int = 20
     width_memory_ms: int = 1500
@@ -60,6 +66,27 @@ class ConeSettings:
     auto_sides: bool = True   # Decide pela geometria qual cor fica a esquerda.
     side_flip_frames: int = 3  # Quadros seguidos de evidencia contraria para trocar.
     path_prior_ms: int = 1000  # Idade maxima da trajetoria anterior usada como prioridade.
+    max_range_cm: int = 300    # Cones usados ate esta distancia; acima do horizonte, ignora.
+    cone_height_cm: int = 20   # Cone da prova: define a margem da ROI e o tamanho esperado.
+    cone_base_cm: int = 15
+    track_width_cm: int = 90   # Largura esperada do corredor (checagem da calibracao).
+    cone_spacing_cm: int = 70  # Espacamento tipico entre cones da mesma borda.
+    # Matiz em Lab: angulo de (a*, b*) em graus, pouco sensivel ao brilho. No
+    # ensaio real: cones vermelhos 14-19 graus, placa 51, porta laranja 65,
+    # reflexos no piso 77; cones verdes 153-169; piso sem croma (~2).
+    # Vermelho saturado puro fica em ~40 graus; HSV H=8 (quase laranja) em 46.
+    lab_filter: bool = True
+    chroma_min: int = 12      # porta marrom: croma 7-13 (mediana 9); cones: ~29
+    red_angle_low: int = 355   # faixa vermelha cruza o zero: 355..360 e 0..47
+    red_angle_high: int = 47
+    green_angle_low: int = 115  # HSV H=38 (limite verde) ~117 graus
+    green_angle_high: int = 200
+    hysteresis: bool = True   # Cresce cones fracos (sombra/longe) a partir de pixels fortes.
+    size_check: bool = True   # Tamanho metrico do cone (so com calibracao confiavel).
+    gate_path: bool = True    # Centro pelos portoes no piso; False: curvas por secoes normais.
+    path_smoothing: int = 40  # % do caminho anterior fundido ao novo (0 desliga).
+    min_gap_cm: int = 20      # Espacamento admissivel entre cones da mesma borda.
+    max_gap_cm: int = 160
 
 
 @dataclass
@@ -126,6 +153,46 @@ def _interpolate(points, rows):
             + (t**3 - t**2)*h*tangents[index + 1])
 
 
+def _apexes(component):
+    """Apices no perfil superior do blob: cones unidos (lado a lado ou em
+    profundidade) mostram dois ou mais picos com vale entre eles."""
+    h = component.shape[0]
+    filled = np.any(component, axis=0)
+    if np.count_nonzero(filled) < 3:
+        return 1
+    top = np.argmax(component, axis=0).astype(float)
+    top[~filled] = h
+    prominence = max(3., .12*h)
+    # Minimos proeminentes de "top" (linha do topo por coluna) = apices.
+    count, low, high, seeking_low = 0, top[0], top[0], True
+    for value in top[1:]:
+        if seeking_low:
+            if value < low:
+                low = value
+            elif value - low >= prominence:
+                count += 1
+                seeking_low, high = False, value
+        else:
+            if value > high:
+                high = value
+            elif high - value >= prominence:
+                seeking_low, low = True, value
+    if seeking_low and high - low >= prominence:
+        count += 1  # ultimo apice junto a borda direita do blob
+    return max(count, 1)
+
+
+def _grow(strong, weak):
+    """Componentes da mascara fraca que contem algum pixel forte."""
+    count, labels = cv2.connectedComponents(cv2.bitwise_or(weak, strong), connectivity=8)
+    if count <= 1:
+        return strong
+    keep = np.zeros(count, np.uint8)
+    keep[np.unique(labels[strong > 0])] = 255
+    keep[0] = 0
+    return keep[labels]
+
+
 STRAIGHT_MAX_CURVATURE = .25  # 1/m (raio 4 m): mesmo limiar de busca do Stanley.
 SIDE_MIN_SEPARATION_M = .15
 BRANCH_DIVERGENCE_M = .3
@@ -188,6 +255,18 @@ class SideEstimator:
         return False
 
 
+def _project_visible(points, inverse, shape):
+    """Projeta no quadro so os pontos visiveis (o mapa guarda cones fora da imagem)."""
+    points = np.asarray(points, float).reshape(-1, 2)
+    if not len(points):
+        return np.empty((0, 2), np.int32)
+    pixels = transform_points(points, inverse)
+    h, w = shape
+    inside = (np.all(np.isfinite(pixels), axis=1) & (pixels[:, 0] >= 0) & (pixels[:, 0] < w)
+              & (pixels[:, 1] >= 0) & (pixels[:, 1] < h))
+    return np.rint(pixels[inside]).astype(np.int32)
+
+
 def _distinct(chain, chosen):
     """Cadeias alternativas: nao contidas em outra e com ao menos 2 cones diferentes."""
     a = set(chain)
@@ -241,22 +320,119 @@ class ConePathDetector:
         self.sides = SideEstimator()
         self.prev_center = None  # Centro no piso do ultimo corredor valido.
         self.prev_center_time = -math.inf
+        self.geometry_samples = []  # (t, espacamento m, largura m) p/ checar a calibracao
+        self.calibration_suspect = False
+        self.prev_left = self.prev_right = None  # bordas anteriores (sementes)
+        self.switch_count = 0
 
     def set_calibration(self, calibration):
         self.calibration = calibration
         self.reset()
 
-    def segment(self, frame, settings):
+    def roi_row(self, shape, settings):
+        """Primeira linha processada: horizonte do alcance util, pela homografia.
+
+        Acima de max_range (mais a altura de um cone ali) so ha parede, portas e
+        placas: no ensaio real eram falsos positivos e tempo de processamento.
+        Sem calibracao, usa somente roi_top (%).
+        """
+        height, width = shape
+        manual = int(height * settings.roi_top / 100)
+        key = (shape, manual, settings.max_range_cm, settings.cone_height_cm, id(self.calibration))
+        cached = getattr(self, '_roi_cache', None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        row = manual
+        if self.calibration is not None:
+            try:
+                inverse = np.linalg.inv(image_homography(self.calibration, shape))
+                far = settings.max_range_cm/100
+                pixels = transform_points([[far, -.5], [far, 0.], [far, .5]], inverse)
+                if np.all(np.isfinite(pixels)) and np.all((pixels[:, 1] >= 0) & (pixels[:, 1] < height)):
+                    # Cone em pe tem altura ~ escala lateral daquela linha (camera baixa).
+                    cone = settings.cone_height_cm/100*abs(pixels[2, 0]-pixels[0, 0])
+                    row = max(manual, int(np.floor(pixels[:, 1].min() - 1.5*cone)))
+            except (ValueError, np.linalg.LinAlgError):
+                pass
+        row = int(np.clip(row, 0, height-2))
+        self._roi_cache = (key, row)
+        return row
+
+    def calibration_trusted(self, settings):
+        """Calibracao cobre a faixa dos cones e nao foi desmentida em corrida."""
+        if getattr(self, 'calibration_suspect', False):
+            return False
+        points = getattr(self.calibration, 'ground_points_m', None)
+        if points is None:
+            return True  # so homografia: sem como saber; confia
+        return float(np.max(np.asarray(points, float)[:, 0])) >= min(1.5, .6*settings.max_range_cm/100)
+
+    def row_scale(self, shape, settings):
+        """Pixels por metro (lateral) em cada linha, pela homografia; None sem calibracao."""
+        if self.calibration is None:
+            return None
+        key = (shape, id(self.calibration))
+        cached = getattr(self, '_scale_cache', None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        height, width = shape
+        scale = np.full(height, np.nan)
+        try:
+            homography = image_homography(self.calibration, shape)
+            inverse = np.linalg.inv(homography)
+            rows = np.arange(height, dtype=float)
+            ground = transform_points(np.c_[np.full(height, (width-1)/2), rows], homography)
+            ahead = np.isfinite(ground[:, 0]) & (ground[:, 0] > .03)
+            left = transform_points(ground + [0., .5], inverse)
+            right = transform_points(ground - [0., .5], inverse)
+            px = np.linalg.norm(left-right, axis=1)
+            scale[ahead] = px[ahead]
+        except (ValueError, np.linalg.LinAlgError):
+            pass
+        self._scale_cache = (key, scale)
+        return scale
+
+    def segment(self, frame, settings, roi=None):
         height, width = frame.shape[:2]
-        roi = int(height * settings.roi_top / 100)
-        hsv = cv2.cvtColor(cv2.medianBlur(frame[roi:], 3), cv2.COLOR_BGR2HSV)
+        roi = int(height * settings.roi_top / 100) if roi is None else roi
+        region = cv2.medianBlur(frame[roi:], 3)
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
         if settings.clahe:
             hsv[:, :, 2] = self.clahe.apply(hsv[:, :, 2])
         low, high = sorted((settings.green_h_min, settings.green_h_max))
-        green = cv2.inRange(hsv, (low, settings.s_min, settings.v_min), (high, 255, 255))
-        red = cv2.bitwise_or(
-            cv2.inRange(hsv, (0, settings.red_s_min, settings.red_v_min), (settings.red_hue, 255, 255)),
-            cv2.inRange(hsv, (179-settings.red_hue, settings.red_s_min, settings.red_v_min), (179, 255, 255)))
+
+        def hsv_masks(factor):
+            s_min, v_min = int(settings.s_min*factor), int(settings.v_min*factor)
+            red_s, red_v = int(settings.red_s_min*factor), int(settings.red_v_min*factor)
+            green = cv2.inRange(hsv, (low, s_min, v_min), (high, 255, 255))
+            red = cv2.bitwise_or(
+                cv2.inRange(hsv, (0, red_s, red_v), (settings.red_hue, 255, 255)),
+                cv2.inRange(hsv, (179-settings.red_hue, red_s, red_v), (179, 255, 255)))
+            return green, red
+
+        green, red = hsv_masks(1.)
+        chroma = None
+        if settings.lab_filter:
+            lab = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
+            a = lab[:, :, 1].astype(np.float32) - 128
+            b = lab[:, :, 2].astype(np.float32) - 128
+            magnitude, angle = cv2.cartToPolar(a, b, angleInDegrees=True)
+            chroma = magnitude >= settings.chroma_min
+            low_r, high_r = settings.red_angle_low % 360, settings.red_angle_high % 360
+            red_hue = (((angle >= low_r) | (angle <= high_r)) if low_r > high_r
+                       else ((angle >= low_r) & (angle <= high_r)))
+            green_hue = (angle >= settings.green_angle_low) & (angle <= settings.green_angle_high)
+            green_chroma = ((green_hue & chroma) * 255).astype(np.uint8)
+            red_chroma = ((red_hue & chroma) * 255).astype(np.uint8)
+            green, red = cv2.bitwise_and(green, green_chroma), cv2.bitwise_and(red, red_chroma)
+        if settings.hysteresis:
+            # Mascara fraca (S/V 40% menores, mesma cromaticidade) so sobrevive
+            # quando toca pixels fortes: recupera cones na sombra e distantes
+            # sem trazer manchas novas.
+            weak = hsv_masks(.6)
+            if chroma is not None:
+                weak = (cv2.bitwise_and(weak[0], green_chroma), cv2.bitwise_and(weak[1], red_chroma))
+            green, red = (_grow(strong, loose) for strong, loose in zip((green, red), weak))
         masks = []
         for color in (green, red):
             mask = np.zeros((height, width), np.uint8)
@@ -266,13 +442,35 @@ class ConePathDetector:
         return masks
 
     @staticmethod
-    def _bases(mask, settings, split=True, stats=None):
-        """stats opcional: conta componentes rejeitados por motivo (sem custo por pixel)."""
-        height, width = mask.shape
-        roi = int(height * settings.roi_top / 100)
+    def _bases(mask, settings, split=True, stats=None, origin=(0, 0), shape=None, roi=None, scale=None,
+               size_check=False):
+        """stats opcional: conta componentes rejeitados por motivo (sem custo por pixel).
+
+        origin/shape: mask e um recorte em (x, y) de uma imagem com shape (h, w).
+        Os criterios usam a geometria da imagem inteira sem alocar a mascara toda.
+        scale: pixels por metro (lateral) em cada linha da imagem, pela
+        homografia; habilita a area minima por distancia. size_check tambem
+        exige o tamanho metrico do cone, so com calibracao confiavel: com a
+        calibracao errada do ensaio de 23/10 a escala errava 2-6x.
+        """
+        ox, oy = origin
+        height, width = mask.shape if shape is None else shape
+        roi = int(height * settings.roi_top / 100) if roi is None else roi
         count, labels, component_stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         bases = []
         min_area = settings.min_area * height * width / (640 * 480)
+        cone_h, cone_w = settings.cone_height_cm/100, settings.cone_base_cm/100
+
+        def expected(bottom):
+            """(px/m, area minima) para um cone com base na linha bottom."""
+            if scale is None:
+                return math.nan, min_area
+            px = float(scale[int(np.clip(bottom, 0, len(scale)-1))])
+            if not math.isfinite(px) or px <= 0:
+                return math.nan, min_area
+            # Cones longe sao pequenos: a area minima acompanha o tamanho esperado.
+            return px, max(4., min(min_area, .25*.5*cone_h*cone_w*px*px))
+
         reason = [None]
         def contact(component, x, y):
             rows, columns = np.nonzero(component)
@@ -282,12 +480,30 @@ class ConePathDetector:
             component = component[top:bottom+1, left:right+1]
             x, y = x+int(left), y+int(top)
             h, w = component.shape
+            if h >= 8:
+                # Piso brilhante: o reflexo invertido abaixo do cone se estreita.
+                # A base e a linha mais larga mais baixa; o que vem abaixo e reflexo.
+                widths = np.count_nonzero(component, axis=1)
+                base_row = int(np.flatnonzero(widths >= .85*widths.max()).max())
+                if base_row <= h-3 and base_row >= 4:
+                    component = component[:base_row+1]
+                    columns = np.flatnonzero(np.any(component, axis=0))
+                    component = component[:, columns.min():columns.max()+1]
+                    x += int(columns.min())
+                    h, w = component.shape
             area = np.count_nonzero(component)
-            if area < min_area or h < max(5, height/100) or w < 3:
+            px, local_min = expected(y+h-1)
+            if area < local_min or h < (4 if math.isfinite(px) else max(5, height/100)) or w < 3:
                 reason[0] = reason[0] or "pequeno"
                 return None
             # Exige contato inteiro no piso, mesmo ao recuperar uma regiao unida.
             foot = np.flatnonzero(np.any(component[-max(2, h//10):], axis=0))
+            if size_check and math.isfinite(px):
+                # Tamanho metrico: base ~cone_base_cm e altura ~cone_height_cm.
+                foot_m = (foot.max()-foot.min()+1)/px
+                if not .4*cone_w <= foot_m <= 2.2*cone_w or not .3*cone_h*px <= h <= 2.5*cone_h*px:
+                    reason[0] = reason[0] or "tamanho"
+                    return None
             if (x+foot.min() <= 0 or x+foot.max() >= width-1
                     or y <= roi or y+h >= height):
                 reason[0] = reason[0] or "cortado_borda"
@@ -295,22 +511,28 @@ class ConePathDetector:
             if not .18 <= w/h <= 1.5 or w > .2*width:
                 reason[0] = reason[0] or "proporcao"
                 return None
-            third = max(1, h//3)
-            top_width = np.count_nonzero(np.any(component[:third], axis=0))
-            bottom_width = np.count_nonzero(np.any(component[-third:], axis=0))
-            if top_width >= .9*bottom_width or area < .25*w*h:
+            # Quarto de cima mais estreito que o de baixo. Com tercos, cones
+            # distantes borrados (13 x 23 px no ensaio real) falhavam: 0,92.
+            quarter = max(1, h//4)
+            top_width = np.count_nonzero(np.any(component[:quarter], axis=0))
+            bottom_width = np.count_nonzero(np.any(component[-quarter:], axis=0))
+            if top_width >= .85*bottom_width or area < .25*w*h:
                 reason[0] = reason[0] or "nao_triangular"
                 return None
             return x+float(np.mean(foot)), float(y+h-1)
 
         for label in range(1, count):
             x, y, w, h, area = component_stats[label]
-            if area < min_area or y <= roi or y+h >= height:
+            component = labels[y:y+h, x:x+w] == label
+            x, y = x+ox, y+oy
+            local_min = expected(y+h-1)[1]
+            # Blob que toca a linha da ROI segue: o cone pode estar na parte de
+            # baixo, unido a parede/porta (ensaio real), e a separacao o recupera.
+            if area < local_min or y+h >= height:
                 if stats is not None:
-                    key = "pequeno" if area < min_area else "cortado_borda"
+                    key = "pequeno" if area < local_min else "cortado_borda"
                     stats[key] = stats.get(key, 0) + 1
                 continue
-            component = labels[y:y+h, x:x+w] == label
             reason[0] = None
             base = contact(component, x, y)
             first_reason = reason[0]
@@ -331,7 +553,10 @@ class ConePathDetector:
                         base = max(candidates, key=lambda point: point[1])
                         break
             recovered = []
-            if split and w > 12 and h > 12:
+            # Separar nucleos custa 8 erosoes + componentes: so quando o blob nao
+            # forma um cone (sem base) ou e largo demais para um so (cones lado a
+            # lado). Antes rodava em todo blob > 12 px: 67% do tempo no ensaio real.
+            if split and w > 12 and h > 12 and (base is None or w > 1.1*h or _apexes(component) >= 2):
                 # Separa os nucleos de cones que se tocam. Cada nucleo e
                 # restaurado separadamente e limitado a cor realmente observada.
                 # A dilatacao conjunta voltaria a fundir os cones.
@@ -342,19 +567,20 @@ class ConePathDetector:
                     padded = np.pad(local, size)
                     eroded = cv2.erode(padded, kernel)
                     n, cores, core_stats, _ = cv2.connectedComponentsWithStats(eroded, 8)
-                    eligible = [i for i in range(1, n) if core_stats[i, -1] >= max(4, min_area*.2)]
-                    if not 2 <= len(eligible) <= 12:
+                    eligible = [i for i in range(1, n) if core_stats[i, -1] >= max(4, local_min*.2)]
+                    # Sem base, um unico nucleo basta: cone preso a um ruido fino.
+                    if not (1 if base is None else 2) <= len(eligible) <= 12:
                         continue
                     candidates = []
                     for i in eligible:
                         restored = cv2.dilate((cores == i).astype(np.uint8), kernel)
                         restored = restored[size:size+h, size:size+w] & local
-                        full = np.zeros_like(mask)
-                        full[y:y+h, x:x+w] = restored*255
-                        candidates.extend(ConePathDetector._bases(full, settings, split=False))
+                        candidates.extend(ConePathDetector._bases(
+                            restored*255, settings, split=False, origin=(x, y), shape=(height, width),
+                            roi=roi, scale=scale, size_check=size_check))
                     if len(candidates) > len(recovered):
                         recovered = candidates
-                if len(recovered) >= 2:
+                if len(recovered) >= (1 if base is None else 2):
                     if base is not None:
                         closest = int(np.argmin([np.linalg.norm(np.asarray(p)-base) for p in recovered]))
                         if np.linalg.norm(np.asarray(recovered[closest])-base) < .04*width:
@@ -458,16 +684,20 @@ class ConePathDetector:
         """
         settings = settings or ConeSettings()
         now = time.monotonic() if timestamp is None else float(timestamp)
-        green, red = self.segment(frame, settings)
+        roi = self.roi_row(frame.shape[:2], settings)
+        green, red = self.segment(frame, settings, roi)
         result = ConePathResult(cv2.bitwise_or(green, red), green, red)
         rejected = {'green': {}, 'red': {}}
-        gp = self._bases(green, settings, stats=rejected['green'])
-        rp = self._bases(red, settings, stats=rejected['red'])
+        scale = self.row_scale(frame.shape[:2], settings)
+        size_check = settings.size_check and scale is not None and self.calibration_trusted(settings)
+        gp = self._bases(green, settings, stats=rejected['green'], roi=roi, scale=scale, size_check=size_check)
+        rp = self._bases(red, settings, stats=rejected['red'], roi=roi, scale=scale, size_check=size_check)
         result.green_points, result.red_points = gp, rp
         result.green_left = settings.green_left
         result.debug = {'detection': {
             'green': {'bases': len(gp), 'rejected': rejected['green'], 'px': _polyline(gp, 20, 1)},
-            'red': {'bases': len(rp), 'rejected': rejected['red'], 'px': _polyline(rp, 20, 1)}}}
+            'red': {'bases': len(rp), 'rejected': rejected['red'], 'px': _polyline(rp, 20, 1)},
+            'roi_row': roi, 'size_check': bool(size_check)}}
         if not math.isfinite(now):
             self.reset()
             result.status = "Horario de captura invalido"
@@ -481,7 +711,11 @@ class ConePathDetector:
             ground_h = None if self.calibration is None else image_homography(self.calibration, green.shape)
             if motion is not None and ground_h is None:
                 raise ValueError('Odometria em metros requer calibracao.')
-            optical = self.motion.update(frame) if settings.tracking else None
+            if motion is not None:
+                self.motion.reset()  # proximo fluxo optico parte de um par novo
+                optical = None
+            else:
+                optical = self.motion.update(frame) if settings.tracking else None
             if motion is not None:
                 matrix = ego_transform(motion)
                 result.motion_source = 'odometria'
@@ -494,14 +728,21 @@ class ConePathDetector:
             return result
         observations = {'green': gp, 'red': rp}
         if ground_h is not None:
-            observations = {color: self._ground_points(points, ground_h) for color, points in observations.items()}
+            observations = {color: self._ground_points(points, ground_h, settings.max_range_cm/100)
+                            for color, points in observations.items()}
             result.source = 'solo'
-        ttl = settings.memory_ms/1000 if settings.tracking else 0.
+        odometry = motion is not None and ground_h is not None
+        memory = settings.odometry_memory_ms if odometry else settings.memory_ms
+        ttl = memory/1000 if settings.tracking else 0.
         if not settings.tracking:
             self.tracker.reset()
         self.tracker.update(observations, now, ttl, matrix=matrix,
-                            metric=ground_h is not None, smoothing=settings.smoothing)
-        age = self.tracker.age(now)
+                            metric=ground_h is not None, smoothing=settings.smoothing,
+                            confirm_hits=settings.confirm_hits if settings.tracking else 1,
+                            behind_x=-.4 if odometry else None)
+        # Com odometria o mapa guarda cones fora da imagem: a confianca vem do
+        # cone visto mais recentemente, nao do mais antigo.
+        age = self.tracker.age(now, freshest=odometry)
         result.estimated = age > 1e-6
         result.confidence = math.exp(-age/max(ttl, .001))
         if result.estimated and matrix is None:
@@ -518,6 +759,11 @@ class ConePathDetector:
             # A trajetoria anterior acompanha o carro, como os cones do mapa.
             moved = transform_points(self.prev_center, matrix)
             self.prev_center = moved if np.all(np.isfinite(moved)) else None
+            for name in ('prev_left', 'prev_right'):
+                boundary = getattr(self, name)
+                if boundary is not None:
+                    moved = transform_points(boundary, matrix)
+                    setattr(self, name, moved if np.all(np.isfinite(moved)) else None)
         self._debug_tracking(result, observations, mapped, matrix, ground_h, now, age)
         top_k = 3 if ground_h is not None else 1
         chains = {color: self._chains(pixel_points[color], green.shape, settings, top_k)
@@ -530,7 +776,14 @@ class ConePathDetector:
                                           for k, (c, score) in enumerate(items)]
                                   for color, items in chains.items()}
         if ground_h is not None:
-            return self._metric_result(result, left_chains, right_chains, ground_h, settings, now, observations)
+            suspect = self._check_calibration(result, chains, ground_h, settings, now)
+            gated = (self._gate_result(result, mapped, ground_h, settings, now, observations)
+                     if settings.gate_path else None)
+            result = gated if gated is not None else self._metric_result(
+                result, left_chains, right_chains, ground_h, settings, now, observations)
+            if suspect:
+                result.status = suspect + " | " + result.status
+            return result
         left = left_chains[0][0] if left_chains else np.empty((0, 2), float)
         right = right_chains[0][0] if right_chains else np.empty((0, 2), float)
         if not len(pixel_points['green']) and not len(pixel_points['red']):
@@ -574,10 +827,10 @@ class ConePathDetector:
         return result
 
     @staticmethod
-    def _ground_points(points, homography):
+    def _ground_points(points, homography, max_x=10.):
         points = transform_points(points, homography)
         return points[np.all(np.isfinite(points), axis=1) & (points[:, 0] > .03)
-                      & (points[:, 0] < 10.) & (abs(points[:, 1]) < 10.)]
+                      & (points[:, 0] < max_x) & (abs(points[:, 1]) < 10.)]
 
     def _debug_tracking(self, result, observations, mapped, matrix, ground_h, now, age):
         detection = result.debug['detection']
@@ -585,9 +838,10 @@ class ConePathDetector:
             for color in ('green', 'red'):
                 detection[color]['m'] = _polyline(observations[color], 20)
         tracked = [{'c': 'g' if t.color == 'green' else 'r', 'x': _r(t.point[0]), 'y': _r(t.point[1]),
-                    'age_s': _r(now-t.last_seen)} for t in self.tracker.tracks[:40]]
+                    'age_s': _r(now-t.last_seen), 'ok': t.confirmed} for t in self.tracker.tracks[:40]]
         tracking = {'motion': result.motion_source, 'age_s': _r(age), 'confidence': _r(result.confidence),
                     'tracked': tracked,
+                    'tentative': sum(not t.confirmed for t in self.tracker.tracks),
                     'tracked_count': {color: len(points) for color, points in mapped.items()}}
         if matrix is not None and ground_h is not None:
             # Delta do carro desde o quadro anterior (aprox. rigido): frente, esquerda, yaw.
@@ -666,6 +920,46 @@ class ConePathDetector:
                                  'flips': self.sides.flips}
         return bool(green_left)
 
+    def _check_calibration(self, result, chains, ground_h, settings, now):
+        """Espacamento e largura medidos muito longe do esperado por >= 1 s:
+        a homografia nao corresponde a camera (ensaio de 23/10: cones a 0,5-1 m
+        de distancia entre si apareciam a 3-8 cm, todo o piso comprimido)."""
+        spacings = []
+        for color in ('green', 'red'):
+            if chains[color]:
+                ground = self._ground_points(chains[color][0][0], ground_h)
+                if len(ground) >= 2:
+                    spacings.extend(np.linalg.norm(np.diff(ground, axis=0), axis=1))
+        sides = result.debug.get('sides') or {}
+        width = abs(sides['separation']) if sides.get('strong') and sides.get('separation') is not None else None
+        spacing = float(np.median(spacings)) if spacings else None
+        if spacing is not None or width is not None:
+            self.geometry_samples.append((now, spacing, width))
+        self.geometry_samples = [item for item in self.geometry_samples if now-item[0] <= 2.]
+        report = {'spacing_m': _r(spacing), 'width_m': _r(width), 'suspect': False,
+                  'expected_spacing_m': settings.cone_spacing_cm/100,
+                  'expected_width_m': settings.track_width_cm/100}
+        result.debug['calibration'] = report
+        samples = self.geometry_samples
+        if len(samples) < 5 or samples[-1][0]-samples[0][0] < 1.:
+            return None
+        spacing_values = [item[1] for item in samples if item[1] is not None]
+        width_values = [item[2] for item in samples if item[2] is not None]
+        spacing_ratio = (np.median(spacing_values)/(settings.cone_spacing_cm/100)
+                         if spacing_values and settings.cone_spacing_cm else None)
+        width_ratio = (np.median(width_values)/(settings.track_width_cm/100)
+                       if width_values and settings.track_width_cm else None)
+        report.update(spacing_ratio=_r(spacing_ratio), width_ratio=_r(width_ratio))
+        self.calibration_suspect = False
+        if ((spacing_ratio is not None and not .35 <= spacing_ratio <= 2.5)
+                or (width_ratio is not None and not .6 <= width_ratio <= 1.4)):
+            report['suspect'] = True
+            self.calibration_suspect = True
+            return (f"Calibracao incompativel com a camera? espaco {np.median(spacing_values or [math.nan]):.2f} m"
+                    f" (esperado {settings.cone_spacing_cm/100:.2f}), largura"
+                    f" {np.median(width_values or [math.nan]):.2f} m (esperada {settings.track_width_cm/100:.2f})")
+        return None
+
     def _continuity(self, center, now, settings):
         """(distancia media m, diferenca de rumo rad) ate a trajetoria anterior, ou None."""
         if (self.prev_center is None or len(self.prev_center) < 3
@@ -685,6 +979,131 @@ class ConePathDetector:
             return math.atan2(d[1], d[0])
         turn = abs((heading(center)-heading(previous)+math.pi) % (2*math.pi)-math.pi)
         return float(np.mean(distance)), float(turn)
+
+    def _gate_result(self, result, mapped, homography, settings, now, observations):
+        """Centro pelos portoes no piso (metodo principal); None para usar o antigo."""
+        left_color = 'green' if result.green_left else 'red'
+        right_color = 'red' if result.green_left else 'green'
+        prior = now-self.prev_center_time <= settings.path_prior_ms/1000
+        gaps = dict(min_gap=settings.min_gap_cm/100, max_gap=settings.max_gap_cm/100)
+        left = chain_boundary(mapped[left_color], self.prev_left if prior else None, **gaps)
+        right = chain_boundary(mapped[right_color], self.prev_right if prior else None, **gaps)
+        min_w, max_w = settings.min_width_cm/100, settings.max_width_cm/100
+        mids, widths = gate_midpoints(left, right, min_width=min_w, max_width=max_w)
+        gates = {'method': 'portoes', 'left_cones': len(left), 'right_cones': len(right),
+                 'gates': len(mids), 'prior': bool(prior)}
+        result.debug['gates'] = gates
+        need = 2 if prior else 3
+        virtual = False
+        if (len(mids) < need and settings.tracking and self.learned_width is not None
+                and now-self.width_time <= settings.width_memory_ms/1000):
+            width_age = now-self.width_time
+            if len(left) >= 2 and len(right) < 2 and len(observations[left_color]) >= 2:
+                mids, virtual = virtual_midpoints(left, self.learned_width, True), True
+            elif len(right) >= 2 and len(left) < 2 and len(observations[right_color]) >= 2:
+                mids, virtual = virtual_midpoints(right, self.learned_width, False), True
+            if virtual:
+                widths = np.full(len(mids), self.learned_width)
+                result.estimated = True
+                result.confidence = min(result.confidence, .6*math.exp(-width_age/max(settings.width_memory_ms/1000, 1e-3)))
+        gates['virtual'] = virtual
+        if len(mids) < need:
+            return None
+        if result.confidence < settings.min_confidence/100:
+            result.status = "Estimativa expirada ou com baixa confianca"
+            return result
+        fit = fit_path(mids)
+        if fit is None:
+            return None
+        curve, curvature, info = fit
+        gates.update(mids=_polyline(mids, 12), outliers=_polyline(info['outlier_points'], 4),
+                     fit_rms_m=_r(info['rms_m']), degree=info['degree'],
+                     width_m={'min': _r(np.min(widths)), 'median': _r(np.median(widths)), 'max': _r(np.max(widths))})
+        center = curve
+        continuity = self._continuity(curve, now, settings) if prior else None
+        gates['raw_center'] = _polyline(curve, 8)
+        if continuity is not None and continuity[0] > BRANCH_DIVERGENCE_M:
+            # Caminho novo longe do anterior: so troca se persistir (2 quadros).
+            self.switch_count += 1
+            gates['switch_pending'] = self.switch_count
+            if self.switch_count < 2 and self.prev_center is not None and len(self.prev_center) >= 3:
+                center = self.prev_center.copy()
+                result.estimated = True
+        else:
+            self.switch_count = 0
+            if prior and self.prev_center is not None and settings.path_smoothing > 0:
+                center, deviation = blend_paths(curve, self.prev_center, settings.path_smoothing/100)
+                gates['blend_deviation_m'] = _r(deviation)
+        if center is not curve:
+            curvature = curve_geometry(center)
+        if center is curve or self.switch_count == 0:
+            self.switch_count = self.switch_count if center is not curve else 0
+        gates['continuity_m'] = None if continuity is None else _r(continuity[0])
+        limit = 1/max(settings.min_radius_cm/100, .01)
+        curvature = np.clip(curvature, -limit, limit)
+        # Ramo alternativo: as bordas sem a semente anterior seguem outro caminho?
+        if prior:
+            for cones, chosen in ((mapped[left_color], left), (mapped[right_color], right)):
+                free = chain_boundary(cones, None, **gaps)
+                if len(free) >= 2 and len(chosen) >= 2 and np.linalg.norm(free[-1]-chosen[-1]) > BRANCH_DIVERGENCE_M:
+                    result.branch = True
+        result.debug['corridors'] = {'virtual': virtual, 'candidates': [], 'chosen': None,
+                                     'branch': result.branch, 'reason': 'portoes'}
+        inverse = np.linalg.inv(homography)
+        shape = result.raw_mask.shape
+        result.center = _project_visible(center, inverse, shape)
+        result.left_boundary = _project_visible(left, inverse, shape)
+        result.right_boundary = _project_visible(right, inverse, shape)
+        if not len(result.center):
+            result.status = "Centro fora da imagem/calibracao"
+            return result
+        result.ground_center = center
+        width = float(np.median(widths))
+        if not result.estimated and not virtual:
+            self.learned_width = width if self.learned_width is None else .7*self.learned_width+.3*width
+            self.width_time = now
+        self.prev_center = center[np.linspace(0, len(center)-1, min(30, len(center))).round().astype(int)].copy()
+        self.prev_center_time = now
+        if len(left) >= 2:
+            self.prev_left = left.copy()
+        if len(right) >= 2:
+            self.prev_right = right.copy()
+        index = int(np.argmin(np.linalg.norm(center, axis=1)))
+        normal = normals(center)[index] if len(center) >= 2 else np.array([0., 1.])
+        offset = float(center[index] @ normal)
+        result.left_distance_m = float(width/2+offset)
+        result.right_distance_m = float(width/2-offset)
+        result.lateral_error_m = -offset
+        tangent = np.array([normal[1], -normal[0]])
+        result.heading_rad = float(np.arctan2(tangent[1], tangent[0]))
+        result.curvature_m_inv = float(curvature[index])
+        result.corridor_width_m = width
+        segment, near_curvature, curve_ahead, samples, profile = classify_segment(center, curvature)
+        result.segment, result.curve_ahead_m = segment, curve_ahead
+        axis = center[index]-offset*normal
+        result.measurement_pixels = _project_visible(
+            np.array([axis+normal*width/2, axis, axis-normal*width/2]), inverse, shape)
+        if len(result.measurement_pixels) != 3:
+            result.measurement_pixels = np.empty((0, 2), np.int32)
+        result.status = ("ESTIMADA: uma borda + largura aprendida (m)" if virtual else
+                         "ESTIMADA: mapa temporal (m)" if result.estimated else
+                         "Centro pelos portoes de cones (m)")
+        result.debug['trajectory'] = {
+            'segment': segment,
+            'radius_m': None if abs(near_curvature) < 1e-3 else _r(1/near_curvature, 2),
+            'curvature_near': _r(near_curvature), 'curve_ahead_m': _r(curve_ahead, 2),
+            'profile_s_m': [_r(v, 2) for v in samples], 'profile_k': [_r(v) for v in profile],
+            'length_m': _r(np.sum(np.linalg.norm(np.diff(center, axis=0), axis=1)), 2),
+            'width_m': {'min': _r(np.min(widths)), 'median': _r(width), 'max': _r(np.max(widths)),
+                        'learned': _r(self.learned_width)},
+            'lateral_error_m': _r(result.lateral_error_m), 'heading_rad': _r(result.heading_rad, 4),
+            'curvature_m_inv': _r(result.curvature_m_inv),
+            'left_m': _r(result.left_distance_m), 'right_m': _r(result.right_distance_m),
+            'center_m': _polyline(center), 'left_border_m': _polyline(left, 8),
+            'right_border_m': _polyline(right, 8),
+            'estimated': bool(result.estimated), 'virtual': virtual, 'confidence': _r(result.confidence),
+            'method': 'portoes'}
+        return result
 
     def _metric_result(self, result, left_chains, right_chains, homography, settings, now, observations):
         # A cadeia da imagem esta do fundo para perto; no piso queremos avancar.

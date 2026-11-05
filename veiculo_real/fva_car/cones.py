@@ -29,7 +29,7 @@ class ConeObservation(LineObservation):
 
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
-    def __init__(self, calibration, settings=None, render_preview=False, processing_width=0):
+    def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None):
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('Cones requerem calibracao metrica da camera fixa.')
         self.calibration = calibration
@@ -66,6 +66,10 @@ class RealConeDetector:
         # sem reprocessar o quadro inteiro com as cores trocadas.
         self.detector = ConePathDetector(calibration)
         self.green_left = self.settings.green_left
+        # PoseHistory (fva_car/odometry.py) do laco de controle: leva o mapa de
+        # cones entre quadros; sem ela, o detector usa fluxo optico no piso.
+        self.odometry = odometry
+        self.last_timestamp = None
 
     def observe_frame(self, frame, timestamp):
         metadata = dict(processing_size=self.processing_size)
@@ -81,7 +85,11 @@ class RealConeDetector:
             return ConeObservation(timestamp, reason='Resolucao diferente da calibracao da camera', **metadata)
         started = time.perf_counter()
         small = frame if frame.shape[1::-1] == self.processing_size else cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
-        result = self.detector.process(small, self.settings, timestamp=timestamp)
+        motion = None
+        if self.odometry is not None and self.last_timestamp is not None:
+            motion = self.odometry.delta(self.last_timestamp, timestamp)
+        self.last_timestamp = timestamp
+        result = self.detector.process(small, self.settings, timestamp=timestamp, motion=motion)
         self.green_left = bool(result.green_left)
         # O desenho usa o lado decidido neste quadro.
         settings = replace(self.settings, green_left=self.green_left)

@@ -16,6 +16,7 @@ import cv2
 
 from fva_car.cone_debug import ConeDebugRecorder
 from fva_car.cones import RealConeDetector
+from fva_car.odometry import PoseHistory
 from fva_car.lateral import (
     GroundCalibration,
     LineObservation,
@@ -87,6 +88,9 @@ parameters = {
     # Debug por quadro em logs/<ensaio>/cones_debug.jsonl + frames JPG so em eventos.
     "cone_debug": True,
     "cone_max_event_frames": 300,
+    # Coleta para rotular/avaliar (tools/rotular_cones.py): quadros originais em
+    # logs/<ensaio>/frames/ a esta taxa (Hz). 0 desliga; nao usar na prova.
+    "record_frames_hz": 0.0,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
@@ -95,6 +99,20 @@ parameters = {
     # Porta HTTP com a visao ao vivo (http://<ip-do-carro>:porta/); 0 desliga.
     "stream_port": 0,
 }
+
+
+def cone_calibration_warnings(calibration, detector):
+    """Avisos de cobertura da homografia para a faixa em que os cones sao usados."""
+    from tools.cone_geometry import calibration_report
+
+    settings = getattr(detector, "settings", None)
+    max_range = getattr(settings, "max_range_cm", 300)
+    if isinstance(max_range, bool) or not isinstance(max_range, (int, float)):
+        max_range = 300
+    try:
+        return calibration_report(calibration, max_range_m=max_range / 100)["warnings"]
+    except (ValueError, TypeError, np.linalg.LinAlgError) as error:
+        return [f"nao foi possivel verificar a calibracao: {error}"]
 
 
 def stopping_distance(velocity):
@@ -304,6 +322,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             calibration, settings=config.get("cone_settings"), render_preview=False,
             processing_width=config.get("vision_width", 0),
         )
+        calibration_warnings = cone_calibration_warnings(calibration, detector)
+        for warning in calibration_warnings:
+            print(f"AVISO calibracao: {warning}", flush=True)
         # Sem chaveamento para linha nem esterco de busca: durante a tolerancia
         # apenas continua a trajetoria ja identificada, com a vref em rampa.
         config["line_loss_frames"] = config.get("cone_loss_frames", 6)
@@ -344,12 +365,19 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         raise
     recorder = None
     folder = getattr(car, "logfile", None)
-    if (mode == "cones" and config.get("cone_debug", True) and config["save"]
+    record_hz = float(config.get("record_frames_hz", 0.0) or 0.0)
+    if (mode == "cones" and (config.get("cone_debug", True) or record_hz > 0) and config["save"]
             and isinstance(folder, (str, Path))):
         try:
-            recorder = ConeDebugRecorder(folder, max_event_frames=config.get("cone_max_event_frames", 300))
+            recorder = ConeDebugRecorder(folder, max_event_frames=config.get("cone_max_event_frames", 300),
+                                         record_hz=record_hz)
+            recorder.notes["calibration_warnings"] = calibration_warnings
         except OSError as error:
             print(f"Debug de cones desativado: {error}", flush=True)
+    poses = None
+    if mode == "cones":
+        poses = PoseHistory()
+        detector.odometry = poses  # a visao leva o mapa de cones pela odometria
     vision_data = {"observation": None}
     stop_event = threading.Event()
     frames = queue.Queue(maxsize=1)
@@ -415,6 +443,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         while car.t < config["ts"]:
             if not car.step():
                 break
+            if poses is not None:
+                try:
+                    poses.append(clock(), float(car.p[0]), float(car.p[1]), float(car.th))
+                except (TypeError, ValueError, IndexError):
+                    pass
             encoder_valid = bool(getattr(car, "encoder_valid", True))
             if encoder_valid != last_encoder_valid:
                 print(
@@ -628,6 +661,12 @@ def main():
         help="Reativar leituras extras da IMU no CSV",
     )
     parser.add_argument(
+        "--record-frames",
+        type=float,
+        metavar="HZ",
+        help="Coleta: grava quadros originais em logs/<ensaio>/frames/ a HZ (ex.: 5)",
+    )
+    parser.add_argument(
         "--no-cone-debug",
         action="store_true",
         help="Nao gravar cones_debug.jsonl nem frames de eventos",
@@ -649,6 +688,10 @@ def main():
         settings["cone_loss_frames"] = args.loss_frames
     if args.no_cone_debug:
         settings["cone_debug"] = False
+    if args.record_frames is not None:
+        if args.record_frames < 0:
+            parser.error("--record-frames deve ser >= 0")
+        settings["record_frames_hz"] = args.record_frames
     if args.imu_telemetry:
         settings["imu_telemetry"] = True
     if args.encoder_protocol:

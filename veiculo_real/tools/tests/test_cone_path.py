@@ -71,7 +71,9 @@ def low_camera_track():
 class ConePathTests(unittest.TestCase):
     def test_dark_desaturated_red_is_detected_separately_from_green_thresholds(self):
         frame = track()
-        color = cv2.cvtColor(np.uint8([[[177, 50, 90]]]), cv2.COLOR_HSV2BGR)[0, 0]
+        # S=60 fica abaixo do minimo do verde (65) e acima do vermelho (45). Croma
+        # Lab ~14: acima do piso/porta marrom do ensaio real (croma 7-13).
+        color = cv2.cvtColor(np.uint8([[[177, 60, 140]]]), cv2.COLOR_HSV2BGR)[0, 0]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         frame[(hsv[:, :, 0] < 10) & (hsv[:, :, 1] > 150)] = color
         result = ConePathDetector().process(frame)
@@ -104,7 +106,11 @@ class ConePathTests(unittest.TestCase):
 
     def test_low_camera_reports_crop_and_geometry_failures_separately(self):
         frame = low_camera_track()
-        cropped = ConePathDetector().process(frame, ConeSettings(roi_top=25))
+        # Topo do cone cortado pela ROI: a parte de baixo (com a base) e recuperada.
+        partial = ConePathDetector().process(frame, ConeSettings(roi_top=25))
+        self.assertEqual((len(partial.green_points), len(partial.red_points)), (3, 3))
+        # ROI acima das bases: nenhum cone e a dica aponta o ajuste.
+        cropped = ConePathDetector().process(frame, ConeSettings(roi_top=38))
         self.assertFalse(cropped.valid)
         self.assertIn("Ignorar topo", cropped.status)
         short = ConePathDetector().process(frame, ConeSettings(min_span=20))

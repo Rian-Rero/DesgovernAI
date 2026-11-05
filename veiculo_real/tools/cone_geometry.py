@@ -29,6 +29,43 @@ def image_homography(calibration, shape):
     return calibration.homography @ scale
 
 
+def calibration_report(calibration, shape=None, max_range_m=2.5, min_coverage_m=1.5):
+    """Ate onde a homografia do piso vale e onde fica o horizonte na imagem.
+
+    Uma calibracao feita com outra inclinacao da camera, ou so com pontos
+    proximos, leva os cones distantes a posicoes metricas absurdas (ensaio de
+    23/10: todo o piso visivel virou 0,3-1,2 m). Retorna avisos legiveis.
+    """
+    h, w = shape if shape is not None else calibration.image_size[::-1]
+    homography = image_homography(calibration, (h, w))
+    inverse = np.linalg.inv(homography)
+    # Horizonte: linha da imagem onde o denominador da homografia zera.
+    a, b, c = homography[2]
+    horizon = None if abs(b) < 1e-12 else float(-(a*(w-1)/2 + c)/b)
+    rows = {}
+    for distance in (.5, 1., 1.5, 2., 2.5, 3.):
+        pixel = transform_points([[distance, 0.]], inverse)[0]
+        rows[distance] = float(pixel[1]) if np.all(np.isfinite(pixel)) else None
+    points = getattr(calibration, 'ground_points_m', None)
+    points = None if points is None else np.asarray(points, float)
+    report = {'horizon_row': horizon, 'rows_by_distance_m': rows,
+              'max_x_m': None if points is None else float(points[:, 0].max()),
+              'max_abs_y_m': None if points is None else float(abs(points[:, 1]).max()),
+              'warnings': []}
+    if report['max_x_m'] is not None and report['max_x_m'] < min_coverage_m:
+        report['warnings'].append(
+            f"Calibracao do piso cobre so ate {report['max_x_m']:.2f} m a frente; os cones sao usados ate "
+            f"{max_range_m:.1f} m. Refaca com pontos ate 2,5 m (README_cones.md).")
+    far = rows.get(round(max_range_m, 1)) if round(max_range_m, 1) in rows else None
+    if far is None:
+        pixel = transform_points([[max_range_m, 0.]], inverse)[0]
+        far = float(pixel[1]) if np.all(np.isfinite(pixel)) else None
+    if far is None or not 0 <= far < h or (horizon is not None and far <= horizon):
+        report['warnings'].append(
+            f"{max_range_m:.1f} m a frente fica fora da imagem pela homografia: camera mudou de posicao?")
+    return report
+
+
 def smooth_curve(points, count=100):
     """Hermite parametrica por comprimento de arco; aceita curvas em x/y."""
     points = np.asarray(points, float).reshape(-1, 2)

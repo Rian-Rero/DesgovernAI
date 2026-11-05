@@ -266,16 +266,33 @@ class RealFollowerTests(unittest.TestCase):
                 self.assert_neutral(car)
 
     def test_emergency_obstacle_and_reverse_override_a_fresh_valid_path(self):
-        for condition in ('emergency','obstacle','gear_reverse','negative_speed'):
+        for condition in ('emergency','obstacle','gear_reverse'):
             car=fake_car();obstacle=False
             if condition=='emergency':car.emergencia=True
             if condition=='obstacle':obstacle=True
             if condition=='gear_reverse':car.gear=Gear.REVERSE
-            if condition=='negative_speed':car.v=-.1
             with self.subTest(condition=condition):
                 self.assertFalse(lateral.RealStanleyFollower({}).apply(
                     car,self.valid_observation(),10.,obstacle_detected=obstacle))
                 self.assert_neutral(car)
+
+    def test_measured_reverse_blocks_only_after_consecutive_steps(self):
+        car=fake_car();follower=lateral.RealStanleyFollower({})
+        self.assertTrue(follower.apply(car,self.valid_observation(),10.))
+        # Pico isolado do encoder (ensaio de 23/10: -0,43 m/s parado): segue ativo.
+        car.v=-.43
+        self.assertTrue(follower.apply(car,self.valid_observation(),10.02))
+        car.v=.4
+        self.assertTrue(follower.apply(car,self.valid_observation(),10.04))
+        # Re real: 3 passos seguidos bloqueiam e continuam bloqueando.
+        car.v=-.1
+        self.assertTrue(follower.apply(car,self.valid_observation(),10.06))
+        self.assertTrue(follower.apply(car,self.valid_observation(),10.08))
+        car.set_vel.reset_mock()
+        self.assertFalse(follower.apply(car,self.valid_observation(),10.1))
+        self.assert_neutral(car)
+        self.assertEqual(follower.status,'Marcha a re: Stanley dianteiro bloqueado')
+        self.assertFalse(follower.apply(car,self.valid_observation(),10.12))
 
     def test_resume_after_loss_restarts_the_rate_limiter_from_neutral(self):
         car=fake_car();follower=lateral.RealStanleyFollower({})

@@ -4,7 +4,7 @@ A homografia leva pixels da camera fixa ao plano do piso: x para frente e y
 para esquerda, em metros, com origem no centro do eixo dianteiro. A selecao
 da faixa e exatamente a implementacao compartilhada de tools.yellow_path.
 """
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 import json
 import math
 from pathlib import Path
@@ -47,6 +47,8 @@ class LineObservation:
 class GroundCalibration:
     image_size: tuple
     homography: np.ndarray
+    # Pares medidos (metros), quando a calibracao veio deles: diz ate onde ela vale.
+    ground_points_m: tuple | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         try:
@@ -111,7 +113,7 @@ class GroundCalibration:
             raise ValueError('Nao foi possivel calcular a homografia da camera.') from error
         if matrix is None:
             raise ValueError('Correspondencias nao definem uma homografia valida.')
-        result = cls(data['image_size'], matrix)
+        result = cls(data['image_size'], matrix, tuple(map(tuple, ground.tolist())))
         if len(result.project_pixels(pixels)) != len(pixels):
             raise ValueError('A homografia projeta pontos de calibracao para o infinito.')
         return result
@@ -383,6 +385,9 @@ MAX_LATENCY_COMPENSATION = .25  # s; idade tipica da imagem: 0,12 a 0,19 s
 MAX_HEADING_JUMP = .3  # rad
 MAX_LATERAL_JUMP = .08  # m
 MAX_REJECTED_FRAMES = 3
+# Marcha a re medida so bloqueia apos este numero de passos seguidos com v < -0,05:
+# um pico isolado do encoder (visto em ensaio: -0,43 m/s parado) nao desliga o Stanley.
+REVERSE_CONFIRM_STEPS = 3
 # Decisao de busca ao perder a faixa: em curva (|kappa| acima disto) vira para
 # o lado da curva; em reta, para o lado em que a faixa estaria a frente.
 SEARCH_MIN_CURVATURE = .25  # 1/m, raio de 4 m
@@ -426,6 +431,7 @@ class RealStanleyFollower:
         self.max_heading_jump = positive('max_heading_jump_rad', MAX_HEADING_JUMP)
         self.hold_speed_factor = 1.
         self.last_state = {}  # Resumo do ultimo apply, para o debug por quadro.
+        self.reverse_steps = 0  # Fora de reset(): a re real continua bloqueada.
         self.reference = positive('velocity_reference', .5)
         self.min_speed = positive('curve_min_speed', .3)
         self.lateral_accel = positive('curve_lateral_accel', .4)
@@ -604,10 +610,12 @@ class RealStanleyFollower:
                     self.search_direction = self._search_side(self.line_memory)
                 errors = self.line_memory = self._predict_line(self.line_memory, car)
                 holding = True
+        self.reverse_steps = self.reverse_steps + 1 if finite_sample and car.v < -.05 else 0
+        moving_backward = self.reverse_steps >= REVERSE_CONFIRM_STEPS
         active = (not car.emergencia and not obstacle_detected and finite_sample
                   and getattr(car, 'encoder_valid', True)
                   and not reverse_gear and not reverse_requested
-                  and car.v >= -.05 and errors is not None)
+                  and not moving_backward and errors is not None)
         search = 0.
         if active:
             lateral, heading, curvature = errors
@@ -675,7 +683,7 @@ class RealStanleyFollower:
             self.status = 'Velocidade ou periodo de controle invalido'
         elif not reference_valid:
             self.status = 'Velocidade selecionada para o Stanley invalida'
-        elif reverse_gear or reverse_requested or car.v < -.05:
+        elif reverse_gear or reverse_requested or moving_backward:
             self.status = 'Marcha a re: Stanley dianteiro bloqueado'
         elif observation is None:
             self.status = 'Aguardando primeira imagem'

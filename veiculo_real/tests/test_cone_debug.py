@@ -105,5 +105,23 @@ class ConeDebugRecorderTests(unittest.TestCase):
                          {'a': 2, 'b': [1.5, None], 'c': True})
 
 
+    def test_raw_frames_for_collection_follow_the_rate(self):
+        recorder = ConeDebugRecorder(self.folder, record_hz=5.)
+        for sequence in range(1, 21):  # 1 s de quadros a 20 Hz
+            recorder.record(observation(sequence), {'active': True})
+        recorder.close()
+        raw = sorted(p.name for p in (self.folder / 'frames').glob('*.jpg'))
+        self.assertEqual(len(raw), 5)
+        self.assertEqual(raw[0], 'f000001.jpg')
+        summary = json.loads((self.folder / 'cones_summary.json').read_text())
+        self.assertEqual(summary['raw_frames_saved'], 5)
+
+    def test_notes_are_copied_to_summary(self):
+        recorder = ConeDebugRecorder(self.folder)
+        recorder.notes['calibration_warnings'] = ['cobre so 0.6 m']
+        recorder.close()
+        summary = json.loads((self.folder / 'cones_summary.json').read_text())
+        self.assertEqual(summary['calibration_warnings'], ['cobre so 0.6 m'])
+
 if __name__ == '__main__':
     unittest.main()
