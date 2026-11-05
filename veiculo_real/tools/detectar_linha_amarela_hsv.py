@@ -287,7 +287,10 @@ class CameraApp:
         notebook.add(cone_color, text="HSV")
         ttk.Checkbutton(cone_geometry, text="Verdes a esquerda", variable=self.cone_variables["green_left"],
                         command=self.changed).pack(anchor="w")
-        ttk.Label(cone_geometry, text="Desmarcado: vermelhos a esquerda.",
+        ttk.Checkbutton(cone_geometry, text="Lados automaticos (pela geometria)",
+                        variable=self.cone_variables["auto_sides"], command=self.changed).pack(anchor="w")
+        ttk.Label(cone_geometry, text="Automatico: a caixa acima e so a preferencia inicial. "
+                  "Desmarcado: vermelhos a esquerda.",
                   foreground="#9bb1c9", wraplength=270).pack(anchor="w")
         for key, label, low, high, suffix in (
                 ("roi_top", "Ignorar topo", 0, 65, "%"),
@@ -487,7 +490,12 @@ class CameraApp:
             self.state.set(self.last_result.status)
             if self.mode.get() == "cones":
                 result = self.last_result
-                self.support_text.set(f"{len(result.green_points)} verdes | {len(result.red_points)} vermelhos")
+                extra = f" | verde a {'esquerda' if result.green_left else 'direita'}"
+                if result.segment:
+                    extra += " | " + result.segment.replace("_", " ")
+                if result.branch:
+                    extra += " | bifurcacao"
+                self.support_text.set(f"{len(result.green_points)} verdes | {len(result.red_points)} vermelhos{extra}")
                 if result.valid:
                     if result.source == 'solo':
                         measures = (f"E {result.left_distance_m:.2f} m | D {result.right_distance_m:.2f} m | "

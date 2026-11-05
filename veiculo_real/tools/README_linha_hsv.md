@@ -44,8 +44,12 @@ venv/bin/python veiculo_real/tools/detectar_linha_amarela_hsv.py --mode cones
 
 1. Selecione **Cones verdes / vermelhos**. Posicione cones de uma cor em cada
    borda da pista, com pelo menos **3 cones visiveis por lado para iniciar**. Na aba
-   **Pista**, o padrao e **Verdes a esquerda**; desmarque se os
-   vermelhos estiverem a esquerda. A referencia e a imagem exibida pela camera.
+   **Pista**, **Lados automaticos** (padrao) decide pela geometria qual cor fica
+   a esquerda; **Verdes a esquerda** e entao so a preferencia inicial. Sem o
+   automatico, desmarque **Verdes a esquerda** se os vermelhos estiverem a
+   esquerda. A referencia e a imagem exibida pela camera. O rodape mostra o lado
+   decidido, o trecho (reta/curva) e bifurcacoes; candidatos rejeitados
+   aparecem em cinza.
 2. Use a aba **HSV** para ajustar os limites de verde, a faixa de vermelho,
    saturacao e brilho. O vermelho inclui os dois extremos do H do OpenCV.
    **HSV** mostra as mascaras vermelha e verde para conferir a segmentacao.

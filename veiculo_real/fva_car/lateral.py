@@ -416,6 +416,16 @@ class RealStanleyFollower:
             raise ValueError('line_loss_frames deve ser inteiro nao negativo (0 desativa).')
         self.loss_frames = int(self.loss_frames)
         self.loss_tolerance = nonnegative('line_loss_tolerance', 1.)
+        # Durante a tolerancia, reduz o alvo de velocidade ate curve_min_speed
+        # em vez de manter a vref cheia as cegas. Esgotada, neutraliza como antes.
+        self.loss_speed_ramp = self.settings.get('loss_speed_ramp', False)
+        if not isinstance(self.loss_speed_ramp, (bool, np.bool_)):
+            raise ValueError('loss_speed_ramp deve ser True ou False.')
+        # Saltos maiores que estes, entre quadros proximos, sao descartados.
+        self.max_lateral_jump = positive('max_lateral_jump_m', MAX_LATERAL_JUMP)
+        self.max_heading_jump = positive('max_heading_jump_rad', MAX_HEADING_JUMP)
+        self.hold_speed_factor = 1.
+        self.last_state = {}  # Resumo do ultimo apply, para o debug por quadro.
         self.reference = positive('velocity_reference', .5)
         self.min_speed = positive('curve_min_speed', .3)
         self.lateral_accel = positive('curve_lateral_accel', .4)
@@ -555,8 +565,8 @@ class RealStanleyFollower:
                 measured = errors[:2]
                 if self.compensate_latency and age > 0:
                     measured = self._predict_line(errors, car, min(age, MAX_LATENCY_COMPENSATION))[:2]
-                jump = (abs(measured[0] - expected[0]) > MAX_LATERAL_JUMP
-                        or abs(measured[1] - expected[1]) > MAX_HEADING_JUMP)
+                jump = (abs(measured[0] - expected[0]) > self.max_lateral_jump
+                        or abs(measured[1] - expected[1]) > self.max_heading_jump)
             self.rejected_frames = self.rejected_frames + 1 if jump else 0
             self.frame_rejected = jump and self.rejected_frames <= MAX_REJECTED_FRAMES
         outlier = line_seen and self.frame_rejected
@@ -618,6 +628,15 @@ class RealStanleyFollower:
                                                 search)
             speed_raw = curve_speed(self.reference, speed_curvature, lateral, heading,
                                     min_speed=self.min_speed, lateral_accel=self.lateral_accel)
+            self.hold_speed_factor = 1.
+            if holding and self.loss_speed_ramp:
+                # Fracao consumida da tolerancia (quadros ou tempo, o que vier antes).
+                progress = max(lost_frames/max(self.loss_frames, 1),
+                               lost_for/self.loss_tolerance if self.loss_tolerance > 0 else 1.)
+                progress = float(np.clip(progress, 0., 1.))
+                ramped = max(min(self.min_speed, speed_raw), (1.-progress)*speed_raw + progress*self.min_speed)
+                self.hold_speed_factor = ramped/speed_raw if speed_raw > 0 else 1.
+                speed_raw = ramped
             car.set_vel(self._filter_speed(speed_raw, car.dt))
             active = bool(getattr(car, 'encoder_valid', True))
             stanley_speed = car.vref if self.use_vref else car.v
@@ -641,8 +660,9 @@ class RealStanleyFollower:
         elif active and holding:
             side = {1.: '; procurando a esquerda', -1.: '; procurando a direita'}.get(
                 math.copysign(1., search) if search else 0., '')
+            ramp = f'; vref x{self.hold_speed_factor:.2f}' if self.loss_speed_ramp else ''
             self.status = (f'Faixa perdida ha {lost_frames} quadro(s) ({lost_for:.2f} s);'
-                           f' seguindo ultima trajetoria{side} (limite {self.loss_frames} quadros)')
+                           f' seguindo ultima trajetoria{side}{ramp} (limite {self.loss_frames} quadros)')
         elif active:
             self.status = 'Faixa valida; controle liberado'
         elif obstacle_detected:
@@ -691,6 +711,7 @@ class RealStanleyFollower:
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
                 stanley_feedforward_rad=self.controller.feedforward_term if active else invalid,
                 line_search_rad=search,
+                hold_speed_factor=self.hold_speed_factor if active else invalid,
                 vision_compensated_s=compensated,
                 curvature_raw_m_inv=curvature_raw, curve_speed_raw_m_s=speed_raw,
                 curvature_filtered_m_inv=invalid if self.curvature is None else self.curvature,
@@ -699,4 +720,11 @@ class RealStanleyFollower:
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,
                 stanley_target_rad=self.controller.target_steer if active else invalid,
                 vref=float(car.vref), u=float(car.u))
+        self.last_state = dict(
+            active=bool(active), hold=bool(holding and active), outlier=bool(outlier),
+            lost_frames=lost_frames, lost_s=lost_for, line_seen=bool(line_seen),
+            hold_speed_factor=self.hold_speed_factor if active else invalid,
+            speed_target=speed_raw, vref=float(car.vref), steer_rad=steer,
+            cross_track_m=lateral, heading_rad=heading, curvature_m_inv=curvature,
+            compensated_s=compensated, status=self.status)
         return bool(active)

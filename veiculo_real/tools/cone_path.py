@@ -57,6 +57,9 @@ class ConeSettings:
     min_radius_cm: int = 30
     min_width_cm: int = 40
     max_width_cm: int = 500
+    auto_sides: bool = True   # Decide pela geometria qual cor fica a esquerda.
+    side_flip_frames: int = 3  # Quadros seguidos de evidencia contraria para trocar.
+    path_prior_ms: int = 1000  # Idade maxima da trajetoria anterior usada como prioridade.
 
 
 @dataclass
@@ -86,6 +89,12 @@ class ConePathResult:
     curvature_m_inv: float | None = None
     corridor_width_m: float | None = None
     measurement_pixels: np.ndarray = field(default_factory=_points)
+    green_left: bool | None = None       # Lado usado neste quadro (auto ou manual).
+    segment: str | None = None           # "reta", "curva_esq" ou "curva_dir".
+    curve_ahead_m: float | None = None   # Arco ate |kappa| passar do limiar; 0: ja na curva.
+    branch: bool = False                 # Mais de um corredor valido e divergente.
+    candidate_centers: list = field(default_factory=list)  # Centros rejeitados (px).
+    debug: dict = field(default_factory=dict)  # Serializavel em JSON.
 
     @property
     def valid(self):
@@ -117,6 +126,104 @@ def _interpolate(points, rows):
             + (t**3 - t**2)*h*tangents[index + 1])
 
 
+STRAIGHT_MAX_CURVATURE = .25  # 1/m (raio 4 m): mesmo limiar de busca do Stanley.
+SIDE_MIN_SEPARATION_M = .15
+BRANCH_DIVERGENCE_M = .3
+MAX_CORRIDOR_EVALUATIONS = 3  # metric_corridor por quadro: limita custo no Pi 4.
+
+
+def _r(value, digits=3):
+    """Float JSON: arredondado, None para nao finito."""
+    if value is None:
+        return None
+    value = float(value)
+    return round(value, digits) if math.isfinite(value) else None
+
+
+def _polyline(points, count=10, digits=3):
+    points = np.asarray(points, float).reshape(-1, 2)
+    if len(points) > count:
+        points = points[np.linspace(0, len(points)-1, count).round().astype(int)]
+    return [[_r(x, digits), _r(y, digits)] for x, y in points]
+
+
+class SideEstimator:
+    """Decide qual cor fica a esquerda, com histerese entre quadros.
+
+    Evidencia em [-1, 1]: positiva quando o verde esta a esquerda. Somente a
+    evidencia com as duas cores (forte) pode trocar um lado ja decidido, e
+    apenas apos flip_frames quadros seguidos contrarios.
+    """
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.green_left = None
+        self.score = 0.
+        self.contrary = 0
+        self.flips = 0
+
+    def update(self, evidence, strong, flip_frames):
+        """Retorna True quando trocou de lado neste quadro."""
+        if evidence is None or not math.isfinite(evidence) or evidence == 0:
+            return False
+        weight = .4 if strong else .15
+        self.score = float(np.clip((1-weight)*self.score + weight*evidence, -1., 1.))
+        vote = evidence > 0
+        if self.green_left is None:
+            self.green_left = vote
+            self.score = float(evidence)
+            return False
+        if vote == self.green_left:
+            self.contrary = 0
+            return False
+        if not strong:
+            return False
+        self.contrary += 1
+        if self.contrary >= max(1, flip_frames) and (self.score > 0) == vote:
+            self.green_left = vote
+            self.contrary = 0
+            self.flips += 1
+            return True
+        return False
+
+
+def _distinct(chain, chosen):
+    """Cadeias alternativas: nao contidas em outra e com ao menos 2 cones diferentes."""
+    a = set(chain)
+    for other in chosen:
+        b = set(other)
+        if a <= b or b <= a or len(a ^ b) < 2:
+            return False
+    return True
+
+
+def _curve_profile(center, curvature, step=.25):
+    """Curvatura amostrada a cada step m de arco a partir do ponto mais proximo."""
+    arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(center, axis=0), axis=1))]
+    start = int(np.argmin(np.linalg.norm(center, axis=1)))
+    arc = arc - arc[start]
+    samples = np.arange(0., arc[-1] + 1e-9, step)
+    if not len(samples):
+        samples = np.array([0.])
+    values = np.interp(samples, arc, curvature)
+    return samples, values, arc, start
+
+
+def classify_segment(center, curvature, near_m=.5):
+    """Reta ou curva no trecho proximo + distancia ate a proxima curva."""
+    samples, values, arc, start = _curve_profile(center, curvature)
+    near = values[samples <= near_m]
+    mean = float(np.mean(near)) if len(near) else float(values[0])
+    if abs(mean) < STRAIGHT_MAX_CURVATURE:
+        segment = "reta"
+    else:
+        segment = "curva_esq" if mean > 0 else "curva_dir"
+    ahead = np.flatnonzero(abs(curvature[start:]) >= STRAIGHT_MAX_CURVATURE)
+    curve_ahead = float(arc[start + ahead[0]]) if len(ahead) else None
+    return segment, mean, curve_ahead, samples, values
+
+
 class ConePathDetector:
     def __init__(self, calibration=None):
         self.clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8))
@@ -131,6 +238,9 @@ class ConePathDetector:
         self.signature = None
         self.learned_width = None
         self.width_time = -math.inf
+        self.sides = SideEstimator()
+        self.prev_center = None  # Centro no piso do ultimo corredor valido.
+        self.prev_center_time = -math.inf
 
     def set_calibration(self, calibration):
         self.calibration = calibration
@@ -156,12 +266,14 @@ class ConePathDetector:
         return masks
 
     @staticmethod
-    def _bases(mask, settings, split=True):
+    def _bases(mask, settings, split=True, stats=None):
+        """stats opcional: conta componentes rejeitados por motivo (sem custo por pixel)."""
         height, width = mask.shape
         roi = int(height * settings.roi_top / 100)
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        count, labels, component_stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         bases = []
         min_area = settings.min_area * height * width / (640 * 480)
+        reason = [None]
         def contact(component, x, y):
             rows, columns = np.nonzero(component)
             if not len(rows):
@@ -172,27 +284,36 @@ class ConePathDetector:
             h, w = component.shape
             area = np.count_nonzero(component)
             if area < min_area or h < max(5, height/100) or w < 3:
+                reason[0] = reason[0] or "pequeno"
                 return None
             # Exige contato inteiro no piso, mesmo ao recuperar uma regiao unida.
             foot = np.flatnonzero(np.any(component[-max(2, h//10):], axis=0))
             if (x+foot.min() <= 0 or x+foot.max() >= width-1
                     or y <= roi or y+h >= height):
+                reason[0] = reason[0] or "cortado_borda"
                 return None
             if not .18 <= w/h <= 1.5 or w > .2*width:
+                reason[0] = reason[0] or "proporcao"
                 return None
             third = max(1, h//3)
             top_width = np.count_nonzero(np.any(component[:third], axis=0))
             bottom_width = np.count_nonzero(np.any(component[-third:], axis=0))
             if top_width >= .9*bottom_width or area < .25*w*h:
+                reason[0] = reason[0] or "nao_triangular"
                 return None
             return x+float(np.mean(foot)), float(y+h-1)
 
         for label in range(1, count):
-            x, y, w, h, area = stats[label]
+            x, y, w, h, area = component_stats[label]
             if area < min_area or y <= roi or y+h >= height:
+                if stats is not None:
+                    key = "pequeno" if area < min_area else "cortado_borda"
+                    stats[key] = stats.get(key, 0) + 1
                 continue
             component = labels[y:y+h, x:x+w] == label
+            reason[0] = None
             base = contact(component, x, y)
+            first_reason = reason[0]
             if base is None:
                 # Uma sobreposicao pode unir um cone inteiro a outro cortado na
                 # lateral. Tenta somente o cone inferior, cuja base e observada.
@@ -239,20 +360,34 @@ class ConePathDetector:
                         if np.linalg.norm(np.asarray(recovered[closest])-base) < .04*width:
                             recovered[closest] = base
                     bases.extend(recovered)
+                    if stats is not None:
+                        stats["separados"] = stats.get("separados", 0) + 1
                     continue
             if base is not None:
                 bases.append(base)
+            elif stats is not None:
+                key = first_reason or "sem_base"
+                stats[key] = stats.get(key, 0) + 1
         return np.asarray(bases, float).reshape(-1, 2)
 
     @staticmethod
     def _boundary(points, shape, settings):
         """Seleciona uma cadeia continua por cor, penalizando saltos de direcao."""
+        chains = ConePathDetector._chains(points, shape, settings, top_k=1)
+        return chains[0][0] if chains else np.empty((0, 2), float)
+
+    @staticmethod
+    def _chains(points, shape, settings, top_k=3):
+        """Ate top_k cadeias distintas por cor: [(pontos y crescente, pontuacao)].
+
+        A primeira e a mesma de _boundary. As demais sao alternativas (por
+        exemplo, os dois ramos de uma bifurcacao) avaliadas pelo corredor.
+        """
         if len(points) < 3:
-            return np.empty((0, 2), float)
+            return []
         height, width = shape
         # Limita custo em cenas com muitas manchas. Prioriza cones proximos.
         points = points[np.argsort(points[:, 1])[-80:]][::-1]
-        chains, scores, tangents = [], [], []
         min_dy = max(2., .004*height)
         max_dy = settings.max_gap*height/480
         # Uma camera baixa comprime a profundidade em poucas linhas da imagem:
@@ -261,29 +396,59 @@ class ConePathDetector:
         # a checagem angular em cenas que ja ocupam boa extensao vertical.
         perspective_scale = float(np.clip(
             np.ptp(points[:, 0])/max(np.ptp(points[:, 1]), .03*height), 1., 6.))
-        for i, point in enumerate(points):
-            best, score, tangent = [i], 1., None
-            for j in range(i):
-                dy = points[j, 1] - point[1]
-                dx = point[0] - points[j, 0]
-                if not min_dy <= dy <= max_dy or abs(dx) > perspective_scale*(1.8*dy + .03*width):
-                    continue
-                slope = dx/(dy*perspective_scale)
-                turn = 0. if tangents[j] is None else abs(np.arctan(slope) - np.arctan(tangents[j]))
-                if turn > np.deg2rad(85):
-                    continue
-                candidate = scores[j] + 1 + dy/height - .35*turn
-                if candidate > score:
-                    best, score, tangent = chains[j] + [i], candidate, slope
-            chains.append(best)
-            scores.append(score)
-            tangents.append(tangent)
-        eligible = [i for i, chain in enumerate(chains) if len(chain) >= 3
-                    and np.ptp(points[chain, 1]) >= height*settings.min_span/100]
-        if not eligible:
-            return np.empty((0, 2), float)
-        chosen = max(eligible, key=lambda i: scores[i] + points[chains[i][0], 1]/height)
-        return points[chains[chosen]][::-1]  # y crescente, sem duplicatas.
+        def ranked_chains(index):
+            """Cadeias (indices em points, pontuacao) das melhores para as piores."""
+            chains, scores, tangents = [], [], []
+            for a, i in enumerate(index):
+                point = points[i]
+                best, score, tangent = [i], 1., None
+                for b in range(a):
+                    j = index[b]
+                    dy = points[j, 1] - point[1]
+                    dx = point[0] - points[j, 0]
+                    if not min_dy <= dy <= max_dy or abs(dx) > perspective_scale*(1.8*dy + .03*width):
+                        continue
+                    slope = dx/(dy*perspective_scale)
+                    turn = 0. if tangents[b] is None else abs(np.arctan(slope) - np.arctan(tangents[b]))
+                    if turn > np.deg2rad(85):
+                        continue
+                    candidate = scores[b] + 1 + dy/height - .35*turn
+                    if tangents[b] is None:
+                        # Primeiro elo sem curva anterior: com duas fileiras de cones
+                        # da mesma cor, prefere a vizinha na propria fileira em vez de
+                        # cruzar para a outra (empate decidido pelo menor salto lateral).
+                        candidate -= .05*abs(np.arctan(slope))
+                    if candidate > score:
+                        best, score, tangent = chains[b] + [i], candidate, slope
+                chains.append(best)
+                scores.append(score)
+                tangents.append(tangent)
+            eligible = [a for a, chain in enumerate(chains) if len(chain) >= 3
+                        and np.ptp(points[chain, 1]) >= height*settings.min_span/100]
+            eligible.sort(key=lambda a: scores[a] + points[chains[a][0], 1]/height, reverse=True)
+            return [(chains[a], float(scores[a])) for a in eligible]
+
+        ranked = ranked_chains(list(range(len(points))))
+        if not ranked:
+            return []
+        chosen = [ranked[0]]
+        if top_k > 1:
+            # Alternativa disjunta: refaz a busca sem os cones da melhor cadeia.
+            # Recupera uma segunda fileira da mesma cor (bifurcacao, outro trecho).
+            used = set(ranked[0][0])
+            rest = [k for k in range(len(points)) if k not in used]
+            if len(rest) >= 3:
+                disjoint = ranked_chains(rest)
+                if disjoint:
+                    chosen.append(disjoint[0])
+            # Variantes com cones em comum (ramos que partem do mesmo trecho).
+            for chain in ranked[1:]:
+                if len(chosen) >= top_k:
+                    break
+                if _distinct(chain[0], [c[0] for c in chosen]):
+                    chosen.append(chain)
+        # y crescente, sem duplicatas.
+        return [(points[chain][::-1], score) for chain, score in chosen[:top_k]]
 
     def process(self, frame, settings=None, timestamp=None, *, motion=None):
         """motion opcional: delta (frente m, esquerda m, yaw rad), desde o frame anterior.
@@ -295,8 +460,14 @@ class ConePathDetector:
         now = time.monotonic() if timestamp is None else float(timestamp)
         green, red = self.segment(frame, settings)
         result = ConePathResult(cv2.bitwise_or(green, red), green, red)
-        gp, rp = self._bases(green, settings), self._bases(red, settings)
+        rejected = {'green': {}, 'red': {}}
+        gp = self._bases(green, settings, stats=rejected['green'])
+        rp = self._bases(red, settings, stats=rejected['red'])
         result.green_points, result.red_points = gp, rp
+        result.green_left = settings.green_left
+        result.debug = {'detection': {
+            'green': {'bases': len(gp), 'rejected': rejected['green'], 'px': _polyline(gp, 20, 1)},
+            'red': {'bases': len(rp), 'rejected': rejected['red'], 'px': _polyline(rp, 20, 1)}}}
         if not math.isfinite(now):
             self.reset()
             result.status = "Horario de captura invalido"
@@ -343,12 +514,25 @@ class ConePathDetector:
             pixel_points = {color: transform_points(points, inverse) for color, points in mapped.items()}
             pixel_points = {color: points[np.all(np.isfinite(points), axis=1)]
                             for color, points in pixel_points.items()}
-        left_points, right_points = ((pixel_points['green'], pixel_points['red']) if settings.green_left
-                                    else (pixel_points['red'], pixel_points['green']))
-        left = self._boundary(left_points, green.shape, settings)
-        right = self._boundary(right_points, green.shape, settings)
+        if ground_h is not None and self.prev_center is not None and matrix is not None:
+            # A trajetoria anterior acompanha o carro, como os cones do mapa.
+            moved = transform_points(self.prev_center, matrix)
+            self.prev_center = moved if np.all(np.isfinite(moved)) else None
+        self._debug_tracking(result, observations, mapped, matrix, ground_h, now, age)
+        top_k = 3 if ground_h is not None else 1
+        chains = {color: self._chains(pixel_points[color], green.shape, settings, top_k)
+                  for color in ('green', 'red')}
+        result.green_left = self._decide_sides(result, chains, mapped, ground_h, green.shape, settings)
+        left_chains, right_chains = ((chains['green'], chains['red']) if result.green_left
+                                     else (chains['red'], chains['green']))
+        result.debug['chains'] = {color: [{'cones': len(c), 'span_px': _r(np.ptp(c[:, 1]), 1),
+                                           'score': _r(score), 'chosen': k == 0}
+                                          for k, (c, score) in enumerate(items)]
+                                  for color, items in chains.items()}
         if ground_h is not None:
-            return self._metric_result(result, left, right, ground_h, settings, now, observations)
+            return self._metric_result(result, left_chains, right_chains, ground_h, settings, now, observations)
+        left = left_chains[0][0] if left_chains else np.empty((0, 2), float)
+        right = right_chains[0][0] if right_chains else np.empty((0, 2), float)
         if not len(pixel_points['green']) and not len(pixel_points['red']):
             result.confidence = 0.
             result.status = "Nenhum cone aceito: reduza Ignorar topo e confira HSV cones"
@@ -395,41 +579,212 @@ class ConePathDetector:
         return points[np.all(np.isfinite(points), axis=1) & (points[:, 0] > .03)
                       & (points[:, 0] < 10.) & (abs(points[:, 1]) < 10.)]
 
-    def _metric_result(self, result, left, right, homography, settings, now, observations):
+    def _debug_tracking(self, result, observations, mapped, matrix, ground_h, now, age):
+        detection = result.debug['detection']
+        if ground_h is not None:
+            for color in ('green', 'red'):
+                detection[color]['m'] = _polyline(observations[color], 20)
+        tracked = [{'c': 'g' if t.color == 'green' else 'r', 'x': _r(t.point[0]), 'y': _r(t.point[1]),
+                    'age_s': _r(now-t.last_seen)} for t in self.tracker.tracks[:40]]
+        tracking = {'motion': result.motion_source, 'age_s': _r(age), 'confidence': _r(result.confidence),
+                    'tracked': tracked,
+                    'tracked_count': {color: len(points) for color, points in mapped.items()}}
+        if matrix is not None and ground_h is not None:
+            # Delta do carro desde o quadro anterior (aprox. rigido): frente, esquerda, yaw.
+            rotation = np.asarray(matrix)[:2, :2]
+            yaw = math.atan2(rotation[0, 1], rotation[0, 0])
+            delta = -rotation.T @ np.asarray(matrix)[:2, 2]
+            tracking['motion_m'] = [_r(delta[0]), _r(delta[1]), _r(yaw, 4)]
+        result.debug['tracking'] = tracking
+
+    def _decide_sides(self, result, chains, mapped, ground_h, shape, settings):
+        """Qual cor e a borda esquerda: geometria das cadeias + histerese."""
+        height, width = shape
+        evidence, strong, source, separation = None, False, 'sem evidencia', None
+        green = chains['green'][0][0] if chains['green'] else None
+        red = chains['red'][0][0] if chains['red'] else None
+        if ground_h is not None:
+            g = None if green is None else self._ground_points(green, ground_h)
+            r = None if red is None else self._ground_points(red, ground_h)
+            if g is not None and r is not None and len(g) >= 2 and len(r) >= 2:
+                g, r = g[np.argsort(g[:, 0])], r[np.argsort(r[:, 0])]
+                start, end = max(g[0, 0], r[0, 0]), min(g[-1, 0], r[-1, 0])
+                if end-start >= .1:
+                    x = np.linspace(start, end, 8)
+                    separation = float(np.median(np.interp(x, g[:, 0], g[:, 1]) - np.interp(x, r[:, 0], r[:, 1])))
+                    strong, source = True, 'duas cores'
+                else:
+                    separation = float(np.median(g[:, 1]) - np.median(r[:, 1]))
+                    source = 'duas cores sem faixa comum'
+                if abs(separation) >= SIDE_MIN_SEPARATION_M:
+                    evidence = float(np.clip(separation/.3, -1., 1.))
+                else:
+                    strong = False
+            else:
+                for color, sign in (('green', 1.), ('red', -1.)):
+                    points = mapped[color]
+                    near = points[(points[:, 0] > 0) & (points[:, 0] < 1.2)] if len(points) else points
+                    if len(near) >= 2 and abs(np.median(near[:, 1])) >= SIDE_MIN_SEPARATION_M:
+                        separation = float(np.median(near[:, 1]))
+                        evidence = sign*math.copysign(.5, separation)
+                        source = 'uma cor (' + color + ')'
+                        break
+        else:
+            if green is not None and red is not None:
+                start, end = max(green[0, 1], red[0, 1]), min(green[-1, 1], red[-1, 1])
+                if end-start >= .03*height:
+                    rows = np.linspace(start, end, 8)
+                    separation = float(np.median(_interpolate(red, rows) - _interpolate(green, rows)))
+                    strong, source = True, 'duas cores'
+                else:
+                    separation = float(np.median(red[:, 0]) - np.median(green[:, 0]))
+                    source = 'duas cores sem faixa comum'
+                if abs(separation) >= .05*width:
+                    evidence = float(np.clip(separation/(.15*width), -1., 1.))
+                else:
+                    strong = False
+            else:
+                axis = (width-1)*settings.camera_center/100
+                for color, sign in (('green', 1.), ('red', -1.)):
+                    points = mapped[color]
+                    near = points[points[:, 1] > .6*height] if len(points) else points
+                    if len(near) >= 2 and abs(axis-np.median(near[:, 0])) >= .1*width:
+                        separation = float(axis-np.median(near[:, 0]))
+                        evidence = sign*math.copysign(.5, separation)
+                        source = 'uma cor (' + color + ')'
+                        break
+        flipped = False
+        if settings.auto_sides:
+            flipped = self.sides.update(evidence, strong, settings.side_flip_frames)
+            green_left = settings.green_left if self.sides.green_left is None else self.sides.green_left
+        else:
+            green_left = settings.green_left
+        result.debug['sides'] = {'auto': bool(settings.auto_sides), 'green_left': bool(green_left),
+                                 'score': _r(self.sides.score), 'evidence': _r(evidence),
+                                 'separation': _r(separation), 'strong': strong, 'source': source,
+                                 'contrary': self.sides.contrary, 'flipped': flipped,
+                                 'flips': self.sides.flips}
+        return bool(green_left)
+
+    def _continuity(self, center, now, settings):
+        """(distancia media m, diferenca de rumo rad) ate a trajetoria anterior, ou None."""
+        if (self.prev_center is None or len(self.prev_center) < 3
+                or now-self.prev_center_time > settings.path_prior_ms/1000):
+            return None
+        previous = self.prev_center
+        low, high = previous[:, 0].min()-.2, previous[:, 0].max()+.2
+        sample = center[(center[:, 0] >= low) & (center[:, 0] <= high)]
+        if len(sample) < 3:
+            return None
+        sample = sample[np.linspace(0, len(sample)-1, min(12, len(sample))).round().astype(int)]
+        distance = np.min(np.linalg.norm(sample[:, None, :]-previous[None, :, :], axis=2), axis=1)
+
+        def heading(curve):
+            i = int(np.clip(np.argmin(np.linalg.norm(curve, axis=1)), 0, len(curve)-2))
+            d = curve[i+1]-curve[i]
+            return math.atan2(d[1], d[0])
+        turn = abs((heading(center)-heading(previous)+math.pi) % (2*math.pi)-math.pi)
+        return float(np.mean(distance)), float(turn)
+
+    def _metric_result(self, result, left_chains, right_chains, homography, settings, now, observations):
         # A cadeia da imagem esta do fundo para perto; no piso queremos avancar.
-        left = self._ground_points(left[::-1], homography)
-        right = self._ground_points(right[::-1], homography)
+        lefts = [(self._ground_points(c[::-1], homography), score) for c, score in left_chains]
+        rights = [(self._ground_points(c[::-1], homography), score) for c, score in right_chains]
+        lefts = [item for item in lefts if len(item[0]) >= 3]
+        rights = [item for item in rights if len(item[0]) >= 3]
         virtual = False
-        if (settings.tracking and (not len(left) or not len(right))
+        if (settings.tracking and (not lefts or not rights)
                 and self.learned_width is not None):
             width_age = now-self.width_time
             width_ttl = settings.width_memory_ms/1000
-            left_color = 'green' if settings.green_left else 'red'
-            right_color = 'red' if settings.green_left else 'green'
+            left_color = 'green' if result.green_left else 'red'
+            right_color = 'red' if result.green_left else 'green'
             if width_age <= width_ttl and width_ttl > 0:
-                if len(left) >= 3 and len(observations[left_color]) >= 3 and not len(right):
-                    right = virtual_boundary(left, self.learned_width, True)
+                if lefts and len(observations[left_color]) >= 3 and not rights:
+                    rights = [(virtual_boundary(l, self.learned_width, True), score) for l, score in lefts]
                     virtual = True
-                elif len(right) >= 3 and len(observations[right_color]) >= 3 and not len(left):
-                    left = virtual_boundary(right, self.learned_width, False)
+                elif rights and len(observations[right_color]) >= 3 and not lefts:
+                    lefts = [(virtual_boundary(r, self.learned_width, False), score) for r, score in rights]
                     virtual = True
                 if virtual:
                     result.estimated = True
                     result.confidence = min(result.confidence, .6*math.exp(-width_age/width_ttl))
-        if len(left) < 3 or len(right) < 3:
+        corridors = {'virtual': virtual, 'candidates': [], 'chosen': None, 'branch': False, 'reason': None}
+        result.debug['corridors'] = corridors
+        if not lefts or not rights or any(len(item[0]) < 3 for item in lefts + rights):
             result.status = "Sem curvas suficientes no piso; confira cones e calibracao"
             return result
         if result.confidence < settings.min_confidence/100:
             result.status = "Estimativa expirada ou com baixa confianca"
             return result
-        geometry = metric_corridor(left, right, margin=settings.margin_cm/100,
-                                   min_width=settings.min_width_cm/100,
-                                   max_width=settings.max_width_cm/100,
-                                   min_radius=settings.min_radius_cm/100)
-        if geometry is None:
+        # Pares de bordas candidatas. A borda virtual so combina com a sua origem.
+        pairs = ([(i, i) for i in range(len(lefts))] if virtual else
+                 [(i, j) for i in range(len(lefts)) for j in range(len(rights))])
+        prior = self.prev_center is not None and now-self.prev_center_time <= settings.path_prior_ms/1000
+        ordered = []
+        for i, j in pairs:
+            l, r = lefts[i][0], rights[j][0]
+            pre = .3*(i+j)
+            lo, hi = max(l[:, 0].min(), r[:, 0].min()), min(l[:, 0].max(), r[:, 0].max())
+            if hi-lo >= .2:
+                x = np.linspace(lo, hi, 8)
+                lorder, rorder = np.argsort(l[:, 0]), np.argsort(r[:, 0])
+                yl = np.interp(x, l[lorder, 0], l[lorder, 1])
+                yr = np.interp(x, r[rorder, 0], r[rorder, 1])
+                width = float(np.median(yl-yr))
+                if width <= 0 or width > 2*settings.max_width_cm/100:
+                    continue  # Bordas trocadas ou distantes demais: nem avalia.
+                if prior:
+                    estimate = self._continuity(np.c_[x, (yl+yr)/2], now, settings)
+                    pre += 0. if estimate is None else 2*estimate[0]/.3
+            ordered.append((pre, i, j))
+        ordered.sort()
+        valid = []
+        for _, i, j in ordered[:MAX_CORRIDOR_EVALUATIONS]:
+            geometry = metric_corridor(lefts[i][0], rights[j][0], margin=settings.margin_cm/100,
+                                       min_width=settings.min_width_cm/100,
+                                       max_width=settings.max_width_cm/100,
+                                       min_radius=settings.min_radius_cm/100)
+            entry = {'left': i, 'right': j, 'valid': geometry is not None}
+            corridors['candidates'].append(entry)
+            if geometry is None:
+                continue
+            center, _, _, widths, _ = geometry
+            index = int(np.argmin(np.linalg.norm(center, axis=1)))
+            offset = float(center[index] @ normals(center)[index])
+            width = float(np.median(widths))
+            cost = .3*(i+j)
+            continuity = self._continuity(center, now, settings) if prior else None
+            if continuity is not None:
+                entry['continuity_m'], entry['continuity_rad'] = _r(continuity[0]), _r(continuity[1])
+                cost += 2*(continuity[0]/.3 + continuity[1]/.5)
+            else:
+                # Sem historico: prefere o corredor que contem o carro.
+                cost += .5*abs(offset)/max(width, .1)
+            if self.learned_width is not None:
+                deviation = abs(width-self.learned_width)/max(self.learned_width, .1)
+                entry['width_dev'] = _r(deviation)
+                cost += .5*deviation
+            entry.update(cost=_r(cost), width_m=_r(width), offset_m=_r(-offset),
+                         center=_polyline(center, 6))
+            valid.append((cost, len(corridors['candidates'])-1, geometry))
+        if not valid:
             result.status = "Curvas no piso inconsistentes: largura, margem ou raio minimo"
             return result
+        valid.sort(key=lambda item: item[0])
+        _, chosen, geometry = valid[0]
+        corridors['chosen'] = chosen
+        corridors['reason'] = ('unico' if len(valid) == 1 else
+                               'continuidade' if corridors['candidates'][chosen].get('continuity_m') is not None
+                               else 'sem historico')
         center, left, right, widths, curvature = geometry
+        for _, _, other in valid[1:]:
+            far = min(center[:, 0].max(), other[0][:, 0].max())
+            a = center[np.argmin(abs(center[:, 0]-far))]
+            b = other[0][np.argmin(abs(other[0][:, 0]-far))]
+            if np.linalg.norm(a-b) > BRANCH_DIVERGENCE_M:
+                result.branch = corridors['branch'] = True
+                break
         try:
             inverse = np.linalg.inv(homography)
             cp = project_curve(center, inverse, result.raw_mask.shape)
@@ -438,12 +793,19 @@ class ConePathDetector:
         except (ValueError, np.linalg.LinAlgError) as error:
             result.status = str(error)
             return result
+        for _, _, other in valid[1:]:
+            try:
+                result.candidate_centers.append(project_curve(other[0], inverse, result.raw_mask.shape))
+            except ValueError:
+                pass
         result.center, result.left_boundary, result.right_boundary = cp, lp, rp
         result.ground_center = center
         width = float(np.median(widths))
         if not result.estimated and not virtual:
             self.learned_width = width if self.learned_width is None else .7*self.learned_width+.3*width
             self.width_time = now
+        self.prev_center = center[np.linspace(0, len(center)-1, min(30, len(center))).round().astype(int)].copy()
+        self.prev_center_time = now
         index = int(np.argmin(np.linalg.norm(center, axis=1)))
         normal = normals(center)[index]
         offset = float(center[index] @ normal)
@@ -454,6 +816,8 @@ class ConePathDetector:
         result.heading_rad = float(np.arctan2(tangent[1], tangent[0]))
         result.curvature_m_inv = float(curvature[index])
         result.corridor_width_m = width
+        segment, near_curvature, curve_ahead, samples, profile = classify_segment(center, curvature)
+        result.segment, result.curve_ahead_m = segment, curve_ahead
         axis = center[index]-offset*normal
         try:
             result.measurement_pixels = project_curve(np.array([left[index], axis, right[index]]),
@@ -463,6 +827,20 @@ class ConePathDetector:
         result.status = ("ESTIMADA: uma borda + largura aprendida (m)" if virtual else
                          "ESTIMADA: mapa temporal (m)" if result.estimated else
                          "Centro entre curvas no piso (m)")
+        result.debug['trajectory'] = {
+            'segment': segment,
+            'radius_m': None if abs(near_curvature) < 1e-3 else _r(1/near_curvature, 2),
+            'curvature_near': _r(near_curvature), 'curve_ahead_m': _r(curve_ahead, 2),
+            'profile_s_m': [_r(v, 2) for v in samples], 'profile_k': [_r(v) for v in profile],
+            'length_m': _r(np.sum(np.linalg.norm(np.diff(center, axis=0), axis=1)), 2),
+            'width_m': {'min': _r(np.min(widths)), 'median': _r(width), 'max': _r(np.max(widths)),
+                        'learned': _r(self.learned_width)},
+            'lateral_error_m': _r(result.lateral_error_m), 'heading_rad': _r(result.heading_rad, 4),
+            'curvature_m_inv': _r(result.curvature_m_inv),
+            'left_m': _r(result.left_distance_m), 'right_m': _r(result.right_distance_m),
+            'center_m': _polyline(center), 'left_border_m': _polyline(left, 6),
+            'right_border_m': _polyline(right, 6),
+            'estimated': bool(result.estimated), 'virtual': virtual, 'confidence': _r(result.confidence)}
         return result
 
 
@@ -475,7 +853,8 @@ def render_cones(frame, result, settings=None, *, path_only=False):
             cv2.circle(output, (round(x), round(y)), 5, color, 2, cv2.LINE_AA)
     if not result.valid:
         return output
-    lc, rc = (GREEN, RED) if settings.green_left else (RED, GREEN)
+    green_left = settings.green_left if result.green_left is None else result.green_left
+    lc, rc = (GREEN, RED) if green_left else (RED, GREEN)
     cv2.polylines(output, [result.left_boundary], False, lc, 2, cv2.LINE_AA)
     cv2.polylines(output, [result.right_boundary], False, rc, 2, cv2.LINE_AA)
     if len(result.measurement_pixels) == 3:
@@ -483,6 +862,8 @@ def render_cones(frame, result, settings=None, *, path_only=False):
         cv2.line(output, tuple(axis), tuple(left), lc, 2, cv2.LINE_AA)
         cv2.line(output, tuple(axis), tuple(right), rc, 2, cv2.LINE_AA)
         cv2.drawMarker(output, tuple(axis), (255, 255, 255), cv2.MARKER_CROSS, 17, 2)
+    for candidate in result.candidate_centers:
+        cv2.polylines(output, [candidate], False, (150, 150, 150), 1, cv2.LINE_AA)
     if result.estimated:
         for start in range(0, len(result.center)-1, 12):
             cv2.polylines(output, [result.center[start:start+8]], False, PURPLE, 4, cv2.LINE_AA)

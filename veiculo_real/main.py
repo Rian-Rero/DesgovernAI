@@ -14,6 +14,7 @@ import time
 import numpy as np
 import cv2
 
+from fva_car.cone_debug import ConeDebugRecorder
 from fva_car.cones import RealConeDetector
 from fva_car.lateral import (
     GroundCalibration,
@@ -76,6 +77,16 @@ parameters = {
     # Durante a perda, soma esterco para o lado da curva (ou da faixa) a esta
     # taxa, ate o batente: ~18 graus apos 8 quadros. 0 so segue a trajetoria.
     "line_search_rate_deg_s": 40.0,
+    # Cones: perdendo o corredor, segue a trajetoria prevista por odometria por
+    # ate cone_loss_frames quadros (e cone_loss_tolerance s), reduzindo a vref
+    # em rampa ate curve_min_speed; depois neutraliza. 0 para no 1o quadro.
+    "cone_loss_frames": 6,
+    "cone_loss_tolerance": 0.6,
+    "cone_max_lateral_jump_m": 0.12,
+    "cone_max_heading_jump_rad": 0.35,
+    # Debug por quadro em logs/<ensaio>/cones_debug.jsonl + frames JPG so em eventos.
+    "cone_debug": True,
+    "cone_max_event_frames": 300,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
@@ -208,12 +219,15 @@ def save_vision_snapshot(car, observation, status, now):
             "geometry_s": finite(observation.geometry_seconds),
             "errors": None if observation.errors is None else list(observation.errors),
             "color_support": finite(observation.color_support),
+            "cone_debug": getattr(observation, "debug", None),
             "encoder_valid": bool(getattr(car, "encoder_valid", False)),
             "sel_direcao": getattr(car, "sel_direcao", None),
             "sel_tracao": getattr(car, "sel_tracao", None),
         }
+        from fva_car.cone_debug import clean
+
         (folder / "vision_status.json").write_text(
-            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            json.dumps(clean(data), indent=2) + "\n", encoding="utf-8"
         )
         print(f"Diagnostico de visao salvo em {folder}", flush=True)
     except (OSError, ValueError, cv2.error) as error:
@@ -223,10 +237,28 @@ def save_vision_snapshot(car, observation, status, now):
 def stream_text(car, status, observation):
     """Legenda do quadro transmitido: o que o controle decidiu neste passo."""
     lines = [status[:48]]
+    if len(status) > 48:  # tolerancia de perda: quadros, tempo e fator da vref
+        lines.append(status[48:110])
     if observation is not None:
         lines.append("Referencia: " + ("cones" if observation.reference_source == "cones" else "linha amarela"))
     if observation is not None and observation.reference_source == "cones":
         lines.append(f"Cones: verdes={len(observation.green_pixels)} vermelhos={len(observation.red_pixels)}")
+        debug = getattr(observation, "debug", None) or {}
+        sides = debug.get("sides") or {}
+        if sides:
+            lines.append(f"Lados: verde={'E' if sides.get('green_left') else 'D'}"
+                         f" ({'auto' if sides.get('auto') else 'manual'} {sides.get('score') or 0:+.2f})")
+        trajectory = debug.get("trajectory") or {}
+        if trajectory:
+            text = {"reta": "reta", "curva_esq": "curva esq", "curva_dir": "curva dir"}.get(
+                trajectory.get("segment"), "?")
+            if trajectory.get("radius_m") is not None and trajectory.get("segment") != "reta":
+                text += f" R={abs(trajectory['radius_m']):.1f}m"
+            if trajectory.get("curve_ahead_m"):
+                text += f" | curva em {trajectory['curve_ahead_m']:.1f}m"
+            if debug.get("branch"):
+                text += " | BIFURCACAO"
+            lines.append("Trecho: " + text)
     if observation is not None and observation.valid:
         lateral, heading, curvature = observation.errors
         lines.append(f"e={lateral:+.3f}m psi={np.degrees(heading):+.1f} k={curvature:+.2f}")
@@ -272,10 +304,14 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             calibration, settings=config.get("cone_settings"), render_preview=False,
             processing_width=config.get("vision_width", 0),
         )
-        # Sem chaveamento para linha: referencia de cones invalida neutraliza.
-        config["line_loss_frames"] = 0
-        config["line_loss_tolerance"] = 0.
+        # Sem chaveamento para linha nem esterco de busca: durante a tolerancia
+        # apenas continua a trajetoria ja identificada, com a vref em rampa.
+        config["line_loss_frames"] = config.get("cone_loss_frames", 6)
+        config["line_loss_tolerance"] = config.get("cone_loss_tolerance", 0.6)
         config["line_search_rate_deg_s"] = 0.
+        config["loss_speed_ramp"] = True
+        config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
+        config["max_heading_jump_rad"] = config.get("cone_max_heading_jump_rad", 0.35)
     elif mode == "line":
         detector = RealLineDetector(
             calibration,
@@ -306,6 +342,14 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         if stream is not None:
             stream.close()
         raise
+    recorder = None
+    folder = getattr(car, "logfile", None)
+    if (mode == "cones" and config.get("cone_debug", True) and config["save"]
+            and isinstance(folder, (str, Path))):
+        try:
+            recorder = ConeDebugRecorder(folder, max_event_frames=config.get("cone_max_event_frames", 300))
+        except OSError as error:
+            print(f"Debug de cones desativado: {error}", flush=True)
     vision_data = {"observation": None}
     stop_event = threading.Event()
     frames = queue.Queue(maxsize=1)
@@ -422,10 +466,23 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 )
                 control_status = follower.status
             if mode == "cones" and observation is not None:
+                debug = getattr(observation, "debug", None) or {}
+                sides = debug.get("sides") or {}
+                trajectory = debug.get("trajectory") or {}
+                segment = {"reta": 0, "curva_esq": 1, "curva_dir": -1}.get(trajectory.get("segment"))
                 car.log(navigation_cones=int(observation.reference_source == "cones"),
                         cone_red_count=len(getattr(observation, "red_pixels", ())),
                         cone_green_count=len(getattr(observation, "green_pixels", ())),
-                        corridor_width_m=getattr(observation, "corridor_width_m", float("nan")))
+                        corridor_width_m=getattr(observation, "corridor_width_m", float("nan")),
+                        cone_green_left=float(sides["green_left"]) if "green_left" in sides else float("nan"),
+                        cone_estimated=float(bool(debug.get("estimated"))),
+                        cone_branch=float(bool(debug.get("branch"))),
+                        cone_segment=float("nan") if segment is None else float(segment))
+            if recorder is not None and observation is not None:
+                recorder.record(observation, dict(
+                    {"active": False} if manual else follower.last_state, status=control_status, manual=bool(manual),
+                    obstacle=bool(obstacle_detected), t=float(car.t), v=float(car.v),
+                    vref=float(car.vref), steer_cmd_rad=float(car.st)))
             car.log(
                 obstacle_stop=int(obstacle_detected),
                 distance_m=dist,
@@ -494,6 +551,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             stop_event.set()
             if stream is not None:
                 stream.close()
+            if recorder is not None:
+                recorder.close()
             if thread_vision is not None:
                 thread_vision.join(timeout=1.0)
             if thread_capture is not None:
@@ -553,7 +612,7 @@ def main():
         "--loss-frames",
         type=int,
         metavar="N",
-        help="Quadros seguidos sem faixa em que segue a ultima trajetoria (padrao 8)",
+        help="Quadros seguidos sem faixa/cones em que segue a ultima trajetoria (padrao 8 linha, 6 cones)",
     )
     parser.add_argument(
         "--stream",
@@ -567,6 +626,11 @@ def main():
         "--imu-telemetry",
         action="store_true",
         help="Reativar leituras extras da IMU no CSV",
+    )
+    parser.add_argument(
+        "--no-cone-debug",
+        action="store_true",
+        help="Nao gravar cones_debug.jsonl nem frames de eventos",
     )
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
@@ -582,6 +646,9 @@ def main():
         settings["stream_port"] = args.stream
     if args.loss_frames is not None:
         settings["line_loss_frames"] = args.loss_frames
+        settings["cone_loss_frames"] = args.loss_frames
+    if args.no_cone_debug:
+        settings["cone_debug"] = False
     if args.imu_telemetry:
         settings["imu_telemetry"] = True
     if args.encoder_protocol:

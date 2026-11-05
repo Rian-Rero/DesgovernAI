@@ -1,9 +1,12 @@
 # Centro dos cones no carrinho real
 
 O modo padrão `--navigation cones` usa somente cones. Não há alternância
-para linha amarela. Se o detector não fornecer uma referência métrica válida
-de cones, o controle neutraliza os comandos. O modo de linha continua disponível
-apenas por seleção explícita com `--navigation line`.
+para linha amarela. Se o detector perder a referência métrica de cones, o
+controle segue a trajetória já identificada por até `cone_loss_frames`
+quadros (padrão 6) e `cone_loss_tolerance` segundos (padrão 0,6), reduzindo
+a vref em rampa até `curve_min_speed`. Se a perda continuar, neutraliza os
+comandos. O modo de linha continua disponível apenas por seleção explícita com
+`--navigation line`.
 
 A GUI `tools/fva_gui_um_carro.py` já inicia nesse modo com `--stream 8080`.
 O comando da GUI usa `--vision-width 0` para preservar a resolução calibrada
@@ -13,7 +16,11 @@ O exemplo abaixo usa 0,3 m/s pela linha de comando.
 
 O detector de cones usa a câmera BGR e a calibração do piso para estimar as
 posições das bases dos cones. Vermelhos e verdes podem trocar de lado:
-a geometria identifica qual borda fica à esquerda em cada imagem.
+com `auto_sides` (padrão), a geometria decide qual cor fica à esquerda,
+comparando a posição lateral das duas fileiras no piso. Para trocar um lado
+já decidido, são precisos `side_flip_frames` quadros seguidos (padrão 3) com
+as duas cores mostrando o contrário. Um quadro ruidoso não inverte as bordas,
+e o quadro não é mais reprocessado com as cores trocadas.
 Não usa as coordenadas do CoppeliaSim nem exige linha amarela.
 
 Execute no computador embarcado, na raiz do projeto:
@@ -39,12 +46,64 @@ na posição usada na calibração. Cada borda observada precisa de pelo menos
 três cones e da extensão mínima configurada.
 
 O centro é calculado entre curvas por seções normais no piso, com validação de
-largura, margem e raio mínimo. O rastreamento e a memória são os mesmos da
+largura, margem e raio mínimo.
+
+**Dois caminhos visíveis.** Cada cor gera até 3 cadeias candidatas: a melhor,
+uma disjunta (outra fileira da mesma cor) e variantes que partem dos mesmos
+cones (ramos de uma bifurcação). Até 3 combinações esquerda × direita passam
+pela geometria métrica. Vence a de menor custo, e o termo de maior peso é a
+**continuidade com a trajetória anterior**, levada ao referencial atual pelo
+ego-movimento, enquanto ela tiver menos de `path_prior_ms` (padrão 1000 ms).
+Sem histórico, vence o corredor que contém o carro. Quando dois corredores
+válidos divergem mais de 0,3 m, o quadro é marcado como bifurcação, e as
+alternativas aparecem em cinza no vídeo.
+
+**Reta ou curva.** O centro recebe um perfil de curvatura a cada 0,25 m de arco.
+O trecho próximo (0,5 m) é classificado como `reta`, `curva_esq` ou `curva_dir`
+(limiar 0,25 1/m, raio de 4 m), e `curve_ahead_m` indica a distância até a
+próxima curva. O rastreamento e a memória são os mesmos da
 interface: cones persistem por até 350 ms; uma borda visível pode usar a largura
 aprendida por até 1500 ms, sujeita ao limite de confiança. `tracking=False`
-desativa essa estimativa. Quando não resta uma referência de cones válida,
-o controle neutraliza os comandos. O adaptador calcula os erros do
+desativa essa estimativa. Quando não resta uma referência de cones válida, o
+Stanley entra em *hold*. Prevê a trajetória por odometria, sem esterço de busca,
+e reduz a vref em rampa. Também descarta saltos impossíveis entre quadros
+(`cone_max_lateral_jump_m` 0,12 m, `cone_max_heading_jump_rad` 0,35 rad).
+Esgotada a tolerância, neutraliza os comandos. `--loss-frames N` ajusta a
+tolerância. Com `--loss-frames 0`, para no primeiro quadro perdido. O adaptador calcula os erros do
 Stanley junto ao eixo dianteiro a partir do centro métrico.
+
+## Debug por quadro (leve para o Raspberry Pi 4)
+
+Com `cone_debug` (padrão; `--no-cone-debug` desliga), cada ensaio em
+`logs/<data>/` ganha:
+
+- `cones_debug.jsonl`: um JSON por quadro de visão, com
+  - `vision.detection`: bases aceitas por cor (px e m) e componentes
+    rejeitados por motivo (`pequeno`, `proporcao`, `nao_triangular`,
+    `cortado_borda`…);
+  - `vision.tracking`: cones rastreados com idade, fonte do movimento e delta
+    do carro;
+  - `vision.sides`: lado decidido, evidência, placar e trocas;
+  - `vision.chains` e `vision.corridors`: candidatos, custos, escolha, motivo
+    e bifurcação;
+  - `vision.trajectory`: reta/curva, raio, curva à frente, perfil de
+    curvatura, larguras, centro e bordas no piso, erros e confiança;
+  - `control`: hold, quadros perdidos, fator da vref, esterço e status.
+- `cone_frames/`: JPGs de 320×240 **somente em eventos** (perda, reaquisição,
+  parada, salto descartado, troca de lado, bifurcação), com 5 quadros antes e
+  5 depois. O limite é `cone_max_event_frames` (300, cerca de 4 MB).
+- `cones_summary.json`: quadros válidos, estimados, em hold e perdidos, maior
+  perda, eventos, trechos, fps e tempo médio de detecção.
+
+A gravação roda numa thread separada. Com a fila cheia, o registro é
+descartado e contado, sem atrasar o controle. A GUI `fva_gui_um_carro.py` baixa
+somente arquivos novos, mostra o gráfico "Cones" e o resumo. No notebook:
+
+```sh
+python3 veiculo_real/tools/analisar_cones.py experimentos/<carro>/<data>
+python3 veiculo_real/tools/analisar_cones.py experimentos/<carro>/<data> --frame 123
+python3 veiculo_real/tools/analisar_cones.py experimentos/<carro>/<data> --plot 100 160
+```
 
 O Stanley já existente recebe erro lateral, orientação e curvatura desse centro.
 Mantém antecipação pela curvatura, redução de velocidade em curvas, compensação
@@ -72,9 +131,15 @@ Em `main.py`, `cone_settings` permite ajustar:
 - `min_span` / `max_gap`: extensão e continuidade das bordas na imagem.
 - `min_width_cm` / `max_width_cm`: largura admissível (40–500 cm).
 - `tracking`, `memory_ms`, `width_memory_ms`: rastreamento e memória.
+- `auto_sides`, `side_flip_frames`: lados automáticos e histerese (True, 3).
+- `path_prior_ms`: validade da trajetória anterior como prioridade (1000 ms).
 
-Os campos são os de `ConeSettings` da interface HSV; a identificação dos lados
-continua automática, mesmo que `green_left` indique a preferência inicial.
+Em `parameters` de `main.py`: `cone_loss_frames`, `cone_loss_tolerance`,
+`cone_max_lateral_jump_m`, `cone_max_heading_jump_rad`, `cone_debug` e
+`cone_max_event_frames`.
+
+Os campos são os de `ConeSettings` da interface HSV. Com `auto_sides`,
+`green_left` é só a preferência inicial; sem ele, é o lado fixo.
 
 H usa 0–179; S e V usam 0–255. Ajuste a segmentação conforme a iluminação.
 A detecção por cor pode confundir objetos vermelhos/verdes com cones; esta
@@ -82,7 +147,9 @@ implementação ainda precisa ser validada com imagens e ensaios do veículo rea
 Cones cortados nas bordas da imagem são descartados por não fornecerem uma base
 confiável. Cones com faixa branca devem manter a parte colorida inferior visível.
 
-Os logs acrescentam `cone_red_count`, `cone_green_count` e `corridor_width_m`.
+Os logs acrescentam `cone_red_count`, `cone_green_count`, `corridor_width_m`,
+`cone_green_left`, `cone_estimated`, `cone_branch`, `cone_segment` (0 reta,
++1 esquerda, −1 direita), `line_hold`, `line_lost_frames` e `hold_speed_factor`.
 `line_valid`, `cross_track_m`, `heading_error_rad` e `curvature_m_inv` continuam
 representando a referência usada pelo controlador, agora o centro do corredor.
 

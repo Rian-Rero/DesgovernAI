@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 REAL=Path(__file__).resolve().parents[1]
+REAL_THREAD=threading.Thread
 sys.path.insert(0,str(REAL))
 SPEC=importlib.util.spec_from_file_location('real_mission_under_test',REAL/'main.py')
 mission=importlib.util.module_from_spec(SPEC)
@@ -68,6 +69,8 @@ class MissionTests(unittest.TestCase):
         self.car=FakeCar(self.events)
 
     def fake_thread(self,**kwargs):
+        if kwargs.get('name')=='cones-debug':
+            return REAL_THREAD(**kwargs)  # gravador: thread real, so escreve arquivos
         events=self.events
         args=kwargs['args']
         capture = kwargs.get('name') == 'captura-camera'
@@ -100,10 +103,37 @@ class MissionTests(unittest.TestCase):
             self.run_fake(dict(self.settings, navigation_mode='cones', save=False))
         factory.assert_called_once()
         line_factory.assert_not_called()
-        self.assertEqual(captured['line_loss_frames'], 0)
-        self.assertEqual(captured['line_loss_tolerance'], 0.)
+        # Cones: tolerancia propria com vref em rampa, sem esterco de busca.
+        self.assertEqual(captured['line_loss_frames'], mission.parameters['cone_loss_frames'])
+        self.assertEqual(captured['line_loss_tolerance'], mission.parameters['cone_loss_tolerance'])
+        self.assertGreater(captured['line_loss_frames'], 0)
+        self.assertTrue(captured['loss_speed_ramp'])
         self.assertEqual(captured['line_search_rate_deg_s'], 0.)
+        self.assertEqual(captured['max_lateral_jump_m'], mission.parameters['cone_max_lateral_jump_m'])
         self.car.close.assert_called_once()
+
+    def test_cone_mode_writes_debug_per_frame_and_summary(self):
+        detector = Mock()
+        detector.with_preview.side_effect = lambda observation: observation
+        self.car.logfile = self.folder.name
+        with patch.object(mission, 'RealConeDetector', return_value=detector):
+            self.run_fake(dict(self.settings, navigation_mode='cones'))
+        folder = Path(self.folder.name)
+        records = [json.loads(line) for line in (folder/'cones_debug.jsonl').read_text().splitlines()]
+        self.assertEqual(len(records), 1)  # o mesmo quadro serve aos dois passos
+        self.assertIn('status', records[0]['control'])
+        self.assertTrue(records[0]['control']['active'])
+        summary = json.loads((folder/'cones_summary.json').read_text())
+        self.assertEqual(summary['frames'], 1)
+        self.assertIn('cone_debug', json.loads((folder/'vision_status.json').read_text()))
+
+    def test_cone_debug_can_be_disabled(self):
+        self.car.logfile = self.folder.name
+        detector = Mock()
+        detector.with_preview.side_effect = lambda observation: observation
+        with patch.object(mission, 'RealConeDetector', return_value=detector):
+            self.run_fake(dict(self.settings, navigation_mode='cones', cone_debug=False))
+        self.assertFalse((Path(self.folder.name)/'cones_debug.jsonl').exists())
 
     def test_stream_publishes_each_step_and_is_closed_with_the_mission(self):
         from fva_car import stream as stream_module
@@ -272,8 +302,8 @@ class MissionTests(unittest.TestCase):
         with patch.object(sys, 'argv', ['main.py', '--loss-frames', '12']), \
                 patch.object(mission, 'run_mission') as run:
             mission.main()
-        run.assert_called_once_with({'velocity_reference': mission.MAIN_VEL, 'line_loss_frames': 12},
-                                    display=False)
+        run.assert_called_once_with({'velocity_reference': mission.MAIN_VEL, 'line_loss_frames': 12,
+                                     'cone_loss_frames': 12}, display=False)
         self.assertEqual(mission.parameters['line_loss_frames'], 8)
 
     def test_cli_fast_preset_selects_fast_speed_and_conflicts_with_speed(self):

@@ -23,6 +23,7 @@ class ConeObservation(LineObservation):
     corridor_width_m: float = math.nan
     cone_result: object = None
     cone_settings: object = None
+    debug: dict | None = None  # Detalhes serializaveis do quadro (cones_debug.jsonl).
 
 
 
@@ -61,8 +62,9 @@ class RealConeDetector:
         w, h = calibration.image_size
         self.processing_size = (w, h) if not processing_width else (processing_width, round(h*processing_width/w))
         self.render_preview = render_preview
-        # Mapas independentes: trocar a ordem das cores nao mistura o historico.
-        self.detectors = {side: ConePathDetector(calibration) for side in (True, False)}
+        # Um unico detector: os lados sao decididos pela geometria, com histerese,
+        # sem reprocessar o quadro inteiro com as cores trocadas.
+        self.detector = ConePathDetector(calibration)
         self.green_left = self.settings.green_left
 
     def observe_frame(self, frame, timestamp):
@@ -79,16 +81,10 @@ class RealConeDetector:
             return ConeObservation(timestamp, reason='Resolucao diferente da calibracao da camera', **metadata)
         started = time.perf_counter()
         small = frame if frame.shape[1::-1] == self.processing_size else cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
+        result = self.detector.process(small, self.settings, timestamp=timestamp)
+        self.green_left = bool(result.green_left)
+        # O desenho usa o lado decidido neste quadro.
         settings = replace(self.settings, green_left=self.green_left)
-        result = self.detectors[self.green_left].process(small, settings, timestamp=timestamp)
-        if not result.valid:
-            settings = replace(self.settings, green_left=not self.green_left)
-            candidate = self.detectors[settings.green_left].process(small, settings, timestamp=timestamp)
-            if candidate.valid:
-                result = candidate
-                self.green_left = settings.green_left
-            else:
-                settings = replace(self.settings, green_left=self.green_left)
         metadata['detection_seconds'] = time.perf_counter()-started
         # O detector compartilha a homografia com correcao da resolucao reduzida.
         scale = np.asarray(self.calibration.image_size)/self.processing_size
@@ -106,9 +102,16 @@ class RealConeDetector:
                 pass
         metadata['geometry_seconds'] = time.perf_counter()-started
         valid = errors is not None and np.all(np.isfinite(errors))
+        reason = result.status if valid or not result.valid else 'Cones sem cobertura metrica junto ao eixo dianteiro'
+        debug = dict(result.debug)
+        debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
+                     confidence=round(float(result.confidence), 3), branch=bool(result.branch),
+                     detection_s=round(metadata['detection_seconds'], 4),
+                     geometry_s=round(metadata['geometry_seconds'], 4),
+                     stanley_errors=[round(float(e), 4) for e in errors] if valid else None)
         observation = ConeObservation(timestamp,
             errors=tuple(float(e) for e in errors) if valid else None,
-            reason=result.status if valid or not result.valid else 'Cones sem cobertura metrica junto ao eixo dianteiro',
+            reason=reason, debug=debug,
             corridor_width_m=result.corridor_width_m if valid else math.nan, **metadata)
         return self.with_preview(observation) if self.render_preview else observation
 

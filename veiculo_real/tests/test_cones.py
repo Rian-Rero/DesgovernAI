@@ -94,5 +94,63 @@ class ConeTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0]['navigation_mode'], 'cones')
 
 
+    def test_invalid_frame_is_processed_once(self):
+        from tools.cone_path import ConePathDetector
+        calibration, frame = scene()
+        frame[:, :320] = 35
+        detector = RealConeDetector(calibration)
+        with patch.object(ConePathDetector, 'process', autospec=True,
+                          side_effect=ConePathDetector.process) as process:
+            observation = detector.observe_frame(frame, 10.)
+        self.assertFalse(observation.valid)
+        self.assertEqual(process.call_count, 1)
+        self.assertEqual(observation.debug['valid'], False)
+
+    def test_swapped_colors_valid_on_first_frame_with_debug(self):
+        calibration, frame = scene()  # vermelho a esquerda (+y)
+        detector = RealConeDetector(calibration, {'green_left': True})
+        observation = detector.observe_frame(frame, 10.)
+        self.assertTrue(observation.valid, observation.reason)
+        self.assertFalse(detector.green_left)
+        self.assertFalse(observation.cone_settings.green_left)
+        self.assertEqual(len(observation.debug['stanley_errors']), 3)
+        self.assertIn('trajectory', observation.debug)
+
+    def test_cone_loss_keeps_trajectory_with_speed_ramp_then_stops(self):
+        settings = {'line_loss_frames': 4, 'line_loss_tolerance': 1., 'loss_speed_ramp': True,
+                    'line_search_rate_deg_s': 0., 'curve_min_speed': .15, 'velocity_reference': .7,
+                    'speed_filter_s': 0}
+        car = fake_car()
+        follower = RealStanleyFollower(settings)
+        valid = lambda t: LineObservation(timestamp=t, errors=(.05, 0., 0.))
+        for step in range(10):
+            follower.apply(car, valid(10.+.01*step), 10.+.01*step)
+        cruise = car.vref
+        self.assertGreater(cruise, .5)
+        speeds = []
+        for frame in range(1, 5):
+            now = 10.1+.05*frame
+            self.assertTrue(follower.apply(car, LineObservation(timestamp=now, reason='sem cones'), now))
+            self.assertTrue(follower.last_state['hold'])
+            speeds.append(car.vref)
+        self.assertTrue(all(a > b for a, b in zip([cruise]+speeds, speeds)), speeds)
+        self.assertAlmostEqual(speeds[-1], .15, delta=1e-6)
+        self.assertIn('vref x', follower.status)
+        self.assertEqual(car.st, follower.last_state['steer_rad'])
+        # Esgotada a tolerancia: neutro e vref zerada.
+        self.assertFalse(follower.apply(car, LineObservation(timestamp=10.4, reason='sem cones'), 10.4))
+        self.assertEqual(car.vref, 0.)
+        self.assertFalse(follower.last_state['active'])
+
+    def test_line_mode_keeps_full_speed_during_hold(self):
+        car = fake_car()
+        follower = RealStanleyFollower({'line_loss_frames': 4, 'speed_filter_s': 0, 'velocity_reference': .7})
+        for step in range(10):
+            follower.apply(car, LineObservation(timestamp=10.+.01*step, errors=(.05, 0., 0.)), 10.+.01*step)
+        cruise = car.vref
+        follower.apply(car, LineObservation(timestamp=10.2, reason='sem faixa'), 10.2)
+        self.assertAlmostEqual(car.vref, cruise, delta=.02)
+
+
 if __name__ == '__main__':
     unittest.main()

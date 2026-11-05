@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cone_geometry import (image_homography, load_calibration, metric_corridor,
                            normals, virtual_boundary)
-from cone_path import ConePathDetector, ConeSettings, render_cones
+from cone_path import ConePathDetector, ConeSettings, SideEstimator, classify_segment, render_cones
 from cone_tracking import ConeTracker, FloorMotion, ego_transform, transform_points
 from test_cone_path import cone, track
 
@@ -252,6 +252,111 @@ class TemporalNavigationTests(unittest.TestCase):
         self.assertTrue(detector.process(metric_scene(), timestamp=1.).valid)
         self.assertFalse(detector.process(np.zeros((360, 640, 3), np.uint8), timestamp=1.1).valid)
         self.assertFalse(detector.process(metric_scene(), timestamp=float('nan')).valid)
+
+
+
+def rows_scene(rows):
+    """Fileiras retas de cones no piso: [(y_m, cor_bgr)], x de 0,7 a 3,2 m."""
+    frame = np.full((480, 640, 3), 35, np.uint8)
+    for y, bgr in rows:
+        ground = np.array([(x, y) for x in (.7, 1.1, 1.6, 2.3, 3.2)])
+        pixels = transform_points(ground, np.linalg.inv(H))
+        for (distance, _), (u, v) in zip(ground, pixels):
+            u, v = round(u), round(v)
+            height, half = max(6, round(20/distance)), max(2, round(7/distance))
+            cv2.fillConvexPoly(frame, np.array([(u, v-height), (u-half, v), (u+half, v)], np.int32), bgr)
+    return frame
+
+
+GREEN, RED = (0, 220, 0), (0, 0, 240)
+
+
+class RobustCorridorTests(unittest.TestCase):
+    settings = ConeSettings(tracking=False)
+
+    def test_sides_are_found_automatically_in_metric_mode(self):
+        detector = ConePathDetector(calibration())
+        result = detector.process(rows_scene([(.6, RED), (-.6, GREEN)]), self.settings, timestamp=1.)
+        self.assertTrue(result.valid, result.status)
+        self.assertFalse(result.green_left)
+        self.assertAlmostEqual(result.lateral_error_m, 0., delta=.03)
+        self.assertEqual(result.debug['sides']['source'], 'duas cores')
+        # Sem automatico, a preferencia errada continua invalida (comportamento manual).
+        manual = ConePathDetector(calibration()).process(
+            rows_scene([(.6, RED), (-.6, GREEN)]), replace(self.settings, auto_sides=False), timestamp=1.)
+        self.assertFalse(manual.valid)
+
+    def test_side_hysteresis_needs_consecutive_strong_evidence(self):
+        sides = SideEstimator()
+        self.assertFalse(sides.update(1., True, 3))
+        self.assertTrue(sides.green_left)
+        # Um quadro contrario isolado (reflexo, cone caido) nao troca o lado.
+        self.assertFalse(sides.update(-1., True, 3))
+        self.assertFalse(sides.update(1., True, 3))
+        self.assertTrue(sides.green_left)
+        # Evidencia fraca (uma cor so) nunca troca um lado ja decidido.
+        for _ in range(10):
+            self.assertFalse(sides.update(-.5, False, 3))
+        self.assertTrue(sides.green_left)
+        # Tres quadros fortes seguidos trocam.
+        flips = [sides.update(-1., True, 3) for _ in range(3)]
+        self.assertEqual(flips, [False, False, True])
+        self.assertFalse(sides.green_left)
+        self.assertEqual(sides.flips, 1)
+
+    def test_previous_trajectory_has_priority_between_two_valid_corridors(self):
+        both = rows_scene([(.6, GREEN), (-.6, RED), (-1.4, RED)])
+        for first, expected in (([(.6, GREEN), (-.6, RED)], 0.), ([(.6, GREEN), (-1.4, RED)], .4)):
+            with self.subTest(expected=expected):
+                detector = ConePathDetector(calibration())
+                self.assertTrue(detector.process(rows_scene(first), self.settings, timestamp=1.).valid)
+                result = detector.process(both, self.settings, timestamp=1.05)
+                self.assertTrue(result.valid, result.status)
+                self.assertAlmostEqual(result.lateral_error_m, expected, delta=.04)
+                self.assertTrue(result.branch)
+                corridors = result.debug['corridors']
+                self.assertEqual(corridors['reason'], 'continuidade')
+                self.assertGreaterEqual(sum(c['valid'] for c in corridors['candidates']), 2)
+                self.assertEqual(len(result.candidate_centers), 1)
+        # Sem historico: prefere o corredor que contem o carro.
+        result = ConePathDetector(calibration()).process(both, self.settings, timestamp=1.)
+        self.assertAlmostEqual(result.lateral_error_m, 0., delta=.04)
+        self.assertEqual(result.debug['corridors']['reason'], 'sem historico')
+
+    def test_old_trajectory_no_longer_has_priority(self):
+        detector = ConePathDetector(calibration())
+        detector.process(rows_scene([(.6, GREEN), (-1.4, RED)]), self.settings, timestamp=1.)
+        later = detector.process(rows_scene([(.6, GREEN), (-.6, RED), (-1.4, RED)]), self.settings, timestamp=3.)
+        self.assertAlmostEqual(later.lateral_error_m, 0., delta=.04)
+
+    def test_straight_and_curve_classification(self):
+        s = np.linspace(0., 2., 80)
+        straight = np.c_[s, np.zeros_like(s)]
+        segment, curvature, ahead, _, _ = classify_segment(straight, np.zeros_like(s))
+        self.assertEqual((segment, ahead), ('reta', None))
+        angle = s/1.5  # raio 1,5 m para a esquerda
+        arc = np.c_[1.5*np.sin(angle), 1.5*(1-np.cos(angle))]
+        segment, curvature, ahead, _, _ = classify_segment(arc, np.full_like(s, 1/1.5))
+        self.assertEqual((segment, ahead), ('curva_esq', 0.))
+        self.assertAlmostEqual(1/curvature, 1.5, places=3)
+        kappa = np.where(s > 1., -.8, 0.)  # reta e depois curva a direita
+        segment, _, ahead, _, _ = classify_segment(straight, kappa)
+        self.assertEqual(segment, 'reta')
+        self.assertAlmostEqual(ahead, 1., delta=.05)
+
+    def test_metric_curve_reports_segment_and_json_debug(self):
+        detector = ConePathDetector(calibration())
+        result = detector.process(metric_scene(), ConeSettings(), timestamp=1.)
+        self.assertTrue(result.valid, result.status)
+        self.assertEqual(result.segment, 'reta')
+        text = json.dumps(result.debug, allow_nan=False)
+        for key in ('detection', 'tracking', 'sides', 'chains', 'corridors', 'trajectory'):
+            self.assertIn(key, result.debug)
+        trajectory = result.debug['trajectory']
+        self.assertEqual(len(trajectory['profile_s_m']), len(trajectory['profile_k']))
+        self.assertGreater(trajectory['width_m']['median'], 1.)
+        self.assertEqual(result.debug['detection']['green']['bases'], len(result.green_points))
+        self.assertLess(len(text), 8000)  # leve para gravar a cada quadro
 
 
 if __name__ == '__main__':

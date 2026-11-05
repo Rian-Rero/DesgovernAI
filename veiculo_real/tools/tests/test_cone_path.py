@@ -150,10 +150,17 @@ class ConePathTests(unittest.TestCase):
 
     def test_color_sides_can_be_swapped(self):
         image = track(swapped=True)
-        self.assertFalse(ConePathDetector().process(image).valid)
-        result = ConePathDetector().process(image, ConeSettings(green_left=False))
+        # Manual: a preferencia errada nao forma corredor.
+        self.assertFalse(ConePathDetector().process(image, ConeSettings(auto_sides=False)).valid)
+        result = ConePathDetector().process(image, ConeSettings(green_left=False, auto_sides=False))
         self.assertTrue(result.valid)
         self.assertLess(abs(result.lateral_error_px), 2)
+        # Automatico: a geometria corrige a preferencia inicial errada.
+        result = ConePathDetector().process(image)
+        self.assertTrue(result.valid, result.status)
+        self.assertFalse(result.green_left)
+        self.assertLess(abs(result.lateral_error_px), 2)
+        self.assertEqual(result.debug['sides']['source'], 'duas cores')
 
     def test_red_detects_both_ends_of_hue_circle(self):
         for hue in (0, 5, 174, 179):
