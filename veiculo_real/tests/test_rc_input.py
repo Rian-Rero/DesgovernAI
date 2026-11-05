@@ -68,8 +68,7 @@ class RCInputTests(unittest.TestCase):
         self.assertAlmostEqual(self.car.st, .1)
         self.assertAlmostEqual(self.car.st_filtered, .03)
 
-    def test_optional_imu_telemetry_skips_i2c_without_changing_model_states(self):
-        self.car.parameters = {'imu_telemetry': False}
+    def test_disabled_imu_keeps_model_states(self):
         self.car.odometer = Mock()
         self.car.odometer.get_vel.return_value = (.4, True)
         self.car.imu = Mock()

@@ -12,9 +12,9 @@ import time, os
 from datetime import datetime
 
 try:
-    from . import encoder, servos, buzzer, ultrasonic, imu, filter
+    from . import encoder, servos, buzzer, ultrasonic, filter
 except ImportError:
-    import encoder, servos, buzzer, ultrasonic, imu, filter
+    import encoder, servos, buzzer, ultrasonic, filter
 
 
 # QUESTAO DA ORIENTACAO DO CARRINHO NA FUSAO DE POSICAO (COMECA SEMPRE PARA O LESTE)
@@ -95,7 +95,7 @@ class Car:
         self.a_x = 0.0
         self.w_model = 0.0
         self.w_imu = 0.0
-        self.yaw_mag = 0.0
+        self.yaw_mag = float('nan')
 
         # comando de aceleracao
         self.u = 0.0
@@ -152,12 +152,8 @@ class Car:
             print(f"\033[31mErro no velocimetro: {e}\033[0m", flush=True)
             raise
 
-        # imu
-        try:
-            self.imu = imu.IMU()
-        except Exception as e:
-            print(f"\033[31mErro na IMU: {e}\033[0m", flush=True)
-            raise
+        # IMU desativada para operar sem o sensor no barramento I2C.
+        # self.imu = imu.IMU()
 
         # ultrasom
         try:
@@ -230,14 +226,7 @@ class Car:
             if self.gps.set_origin():
                 print("\033[32mOrigem GPS definida.\033[0m", flush=True)
 
-                # heading inicial pela bussola
-                _, _, yaw_mag = self.imu.get_euler(degrees=False)
-                if yaw_mag is not None:
-                    self.th = yaw_mag
-                    print(
-                        "\033[32mHeading inicial definido pela bussola.\033[0m",
-                        flush=True,
-                    )
+                # _, _, yaw_mag = self.imu.get_euler(degrees=False)
             else:
                 print("\033[33mNao foi possivel definir origem GPS.\033[0m", flush=True)
 
@@ -358,23 +347,13 @@ class Car:
         return p
 
     ########################################
-    # retorna yaw (usa bussola se tiver GPS)
+    # retorna yaw estimado pelo modelo cinematico
     def get_yaw(self):
 
         # predicao pela integracao da velocidade angular
         yaw = self.th + self.w * self.dt
 
-        # corrige com bussola somente se houver GPS
-        if self.gps is not None:
-            _, _, self.yaw_mag = self.imu.get_euler(degrees=False)
-
-            if self.yaw_mag is not None:
-                K = 0.0  # rc-input: orientacao estimada pelo modelo cinematico
-                # erro angular corretamente embrulhado
-                error = np.arctan2(
-                    np.sin(self.yaw_mag - yaw), np.cos(self.yaw_mag - yaw)
-                )
-                yaw += K * error
+        # _, _, self.yaw_mag = self.imu.get_euler(degrees=False)
 
         # mantem entre 0 e 2*pi
         yaw = yaw % (2.0 * np.pi)
@@ -397,19 +376,11 @@ class Car:
         # velocidade angular pelo modelo cinematico
         self.w_model = (vf / CAR["L"]) * np.tan(self.st)
 
-        if getattr(self, 'parameters', {}).get('imu_telemetry', True):
-            # Mantem a telemetria e a fusao existente para outros programas.
-            _, _, g_z = self.imu.get_gyro()
-            self.w_imu = np.deg2rad(g_z)
-            K = 0.0
-            w = (1.0 - K) * self.w_model + K * self.w_imu
-        else:
-            # K era zero: o controlador ja usava somente o modelo.
-            self.w_imu = float('nan')
-            w = self.w_model
+        # _, _, g_z = self.imu.get_gyro()
+        self.w_imu = float('nan')
 
         # filtra velocidade angular
-        wf = self.w_filt.filter(w)
+        wf = self.w_filt.filter(self.w_model)
 
         return vf, wf
 
@@ -423,16 +394,11 @@ class Car:
         else:
             self.a_model = 0.0
 
-        if getattr(self, 'parameters', {}).get('imu_telemetry', True):
-            self.a_x, _, _ = self.imu.get_accel()
-            K = 0.0
-            a = (1.0 - K) * self.a_model + K * self.a_x
-        else:
-            self.a_x = float('nan')
-            a = self.a_model
+        # self.a_x, _, _ = self.imu.get_accel()
+        self.a_x = float('nan')
 
         # filtra
-        af = self.a_filt.filter(a)
+        af = self.a_filt.filter(self.a_model)
 
         return af
 
@@ -684,7 +650,7 @@ class Car:
         self.odometer.close()
         self.atuador.close()
         self.us.close()
-        self.imu.close()
+        # self.imu.close()
         if self.parameters["camera"]:
             self.cam.close()
         if self.gps is not None:

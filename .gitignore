@@ -7,3 +7,4 @@ venv/
 logs/
 *.jpg
 *.json
+*.jsonl

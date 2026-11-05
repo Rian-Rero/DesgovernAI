@@ -41,7 +41,6 @@ parameters = {
     "camera": True,
     "ultrasonic_steering": False,  # camera fixa apos calibrada
     "us_buzzer": False,
-    "imu_telemetry": False,  # fusao atual usa K=0; evita duas leituras I2C por passo
     "initial_position": [0, 0, 0.0],
     "encoder_protocol": "rc",  # mesmo formato de cinco campos da upstream/rc-input
     "camera_calibration_file": str(
@@ -94,7 +93,7 @@ parameters = {
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
-    "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 0},
+    "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
     "path_anchor": 0.5,  # preferencia horizontal da faixa, entre 0 e 1
     # Porta HTTP com a visao ao vivo (http://<ip-do-carro>:porta/); 0 desliga.
     "stream_port": 0,
@@ -656,11 +655,6 @@ def main():
         help="Transmitir a visao ao vivo por HTTP (padrao 8080), para o navegador do notebook",
     )
     parser.add_argument(
-        "--imu-telemetry",
-        action="store_true",
-        help="Reativar leituras extras da IMU no CSV",
-    )
-    parser.add_argument(
         "--record-frames",
         type=float,
         metavar="HZ",
@@ -692,8 +686,6 @@ def main():
         if args.record_frames < 0:
             parser.error("--record-frames deve ser >= 0")
         settings["record_frames_hz"] = args.record_frames
-    if args.imu_telemetry:
-        settings["imu_telemetry"] = True
     if args.encoder_protocol:
         settings["encoder_protocol"] = args.encoder_protocol
     if args.calibration:

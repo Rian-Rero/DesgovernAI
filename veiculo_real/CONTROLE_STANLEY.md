@@ -254,11 +254,9 @@ O valor 1 elimina a media movel; o limite de taxa do Stanley continua ativo.
 O sinal da direcao nao foi invertido. Perda da faixa continua cortando o
 throttle, zerando a direcao e reiniciando o Stanley, sem seguir dados ausentes.
 
-Na missao, `imu_telemetry=False` evita duas leituras I2C por passo cujos ganhos
-de fusao ja eram zero. O modelo usado pelo controle permanece o mesmo.
-As colunas `a_x` e `w_imu` ficam NaN (nao medidas), em vez de inventar zeros.
-Use `--imu-telemetry` para reativar essas leituras. Outros programas `Car`
-mantem o comportamento anterior quando nao especificam essa opcao.
+A IMU esta desativada. A orientacao parte do valor inicial configurado e
+evolui pelo modelo cinematico. As colunas `a_x`, `w_imu` e `yaw_mag` ficam
+NaN (nao medidas).
 As medias moveis usam soma incremental, evitando criar vetores NumPy em
 cada passo, e continuam recuperando-se quando NaN/Inf sai da janela.
 
