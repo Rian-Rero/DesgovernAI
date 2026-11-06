@@ -33,6 +33,7 @@ class LineObservation:
     processing_size: tuple | None = None
     sequence: int = 0
     reference_source: str = "line"
+    speed_limit: float = math.inf  # Teto opcional da referencia visual, em m/s.
 
     @property
     def valid(self):
@@ -303,7 +304,7 @@ class StanleyController:
 
 
 def fit_line_errors(points, front, forward, max_distance=4., with_curvature=False,
-                    limit_curve_extrapolation=False):
+                    limit_curve_extrapolation=False, max_near_distance=1.5):
     """Erros na projecao normal do eixo dianteiro sobre a curva local."""
     forward = np.asarray(forward, dtype=float)[:2]
     forward = forward / np.linalg.norm(forward)
@@ -312,7 +313,7 @@ def fit_line_errors(points, front, forward, max_distance=4., with_curvature=Fals
     x, y = relative @ forward, relative @ left
     valid = (x >= -.35) & (x <= max_distance) & (np.abs(y) <= 2.)
     x, y = x[valid], y[valid]
-    if len(x) < 6 or np.ptp(x) < .3 or np.min(x) > 1.5:
+    if len(x) < 6 or np.ptp(x) < .3 or np.min(x) > max_near_distance:
         return None
     # Aproximacao local; nao extrapolar uma curva distante ate o veiculo.
     nearby = x <= min(max_distance, max(1.2, float(np.min(x)) + 1.))
@@ -477,6 +478,7 @@ class RealStanleyFollower:
         self.controller.reset()
         self.line_memory = None
         self.line_seen_at = None
+        self.line_speed_limit = math.inf
         self.curvature = None
         self.curvature_at = None
         self.speed_target = None
@@ -560,6 +562,7 @@ class RealStanleyFollower:
         reverse_requested = (getattr(car, 'sel_tracao', 1) == 0
                              and getattr(car, 'rc_acelerador', 0.) < 0)
         line_seen = errors is not None
+        speed_limit = getattr(observation, 'speed_limit', math.inf)
         holding = False
         lost_for = float('nan')
         compensated = 0.
@@ -573,7 +576,8 @@ class RealStanleyFollower:
             elapsed = float(now) - self.line_seen_at if self.line_memory is not None else math.nan
             # Reencontrando a faixa apos quadros sem deteccao (busca), a previsao
             # ja nao e referencia confiavel: aceita a faixa que voltar.
-            jump = self.missed_frames == 0 and 0. <= elapsed <= self.loss_tolerance
+            jump = (self.missed_frames == 0 and 0. <= elapsed <= self.loss_tolerance
+                    and speed_limit <= self.line_speed_limit)
             if jump:
                 expected = self._predict_line(self.line_memory, car, elapsed)
                 measured = errors[:2]
@@ -607,6 +611,7 @@ class RealStanleyFollower:
             errors = self._predict_line(errors, car, compensated)
         if line_seen:
             self.line_memory, self.line_seen_at = errors, float(now)
+            self.line_speed_limit = speed_limit
             self.search_direction = None
         elif (self.line_memory is not None and finite_sample
                 and isinstance(now, (int, float, np.number)) and math.isfinite(now)):
@@ -653,7 +658,9 @@ class RealStanleyFollower:
                 ramped = max(min(self.min_speed, speed_raw), (1.-progress)*speed_raw + progress*self.min_speed)
                 self.hold_speed_factor = ramped/speed_raw if speed_raw > 0 else 1.
                 speed_raw = ramped
-            car.set_vel(self._filter_speed(speed_raw, car.dt))
+            limit = min(speed_limit, self.line_speed_limit)
+            speed_raw = min(speed_raw, limit)
+            car.set_vel(min(self._filter_speed(speed_raw, car.dt), limit))
             active = bool(getattr(car, 'encoder_valid', True))
             stanley_speed = car.vref if self.use_vref else car.v
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
@@ -679,6 +686,8 @@ class RealStanleyFollower:
             ramp = f'; vref x{self.hold_speed_factor:.2f}' if self.loss_speed_ramp else ''
             self.status = (f'Faixa perdida ha {lost_frames} quadro(s) ({lost_for:.2f} s);'
                            f' seguindo ultima trajetoria{side}{ramp} (limite {self.loss_frames} quadros)')
+        elif active and math.isfinite(self.line_speed_limit):
+            self.status = observation.reason
         elif active:
             self.status = 'Faixa valida; controle liberado'
         elif obstacle_detected:

@@ -108,8 +108,11 @@ python3 veiculo_real/tools/analisar_cones.py experimentos/<carro>/<data> --plot 
 O Stanley já existente recebe erro lateral, orientação e curvatura desse centro.
 Mantém antecipação pela curvatura, redução de velocidade em curvas, compensação
 de atraso, sinais/limites do servo e proteções de encoder, RC, emergência e
-obstáculos. No modo de cones, uma referência inválida neutraliza os comandos no primeiro
-quadro. A busca de linha amarela e o chaveamento automático ficam desativados.
+obstáculos. Quando só há uma borda confiável, o modo de cones estima o centro
+pelo lado observado e pela largura aprendida ou nominal. Um cone isolado só
+orienta a recuperação se persistir e estiver próximo e claramente de um lado.
+A recuperação limita a referência a 0,25 m/s. Se perder a referência, o
+Stanley segue brevemente a última trajetória pela odometria e então para.
 
 ## Calibração e ajustes
 

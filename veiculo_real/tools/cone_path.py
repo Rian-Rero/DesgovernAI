@@ -84,6 +84,7 @@ class ConeSettings:
     hysteresis: bool = True   # Cresce cones fracos (sombra/longe) a partir de pixels fortes.
     size_check: bool = True   # Tamanho metrico do cone (so com calibracao confiavel).
     gate_path: bool = True    # Centro pelos portoes no piso; False: curvas por secoes normais.
+    single_border_recovery: bool = False  # Aceita a largura nominal com uma borda recente.
     path_smoothing: int = 40  # % do caminho anterior fundido ao novo (0 desliga).
     min_gap_cm: int = 20      # Espacamento admissivel entre cones da mesma borda.
     max_gap_cm: int = 160
@@ -106,6 +107,7 @@ class ConePathResult:
     status: str = "Buscando cones nas duas bordas"
     confidence: float = 0.
     estimated: bool = False
+    recovery: bool = False
     source: str = "imagem"
     motion_source: str = "sem odometria"
     ground_center: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
@@ -980,6 +982,55 @@ class ConePathDetector:
         turn = abs((heading(center)-heading(previous)+math.pi) % (2*math.pi)-math.pi)
         return float(np.mean(distance)), float(turn)
 
+    def _recovery_border(self, observations, gaps, now, settings):
+        """Seleciona a fileira proxima pelo piso, independentemente da cor."""
+        candidates = []
+        isolated = []
+        for color, points in observations.items():
+            if not len(points):
+                continue
+            # Um cone pode sumir de um quadro para o outro. So aproveita
+            # vizinhos confirmados da mesma cor vistos ha pouco.
+            if len(points) < 2:
+                tracks = [t for t in self.tracker.tracks if t.color == color
+                          and t.confirmed and now-t.last_seen <= settings.memory_ms/1000]
+                if not any(t.last_seen == now for t in tracks):
+                    continue
+                if len(tracks) == 1:
+                    track = tracks[0]
+                    x, y = track.point
+                    other = observations['red' if color == 'green' else 'green']
+                    if (track.hits >= 2 and .35 <= x <= 1.15
+                            and max(.12, settings.margin_cm/100) <= abs(y) < settings.track_width_cm/200
+                            and not np.any(other[:, 0] <= x+.35)):
+                        # Um cone proximo e persistente so informa deslocamento.
+                        # Projeta um trecho paralelo ao carro, sem inventar curva.
+                        boundary = np.array([track.point, track.point + [.6, 0.]])
+                        isolated.append((x, y, color, boundary, True))
+                points = np.asarray([t.point for t in tracks])
+            boundary = chain_boundary(points, behind=0., **gaps)
+            if not len(boundary):
+                continue
+            near = boundary[0]
+            following = boundary[boundary[:, 0]-near[0] >= .30]
+            if not len(following):
+                continue
+            step = following[0] - near
+            if not (0 <= near[0] <= 1.65 and abs(step[1]) <= step[0]):
+                continue
+            normal = np.array([-step[1], step[0]]) / np.linalg.norm(step)
+            offset = float(near @ normal)
+            candidates.append((near[0], offset, color, np.array([near, following[0]]), False))
+        candidates = candidates or isolated
+        candidates.sort(key=lambda candidate: candidate[0])
+        if not candidates or (len(candidates) > 1 and candidates[1][0]-candidates[0][0] < .35):
+            return None
+        _, offset, color, boundary, single_cone = candidates[0]
+        # Perto do eixo, o lado da fileira nao e observavel com uma cor so.
+        if abs(offset) < settings.margin_cm/100:
+            return None
+        return color, boundary, offset, single_cone
+
     def _gate_result(self, result, mapped, homography, settings, now, observations):
         """Centro pelos portoes no piso (metodo principal); None para usar o antigo."""
         left_color = 'green' if result.green_left else 'red'
@@ -995,6 +1046,36 @@ class ConePathDetector:
         result.debug['gates'] = gates
         need = 2 if prior else 3
         virtual = False
+        recovery = False
+        sparse_gates = (settings.single_border_recovery and len(mids) == 2
+                        and all(len(points) >= 2 for points in observations.values())
+                        and np.linalg.norm(mids[1]-mids[0]) >= .30)
+        if sparse_gates:
+            # Dois portoes bem separados ja definem um segmento entre as bordas.
+            need = 2
+            result.estimated = True
+        nominal_width = settings.track_width_cm/100
+        if (len(mids) < need and settings.single_border_recovery
+                and min_w <= nominal_width <= max_w):
+            border = self._recovery_border(observations, gaps, now, settings)
+            if border is not None and abs(border[2]) <= max_w/2:
+                color, boundary, offset, single_cone = border
+                # Sem largura medida, nao aproxima o carro de uma fileira
+                # que ja esta mais longe do que a meia largura nominal.
+                width = (self.learned_width if self.learned_width is not None
+                         and now-self.width_time <= settings.width_memory_ms/1000
+                         else min(max_w, max(nominal_width, 2*abs(offset))))
+                is_left = offset > 0
+                mids = virtual_midpoints(boundary, width, is_left)
+                widths = np.full(len(mids), width)
+                empty = np.empty((0, 2))
+                left, right = (boundary, empty) if is_left else (empty, boundary)
+                gates['recovery_color'] = color
+                gates['recovery_single_cone'] = single_cone
+                virtual = recovery = True
+                need = 2
+                result.estimated = True
+                result.confidence = min(result.confidence, .5)
         if (len(mids) < need and settings.tracking and self.learned_width is not None
                 and now-self.width_time <= settings.width_memory_ms/1000):
             width_age = now-self.width_time
@@ -1020,7 +1101,7 @@ class ConePathDetector:
                      fit_rms_m=_r(info['rms_m']), degree=info['degree'],
                      width_m={'min': _r(np.min(widths)), 'median': _r(np.median(widths)), 'max': _r(np.max(widths))})
         center = curve
-        continuity = self._continuity(curve, now, settings) if prior else None
+        continuity = self._continuity(curve, now, settings) if prior and not recovery else None
         gates['raw_center'] = _polyline(curve, 8)
         if continuity is not None and continuity[0] > BRANCH_DIVERGENCE_M:
             # Caminho novo longe do anterior: so troca se persistir (2 quadros).
@@ -1029,7 +1110,7 @@ class ConePathDetector:
             if self.switch_count < 2 and self.prev_center is not None and len(self.prev_center) >= 3:
                 center = self.prev_center.copy()
                 result.estimated = True
-        else:
+        elif not recovery:
             self.switch_count = 0
             if prior and self.prev_center is not None and settings.path_smoothing > 0:
                 center, deviation = blend_paths(curve, self.prev_center, settings.path_smoothing/100)
@@ -1042,7 +1123,7 @@ class ConePathDetector:
         limit = 1/max(settings.min_radius_cm/100, .01)
         curvature = np.clip(curvature, -limit, limit)
         # Ramo alternativo: as bordas sem a semente anterior seguem outro caminho?
-        if prior:
+        if prior and not recovery:
             for cones, chosen in ((mapped[left_color], left), (mapped[right_color], right)):
                 free = chain_boundary(cones, None, **gaps)
                 if len(free) >= 2 and len(chosen) >= 2 and np.linalg.norm(free[-1]-chosen[-1]) > BRANCH_DIVERGENCE_M:
@@ -1058,16 +1139,18 @@ class ConePathDetector:
             result.status = "Centro fora da imagem/calibracao"
             return result
         result.ground_center = center
+        result.recovery = sparse_gates or settings.single_border_recovery and virtual
         width = float(np.median(widths))
         if not result.estimated and not virtual:
             self.learned_width = width if self.learned_width is None else .7*self.learned_width+.3*width
             self.width_time = now
-        self.prev_center = center[np.linspace(0, len(center)-1, min(30, len(center))).round().astype(int)].copy()
-        self.prev_center_time = now
-        if len(left) >= 2:
-            self.prev_left = left.copy()
-        if len(right) >= 2:
-            self.prev_right = right.copy()
+        if not recovery:
+            self.prev_center = center[np.linspace(0, len(center)-1, min(30, len(center))).round().astype(int)].copy()
+            self.prev_center_time = now
+            if len(left) >= 2:
+                self.prev_left = left.copy()
+            if len(right) >= 2:
+                self.prev_right = right.copy()
         index = int(np.argmin(np.linalg.norm(center, axis=1)))
         normal = normals(center)[index] if len(center) >= 2 else np.array([0., 1.])
         offset = float(center[index] @ normal)
@@ -1085,7 +1168,9 @@ class ConePathDetector:
             np.array([axis+normal*width/2, axis, axis-normal*width/2]), inverse, shape)
         if len(result.measurement_pixels) != 3:
             result.measurement_pixels = np.empty((0, 2), np.int32)
-        result.status = ("ESTIMADA: uma borda + largura aprendida (m)" if virtual else
+        result.status = ("Recuperacao de centro por uma borda de cones" if recovery else
+                         "Recuperacao de centro por dois portoes de cones" if sparse_gates else
+                         "ESTIMADA: uma borda + largura aprendida (m)" if virtual else
                          "ESTIMADA: mapa temporal (m)" if result.estimated else
                          "Centro pelos portoes de cones (m)")
         result.debug['trajectory'] = {
@@ -1219,6 +1304,7 @@ class ConePathDetector:
                 pass
         result.center, result.left_boundary, result.right_boundary = cp, lp, rp
         result.ground_center = center
+        result.recovery = settings.single_border_recovery and virtual
         width = float(np.median(widths))
         if not result.estimated and not virtual:
             self.learned_width = width if self.learned_width is None else .7*self.learned_width+.3*width

@@ -14,6 +14,9 @@ from .lateral import GroundCalibration, LineObservation, fit_line_errors
 from tools.cone_path import ConePathDetector, ConeSettings, render_cones
 
 
+CONE_RECOVERY_SPEED = .35  # m/s
+
+
 @dataclass(frozen=True)
 class ConeObservation(LineObservation):
     reference_source: str = "cones"
@@ -101,25 +104,38 @@ class RealConeDetector:
                         center_pixels=original(result.center), cone_result=result, cone_settings=settings)
         started = time.perf_counter()
         errors = None
+        recovery = result.recovery
         if result.valid and result.source == 'solo':
             try:
                 # Stanley precisa dos erros junto ao eixo dianteiro, nao apenas
                 # do deslocamento na primeira secao visivel usado na interface.
                 errors = fit_line_errors(result.ground_center, [0., 0.], [1., 0.],
                                          with_curvature=True, limit_curve_extrapolation=True)
+                if (errors is None and self.settings.single_border_recovery
+                        and (recovery or not result.estimated and not result.branch)
+                        and np.min(result.ground_center[:, 0]) > 1.5):
+                    # Um trecho distante ainda da rumo para avancar devagar.
+                    errors = fit_line_errors(result.ground_center, [0., 0.], [1., 0.],
+                                             with_curvature=True, limit_curve_extrapolation=True,
+                                             max_near_distance=2.2)
+                    recovery = errors is not None
             except (ValueError, np.linalg.LinAlgError, FloatingPointError):
                 pass
         metadata['geometry_seconds'] = time.perf_counter()-started
         valid = errors is not None and np.all(np.isfinite(errors))
         reason = result.status if valid or not result.valid else 'Cones sem cobertura metrica junto ao eixo dianteiro'
+        if valid and recovery and not result.recovery:
+            reason = 'Recuperacao de centro por trecho distante de cones'
         debug = dict(result.debug)
         debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
+                     recovery=bool(valid and recovery),
                      confidence=round(float(result.confidence), 3), branch=bool(result.branch),
                      detection_s=round(metadata['detection_seconds'], 4),
                      geometry_s=round(metadata['geometry_seconds'], 4),
                      stanley_errors=[round(float(e), 4) for e in errors] if valid else None)
         observation = ConeObservation(timestamp,
             errors=tuple(float(e) for e in errors) if valid else None,
+            speed_limit=CONE_RECOVERY_SPEED if valid and recovery else math.inf,
             reason=reason, debug=debug,
             corridor_width_m=result.corridor_width_m if valid else math.nan, **metadata)
         return self.with_preview(observation) if self.render_preview else observation

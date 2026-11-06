@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from fva_car.cones import RealConeDetector, ConeObservation
+from fva_car.cones import CONE_RECOVERY_SPEED, RealConeDetector, ConeObservation
 from fva_car.lateral import GroundCalibration, RealStanleyFollower, LineObservation
 from test_lateral import fake_car
 from test_mission import mission
@@ -84,6 +84,51 @@ class ConeTests(unittest.TestCase):
             self.assertEqual(car.vref, 0.)
             self.assertEqual(car.st, 0.)
 
+    def test_recovery_steers_away_from_near_border_regardless_of_color(self):
+        for side in (-1, 1):
+            for reverse in (False, True):
+                with self.subTest(side=side, reverse=reverse):
+                    calibration, frame = scene(offset=-side*.25, reverse=reverse)
+                    if side > 0:
+                        frame[:, 320:] = 35
+                    else:
+                        frame[:, :320] = 35
+                    detector = RealConeDetector(calibration, mission.parameters['cone_settings'])
+                    observation = detector.observe_frame(frame, 10.)
+                    self.assertTrue(observation.valid, observation.reason)
+                    self.assertTrue(observation.debug['recovery'])
+                    self.assertLess(side*observation.errors[0], 0.)
+                    car = fake_car()
+                    follower = RealStanleyFollower({'velocity_reference': .7})
+                    self.assertTrue(follower.apply(car, observation, 10.))
+                    self.assertLess(side*car.st, 0.)
+                    self.assertLessEqual(car.vref, CONE_RECOVERY_SPEED)
+                    self.assertTrue(follower.apply(car, LineObservation(10.05), 10.05))
+                    self.assertLessEqual(car.vref, CONE_RECOVERY_SPEED)
+                    self.assertFalse(follower.apply(car, LineObservation(11.1), 11.1))
+
+    def test_recovery_prefers_the_measured_center_with_both_borders(self):
+        calibration, frame = scene(offset=.08)
+        detector = RealConeDetector(calibration, mission.parameters['cone_settings'])
+        observation = detector.observe_frame(frame, 10.)
+        self.assertTrue(observation.valid, observation.reason)
+        self.assertFalse(observation.debug['recovery'])
+        self.assertAlmostEqual(observation.errors[0], .08, delta=.02)
+        self.assertTrue(math.isinf(observation.speed_limit))
+
+    def test_recovery_requires_persistence_for_an_isolated_cone(self):
+        calibration, frame = scene(offset=-.25)
+        frame[:, 320:] = 35
+        frame[:290] = 35
+        frame[335:] = 35
+        detector = RealConeDetector(calibration, mission.parameters['cone_settings'])
+        self.assertFalse(detector.observe_frame(frame, 10.).valid)
+        observation = detector.observe_frame(frame, 10.1)
+        self.assertTrue(observation.valid, observation.reason)
+        self.assertTrue(observation.debug['gates']['recovery_single_cone'])
+        self.assertLess(observation.errors[0], 0.)
+        self.assertEqual(observation.errors[2], 0.)
+
     def test_adapter_uses_shared_hsv_detector_and_metric_geometry(self):
         from tools.cone_path import ConePathDetector, ConeSettings
         from fva_car.lateral import fit_line_errors
@@ -98,7 +143,7 @@ class ConeTests(unittest.TestCase):
             fit_line_errors(expected.ground_center, [0, 0], [1, 0], with_curvature=True,
                             limit_curve_extrapolation=True))
         self.assertEqual(detector.settings.roi_top, 0)
-        self.assertEqual(mission.parameters['path_settings']['roi_top'], 0)
+        self.assertEqual(mission.parameters['cone_settings']['roi_top'], 0)
 
     def test_invalid_settings_fail_before_hardware(self):
         calibration, _ = scene()

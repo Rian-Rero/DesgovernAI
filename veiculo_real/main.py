@@ -35,7 +35,7 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 parameters = {
     "ts": 30.0,
     "navigation_mode": "cones",  # somente cones; linha requer selecao explicita
-    "cone_settings": {"roi_top": 0},  # mesmos campos ConeSettings da interface HSV
+    "cone_settings": {"roi_top": 0, "single_border_recovery": True},
     "save": True,
     "logfile": "logs/",
     "camera": True,
