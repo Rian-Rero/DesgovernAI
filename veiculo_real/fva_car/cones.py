@@ -105,7 +105,8 @@ class RealConeDetector:
             try:
                 # Stanley precisa dos erros junto ao eixo dianteiro, nao apenas
                 # do deslocamento na primeira secao visivel usado na interface.
-                errors = fit_line_errors(result.ground_center, [0., 0.], [1., 0.], with_curvature=True)
+                errors = fit_line_errors(result.ground_center, [0., 0.], [1., 0.],
+                                         with_curvature=True, limit_curve_extrapolation=True)
             except (ValueError, np.linalg.LinAlgError, FloatingPointError):
                 pass
         metadata['geometry_seconds'] = time.perf_counter()-started

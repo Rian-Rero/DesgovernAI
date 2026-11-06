@@ -53,6 +53,24 @@ class ConeTests(unittest.TestCase):
         self.assertTrue(reduced.valid, reduced.reason)
         np.testing.assert_allclose(reduced.errors, full.errors, atol=.035)
 
+    def test_distant_center_uses_local_direction_instead_of_extrapolated_curve(self):
+        from fva_car.lateral import fit_line_errors
+        x = np.linspace(1.0, 1.8, 17)
+        points = np.column_stack((x, .05 + .2*(x-1.4)**2))
+        lateral, heading, curvature = fit_line_errors(
+            points, [0, 0], [1, 0], with_curvature=True, limit_curve_extrapolation=True)
+        self.assertAlmostEqual(lateral, .05, delta=.02)
+        self.assertAlmostEqual(heading, 0.)
+        self.assertEqual(curvature, 0.)
+
+    def test_gate_midpoints_skip_diagonal_pairs_at_end_of_border(self):
+        from tools.cone_track_path import gate_midpoints
+        left = [[1.0, .5], [1.5, .5]]
+        right = [[.4, -.5], [1.0, -.5], [1.5, -.5]]
+        midpoints, widths = gate_midpoints(left, right)
+        np.testing.assert_allclose(midpoints, [[1., 0.], [1.5, 0.]])
+        np.testing.assert_allclose(widths, [1., 1.])
+
     def test_one_border_and_camera_fault_do_not_authorize_motion(self):
         calibration, frame = scene()
         frame[:, :320] = 35  # elimina uma borda
@@ -77,7 +95,8 @@ class ConeTests(unittest.TestCase):
         np.testing.assert_array_equal(observation.cone_result.green_mask, expected.green_mask)
         np.testing.assert_allclose(observation.cone_result.ground_center, expected.ground_center)
         np.testing.assert_allclose(observation.errors,
-            fit_line_errors(expected.ground_center, [0, 0], [1, 0], with_curvature=True))
+            fit_line_errors(expected.ground_center, [0, 0], [1, 0], with_curvature=True,
+                            limit_curve_extrapolation=True))
         self.assertEqual(detector.settings.roi_top, 0)
         self.assertEqual(mission.parameters['path_settings']['roi_top'], 0)
 

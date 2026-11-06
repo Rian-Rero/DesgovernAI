@@ -105,16 +105,19 @@ def gate_midpoints(left, right, *, min_width=.4, max_width=1.4):
     right = np.asarray(right, float).reshape(-1, 2)
     mids, widths = [], []
     for cones, other, sign in ((left, right, 1.), (right, left, -1.)):
-        if not len(cones) or not len(other):
+        if len(other) < 2:
             continue
-        for k, point in enumerate(cones):
+        for point in cones:
             q, width, index = _closest_on_polyline(point, other)
             if not min_width <= width <= max_width:
                 continue
             # O cone esquerdo precisa ficar a esquerda do direito (normal da borda).
-            tangent = _tangent(other, index) if len(other) >= 2 else _tangent(cones, k)
+            tangent = _tangent(other, index)
             normal = np.array([-tangent[1], tangent[0]])
-            if sign*float((point - q) @ normal) <= 0:
+            separation = point - q
+            # Um pareamento preso na ponta da borda oposta pode ser diagonal.
+            # Aceita ate 25 cm de desencontro longitudinal entre as fileiras.
+            if abs(separation @ tangent) > .25 or sign*(separation @ normal) <= 0:
                 continue
             mids.append((point + q)/2)
             widths.append(width)

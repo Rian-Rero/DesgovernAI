@@ -302,7 +302,8 @@ class StanleyController:
 
 
 
-def fit_line_errors(points, front, forward, max_distance=4., with_curvature=False):
+def fit_line_errors(points, front, forward, max_distance=4., with_curvature=False,
+                    limit_curve_extrapolation=False):
     """Erros na projecao normal do eixo dianteiro sobre a curva local."""
     forward = np.asarray(forward, dtype=float)[:2]
     forward = forward / np.linalg.norm(forward)
@@ -320,14 +321,21 @@ def fit_line_errors(points, front, forward, max_distance=4., with_curvature=Fals
         return None
     # Reta secante em uma curva inventava deslocamento lateral em x=0.
     # Parabola separa deslocamento, tangente e curvatura da linha.
-    coefficients = np.polyfit(x, y, 2)
+    degree = 1 if limit_curve_extrapolation and np.min(x) > np.ptp(x) else 2
+    coefficients = np.polyfit(x, y, degree)
     residual = y - np.polyval(coefficients, x)
     keep = np.abs(residual) <= max(.04, 3 * float(np.median(np.abs(residual))))
     if np.count_nonzero(keep) < 6 or np.ptp(x[keep]) < .3:
         return None
-    coefficients = np.polyfit(x[keep], y[keep], 2)
+    if limit_curve_extrapolation and np.min(x[keep]) > np.ptp(x[keep]):
+        degree = 1
+    coefficients = np.polyfit(x[keep], y[keep], degree)
     if np.sqrt(np.mean((y[keep] - np.polyval(coefficients, x[keep]))**2)) > .12:
         return None
+    if degree == 1:
+        slope, intercept = coefficients
+        errors = (float(intercept / math.hypot(1., slope)), math.atan(slope))
+        return (*errors, 0.) if with_curvature else errors
     a, slope, intercept = coefficients
     # Stanley usa a tangente no ponto mais proximo, que em geral nao e x=0.
     # Minimo de x^2 + y(x)^2: x + y(x)*y'(x) = 0 (polinomio cubico).
