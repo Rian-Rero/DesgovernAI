@@ -67,7 +67,7 @@ aprendida por até 1500 ms, sujeita ao limite de confiança. `tracking=False`
 desativa essa estimativa. Quando não resta uma referência de cones válida, o
 Stanley entra em *hold*. Prevê a trajetória por odometria, sem esterço de busca,
 e reduz a vref em rampa. Também descarta saltos impossíveis entre quadros
-(`cone_max_lateral_jump_m` 0,12 m, `cone_max_heading_jump_rad` 0,35 rad).
+(`cone_max_lateral_jump_m` 0,25 m, `cone_max_heading_jump_rad` 0,35 rad).
 Esgotada a tolerância, neutraliza os comandos. `--loss-frames N` ajusta a
 tolerância. Com `--loss-frames 0`, para no primeiro quadro perdido. O adaptador calcula os erros do
 Stanley junto ao eixo dianteiro a partir do centro métrico.
@@ -111,6 +111,11 @@ de atraso, sinais/limites do servo e proteções de encoder, RC, emergência e
 obstáculos. Quando só há uma borda confiável, o modo de cones estima o centro
 pelo lado observado e pela largura aprendida ou nominal. Um cone isolado só
 orienta a recuperação se persistir e estiver próximo e claramente de um lado.
+Com o FOV atual, o primeiro par de cones só aparece a cerca de 1,3–2,3 m.
+Se o centro começa além de 1,5 m e o trecho é reto (|κ| < 0,25 1/m), ele é
+extrapolado até o eixo dianteiro, aceitando um início em até 2,6 m
+(`CONE_FAR_START_M`), e a referência fica limitada a 0,35 m/s. Em curva
+distante isso não é feito, porque a reta secante inventaria erro lateral.
 A recuperação limita a referência a 0,25 m/s. Se perder a referência, o
 Stanley segue brevemente a última trajetória pela odometria e então para.
 

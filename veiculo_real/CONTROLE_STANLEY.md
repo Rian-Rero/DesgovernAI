@@ -83,7 +83,7 @@ prevista sao descartados da mesma forma, no maximo 3 seguidos; o CSV marca
 `line_outlier`.
 
 Nas curvas, o alvo de velocidade usa a curvatura filtrada
-(`curvature_filter_s`, 0.2 s) e e suavizado (`speed_filter_s`, 0.3 s): antes
+(`curvature_filter_s`, 0.2 s) e e suavizado (`speed_filter_s`, 0.6 s): antes
 ele oscilava com o ruido da visao e o acelerador dava trancos. O esterco usa a
 curvatura do proprio quadro, limitada ao batente (1/R ~ 1 m^-1): no mesmo
 ajuste, erros de orientacao e de curvatura saem opostos e se cancelam.
@@ -168,7 +168,7 @@ recebem NaN quando a observacao nao e valida/atual. Suporte nao e probabilidade
 de acerto; uma conexao azul tambem pode preencher um buraco em faixa continua.
 Esses valores servem para diagnostico e nao alteram o ganho Stanley.
 
-A velocidade e reduzida pela curvatura e pelos erros. Perda de deteccao,
+A velocidade e reduzida pela curvatura e pelo erro lateral (o erro de orientacao nao entra: oscilava demais quadro a quadro). Perda de deteccao,
 frame mais antigo que `vision_timeout`, falha na thread ou emergencia cortam throttle
 e zeram o integral do PI. A parada por obstaculo ja existente permanece
 travada ate o fim da missao. Cortar throttle coloca o ESC em neutro; isso

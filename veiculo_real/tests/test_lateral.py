@@ -466,7 +466,7 @@ class RealFollowerTests(unittest.TestCase):
         self.assertAlmostEqual(follower.controller.feedforward_term,math.atan(.36*.9*(-1)**19))
         self.assertAlmostEqual(log['curvature_filtered_m_inv'],follower.curvature)
         # A velocidade usa a filtrada: nao cai para sqrt(0,4/0,9) a cada quadro.
-        self.assertGreater(car.vref,lateral.curve_speed(1.5,.9,0.,0.,lateral_accel=.4)+.2)
+        self.assertGreater(car.vref,lateral.curve_speed(1.5,.9,0.,lateral_accel=.4)+.2)
         # O mesmo quadro reaproveitado em varios passos nao reaplica o filtro.
         repeated=follower.curvature
         follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,5.)),now+.02)
@@ -487,12 +487,18 @@ class RealFollowerTests(unittest.TestCase):
             now=10.+.02*index
             follower.apply(car,lateral.LineObservation(timestamp=now,errors=(0.,0.,0.)),now)
         self.assertAlmostEqual(car.vref,.7)
-        # Um passo isolado com erro angular alto pedia ~0,53 m/s de uma vez.
+        # Erro angular (ruidoso, extrapolado ate o eixo) nao reduz mais a vref.
         follower.apply(car,lateral.LineObservation(timestamp=10.6,errors=(0.,.25,0.)),10.6)
+        self.assertAlmostEqual(car.log.call_args.kwargs['curve_speed_raw_m_s'],.7)
+        self.assertAlmostEqual(car.vref,.7)
+        # O erro lateral continua reduzindo; o filtro evita o degrau de uma vez.
+        filtered=lateral.RealStanleyFollower({'velocity_reference':.7})
+        filtered.speed_target=.7
+        filtered.apply(car,lateral.LineObservation(timestamp=10.6,errors=(.125,0.,0.)),10.6)
         self.assertAlmostEqual(car.log.call_args.kwargs['curve_speed_raw_m_s'],.7/1.25)
         self.assertGreater(car.vref,.68)
         unfiltered=lateral.RealStanleyFollower({'velocity_reference':.7,'speed_filter_s':0})
-        unfiltered.apply(car,lateral.LineObservation(timestamp=10.6,errors=(0.,.25,0.)),10.6)
+        unfiltered.apply(car,lateral.LineObservation(timestamp=10.6,errors=(.125,0.,0.)),10.6)
         self.assertAlmostEqual(car.vref,.7/1.25)
 
     def test_impossible_jump_is_discarded_but_a_persistent_change_is_accepted(self):

@@ -15,6 +15,12 @@ from tools.cone_path import ConePathDetector, ConeSettings, render_cones
 
 
 CONE_RECOVERY_SPEED = .35  # m/s
+# Com o FOV atual, um cone a ~0,9 m de lado so entra na imagem a x >~ 1,6 m:
+# no ensaio parado (logs 20261023_080354) o primeiro portao ficava a 1,9-2,3 m
+# e o carro nunca partia. Trecho distante so e extrapolado ate o eixo em reta;
+# em curva a reta secante inventa erro lateral (quadro 101 de 20261023_080437).
+CONE_FAR_START_M = 2.6
+CONE_FAR_MAX_CURVATURE = .25  # 1/m, raio de 4 m (mesmo limiar de reta/curva)
 
 
 @dataclass(frozen=True)
@@ -113,11 +119,12 @@ class RealConeDetector:
                                          with_curvature=True, limit_curve_extrapolation=True)
                 if (errors is None and self.settings.single_border_recovery
                         and (recovery or not result.estimated and not result.branch)
-                        and np.min(result.ground_center[:, 0]) > 1.5):
-                    # Um trecho distante ainda da rumo para avancar devagar.
+                        and np.min(result.ground_center[:, 0]) > 1.5
+                        and abs(result.curvature_m_inv or 0.) < CONE_FAR_MAX_CURVATURE):
+                    # Um trecho distante e reto ainda da rumo para avancar devagar.
                     errors = fit_line_errors(result.ground_center, [0., 0.], [1., 0.],
                                              with_curvature=True, limit_curve_extrapolation=True,
-                                             max_near_distance=2.2)
+                                             max_near_distance=CONE_FAR_START_M)
                     recovery = errors is not None
             except (ValueError, np.linalg.LinAlgError, FloatingPointError):
                 pass

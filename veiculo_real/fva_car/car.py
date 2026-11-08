@@ -174,7 +174,7 @@ class Car:
             try:
                 from . import camera
 
-                self.cam = camera.Camera()
+                self.cam = camera.Camera(**self.parameters.get("camera_settings", {}))
             except Exception as e:
                 print(f"\033[31mErro na camera: {e}\033[0m", flush=True)
                 raise

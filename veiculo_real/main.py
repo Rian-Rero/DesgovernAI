@@ -35,10 +35,19 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 parameters = {
     "ts": 30.0,
     "navigation_mode": "cones",  # somente cones; linha requer selecao explicita
-    "cone_settings": {"roi_top": 0, "single_border_recovery": True},
+    # Largura/espacamento da pista do ensaio (medidos nos logs 20261023_0803*/0804*
+    # com a calibracao atual: corredor 1,7-1,9 m, cones a ~0,5 m). Os padroes
+    # 90/70 cm marcavam a calibracao como suspeita, o que desligava o filtro de
+    # tamanho e deixava passar falsos positivos. CONFIRMAR COM TRENA na pista.
+    "cone_settings": {"roi_top": 0, "single_border_recovery": True,
+                      "track_width_cm": 180, "cone_spacing_cm": 50},
     "save": True,
     "logfile": "logs/",
     "camera": True,
+    # Ajustes opcionais da webcam (vazio: padrao dela). Para fixar a imagem:
+    # {"fourcc": "MJPG", "exposure": <valor>, "auto_wb": False, "wb_temperature": <K>}
+    # Descubra os valores com: v4l2-ctl -d /dev/video0 --list-ctrls
+    "camera_settings": {},
     "ultrasonic_steering": False,  # camera fixa apos calibrada
     "us_buzzer": False,
     "initial_position": [0, 0, 0.0],
@@ -60,7 +69,8 @@ parameters = {
     # Passa-baixas (s) do limite de velocidade em curva; 0 desliga. Evitam os
     # trancos de acelerador ("engasgos"); o esterco nao passa por eles.
     "curvature_filter_s": 0.2,
-    "speed_filter_s": 0.3,
+    # 0,3 s deixava a vref variar 0,19-0,47 m/s em ~1 s (log 20261023_080437).
+    "speed_filter_s": 0.6,
     # Leva os erros da imagem ao instante do comando por odometria (ate 0,25 s).
     "vision_latency_compensation": True,
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda
@@ -82,7 +92,9 @@ parameters = {
     # em rampa ate curve_min_speed; depois neutraliza. 0 para no 1o quadro.
     "cone_loss_frames": 6,
     "cone_loss_tolerance": 0.6,
-    "cone_max_lateral_jump_m": 0.12,
+    # 0,12 m ficava abaixo do ruido metrico dos cones a 2-3 m: 31 "saltos"
+    # descartados em 14 s, cada um forcando hold e rampa de vref.
+    "cone_max_lateral_jump_m": 0.25,
     "cone_max_heading_jump_rad": 0.35,
     # Debug por quadro em logs/<ensaio>/cones_debug.jsonl + frames JPG so em eventos.
     "cone_debug": True,

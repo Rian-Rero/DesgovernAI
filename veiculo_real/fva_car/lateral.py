@@ -377,13 +377,17 @@ def fit_line_errors(points, front, forward, max_distance=4., with_curvature=Fals
     return (*errors, closest_curvature) if with_curvature else errors
 
 
-def curve_speed(reference, curvature, lateral, heading, min_speed=.5,
+def curve_speed(reference, curvature, lateral, min_speed=.5,
                 lateral_accel=.6):
-    """Limita v por v^2*|kappa| e reduz avanco durante recuperacao de erro."""
+    """Limita v por v^2*|kappa| e reduz avanco durante recuperacao de erro.
+
+    Sem termo de orientacao: o erro angular extrapolado ate o eixo dianteiro
+    oscilava quadro a quadro (+-0,9 rad) e fazia a vref variar 0,19-0,47 m/s.
+    """
     if reference <= 0 or min_speed <= 0 or lateral_accel <= 0:
         raise ValueError('Velocidades e aceleracao lateral devem ser positivas.')
     bend_limit = math.sqrt(lateral_accel / max(abs(curvature), 1e-6))
-    recovery_limit = reference / (1 + 2*abs(lateral) + abs(heading))
+    recovery_limit = reference / (1 + 2*abs(lateral))
     return min(reference, max(min_speed, min(bend_limit, recovery_limit)))
 
 
@@ -647,7 +651,7 @@ class RealStanleyFollower:
                 searched = math.tan(abs(self.controller.steer) + abs(search)) / self.controller.wheelbase
                 speed_curvature = math.copysign(max(abs(speed_curvature), min(searched, self.max_curvature)),
                                                 search)
-            speed_raw = curve_speed(self.reference, speed_curvature, lateral, heading,
+            speed_raw = curve_speed(self.reference, speed_curvature, lateral,
                                     min_speed=self.min_speed, lateral_accel=self.lateral_accel)
             self.hold_speed_factor = 1.
             if holding and self.loss_speed_ramp:

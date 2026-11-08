@@ -63,6 +63,24 @@ class ConeTests(unittest.TestCase):
         self.assertAlmostEqual(heading, 0.)
         self.assertEqual(curvature, 0.)
 
+    def test_far_straight_center_starts_slowly_but_far_curve_does_not(self):
+        # Ensaio parado (logs 20261023_080354): o primeiro portao ficava a 1,9-2,3 m.
+        from tools.cone_path import ConePathResult
+        calibration, frame = scene()
+        detector = RealConeDetector(calibration, settings={'single_border_recovery': True})
+        x = np.linspace(2.0, 2.7, 15)
+        mask = np.zeros((480, 640), np.uint8)
+        for curvature, expected in ((.05, True), (.6, False)):
+            result = ConePathResult(mask, mask, mask, center=np.array([[320, 300]], np.int32),
+                                    source='solo', ground_center=np.column_stack((x, .03 + 0*x)),
+                                    curvature_m_inv=curvature, status='Centro pelos portoes de cones (m)')
+            with patch.object(detector.detector, 'process', return_value=result):
+                observation = detector.observe_frame(frame, 10.)
+            self.assertEqual(observation.valid, expected, observation.reason)
+            if expected:
+                self.assertAlmostEqual(observation.errors[0], .03, delta=.01)
+                self.assertEqual(observation.speed_limit, CONE_RECOVERY_SPEED)
+
     def test_gate_midpoints_skip_diagonal_pairs_at_end_of_border(self):
         from tools.cone_track_path import gate_midpoints
         left = [[1.0, .5], [1.5, .5]]

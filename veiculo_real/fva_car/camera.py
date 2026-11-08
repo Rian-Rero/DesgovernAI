@@ -39,8 +39,18 @@ class Camera:
 	def __init__(	self, 
 					cam_index: int = None, 
 					resolution=RESOLUTION, 
-					fps: int = FRAME_RATE):
-		
+					fps: int = FRAME_RATE,
+					fourcc: str = None,
+					exposure: float = None,
+					auto_wb: bool = None,
+					wb_temperature: float = None):
+		"""fourcc/exposure/auto_wb/wb_temperature: None mantem o padrao da webcam.
+
+		Exposicao automatica em ambiente interno escuro derruba o fps e muda o
+		matiz entre quadros (limiares HSV mais largos, mais falsos positivos).
+		Valores validos dependem da webcam: v4l2-ctl -d /dev/video0 --list-ctrls
+		"""
+
 		# identifica camera disponivel
 		if cam_index is None:
 			cam_index = self.find_camera()
@@ -55,6 +65,10 @@ class Camera:
 			if not self.cap.isOpened():
 				raise RuntimeError(f"Nao foi possivel abrir a camera (index={cam_index}).")
 
+		# codec antes da resolucao: MJPG costuma liberar 30 fps em 640x480 na USB
+		if fourcc:
+			self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*str(fourcc)[:4]))
+
 		# configura resolucao
 		w, h = resolution
 		self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  int(w))
@@ -65,7 +79,8 @@ class Camera:
 		# Mesmos ajustes de open_camera() da ferramenta HSV. Nao forca
 		# exposicao manual, foco ou codec diferentes dos usados na ferramenta.
 		self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-		
+		self._configure_image(exposure, auto_wb, wb_temperature)
+
 		# modelo da YOLO
 		self.model = None
 		# YOLO em segundo plano: apenas o quadro mais recente.
@@ -89,6 +104,25 @@ class Camera:
 		self._stream_fps = 10.0
 		self._stream_scale = 0.5
 		self._stream_last_publish = 0.0
+
+	########################################
+	# exposicao e balanco de branco fixos (opcional)
+	def _configure_image(self, exposure, auto_wb, wb_temperature):
+		if exposure is not None:
+			# V4L2: 1 = manual; versoes antigas do OpenCV usam 0.25 para manual.
+			self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+			if self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) not in (1, 1.0):
+				self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+			self.cap.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
+		if auto_wb is not None:
+			self.cap.set(cv2.CAP_PROP_AUTO_WB, 1 if auto_wb else 0)
+		if wb_temperature is not None:
+			self.cap.set(cv2.CAP_PROP_WB_TEMPERATURE, float(wb_temperature))
+		if exposure is not None or auto_wb is not None or wb_temperature is not None:
+			print("Camera: exposicao={} auto_exp={} auto_wb={} wb={} fps={}".format(
+				self.cap.get(cv2.CAP_PROP_EXPOSURE), self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE),
+				self.cap.get(cv2.CAP_PROP_AUTO_WB), self.cap.get(cv2.CAP_PROP_WB_TEMPERATURE),
+				self.cap.get(cv2.CAP_PROP_FPS)), flush=True)
 
 	########################################
 	# procura uma camera disponivel
