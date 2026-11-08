@@ -102,6 +102,10 @@ parameters = {
     # Coleta para rotular/avaliar (tools/rotular_cones.py): quadros originais em
     # logs/<ensaio>/frames/ a esta taxa (Hz). 0 desliga; nao usar na prova.
     "record_frames_hz": 0.0,
+    # Rede que confirma cada candidato a cone (tools/cone_classifier.py):
+    # caminho do .onnx treinado por tools/treinar_classificador_cones.py, com o
+    # .json ao lado. None: so cor, forma e tamanho (como antes).
+    "cone_classifier": None,
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
@@ -268,7 +272,10 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         detector = RealConeDetector(
             calibration, settings=config.get("cone_settings"), render_preview=False,
             processing_width=config.get("vision_width", 0),
+            classifier=config.get("cone_classifier"),
         )
+        if detector.classifier is not None:
+            print(f"Cones: classificador {detector.classifier.path}", flush=True)
         calibration_warnings = cone_calibration_warnings(calibration, detector)
         for warning in calibration_warnings:
             print(f"AVISO calibracao: {warning}", flush=True)
@@ -315,7 +322,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     if use_process:
         if mode == "cones":
             detector_kwargs = dict(settings=config.get("cone_settings"),
-                                   processing_width=config.get("vision_width", 0))
+                                   processing_width=config.get("vision_width", 0),
+                                   classifier=config.get("cone_classifier"))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -644,6 +652,8 @@ def main():
         action="store_true",
         help="Nao gravar cones_debug.jsonl nem frames de eventos",
     )
+    parser.add_argument("--classifier", metavar="MODELO.onnx",
+                        help="Rede que confirma os cones (com o .json ao lado); 'none' desliga")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
@@ -669,6 +679,8 @@ def main():
         settings["encoder_protocol"] = args.encoder_protocol
     if args.calibration:
         settings["camera_calibration_file"] = args.calibration
+    if args.classifier:
+        settings["cone_classifier"] = None if args.classifier.lower() == "none" else args.classifier
 
     def interrupt_mission(_signum, _frame):
         # A GUI remota encerra com SIGTERM. Usa o mesmo finally do Ctrl+C.

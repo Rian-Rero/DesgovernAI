@@ -28,6 +28,7 @@ def main(argv=None):
                         help='0 usa a resolucao calibrada; padrao: 0 480 320')
     parser.add_argument('--iterations', type=int, default=20)
     parser.add_argument('--cones', action='store_true', help='detector de cones em vez da linha amarela')
+    parser.add_argument('--classifier', help='modelo .onnx do classificador de cones (com --cones)')
     args = parser.parse_args(argv)
     if args.iterations < 1:
         parser.error('--iterations deve ser positivo')
@@ -41,7 +42,9 @@ def main(argv=None):
             raise ValueError('A imagem deve ter a resolucao original da calibracao.')
         if args.cones:
             detectors = [RealConeDetector(calibration, settings=parameters['cone_settings'],
-                                          processing_width=width) for width in args.widths]
+                                          processing_width=width,
+                                          classifier=args.classifier or parameters.get('cone_classifier'))
+                         for width in args.widths]
         else:
             detectors = [RealLineDetector(calibration, path_settings=parameters['path_settings'],
                                          anchor=parameters['path_anchor'], render_preview=False,

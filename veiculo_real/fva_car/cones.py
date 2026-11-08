@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from .lateral import GroundCalibration, LineObservation, fit_line_errors
+from tools.cone_classifier import load_classifier
 from tools.cone_path import ConePathDetector, ConeSettings, render_cones
 
 
@@ -38,12 +39,22 @@ class ConeObservation(LineObservation):
 
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
-    def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None):
+    def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
+                 classifier=None):
+        """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
+
+        Com classificador, os ajustes de cor usados para gerar o conjunto de
+        treino (candidate_settings do .json) valem por padrao; chaves dadas
+        explicitamente em settings tem prioridade.
+        """
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('Cones requerem calibracao metrica da camera fixa.')
         self.calibration = calibration
+        self.classifier = load_classifier(classifier)
         values = asdict(ConeSettings())
         changes = {} if settings is None else dict(settings)
+        if self.classifier is not None:
+            changes = {**self.classifier.candidate_settings, **changes}
         if set(changes)-set(values):
             raise ValueError('Ajuste de cones desconhecido: '+str(set(changes)-set(values)))
         values.update(changes)
@@ -73,7 +84,7 @@ class RealConeDetector:
         self.render_preview = render_preview
         # Um unico detector: os lados sao decididos pela geometria, com histerese,
         # sem reprocessar o quadro inteiro com as cores trocadas.
-        self.detector = ConePathDetector(calibration)
+        self.detector = ConePathDetector(calibration, classifier=self.classifier)
         self.green_left = self.settings.green_left
         # PoseHistory (fva_car/odometry.py) do laco de controle: leva o mapa de
         # cones entre quadros; sem ela, o detector usa fluxo optico no piso.

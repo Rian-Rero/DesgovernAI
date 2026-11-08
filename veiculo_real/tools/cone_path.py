@@ -313,9 +313,11 @@ def classify_segment(center, curvature, near_m=.5):
 
 
 class ConePathDetector:
-    def __init__(self, calibration=None):
+    def __init__(self, calibration=None, classifier=None):
+        """classifier: cone_classifier.ConeClassifier opcional (confirma candidatos)."""
         self.clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8))
         self.calibration = calibration
+        self.classifier = classifier
         self.tracker = ConeTracker()
         self.motion = FloorMotion()
         self.reset()
@@ -743,6 +745,26 @@ class ConePathDetector:
         # y crescente, sem duplicatas.
         return [(points[chain][::-1], score) for chain, score in chosen[:top_k]]
 
+    def candidates(self, frame, settings):
+        """Bases candidatas por cor, antes do classificador e do rastreamento.
+
+        Usado por process() e pela extracao do conjunto de treino
+        (extrair_recortes_cones.py): o modelo aprende com os mesmos candidatos
+        que vai julgar no carro.
+        """
+        roi = self.roi_row(frame.shape[:2], settings)
+        green, red = self.segment(frame, settings, roi)
+        rejected = {'green': {}, 'red': {}}
+        scale = self.row_scale(frame.shape[:2], settings)
+        size_check = settings.size_check and scale is not None and self.calibration_trusted(settings)
+        return {
+            'green': self._bases(green, settings, stats=rejected['green'], roi=roi, scale=scale,
+                                 size_check=size_check),
+            'red': self._bases(red, settings, stats=rejected['red'], roi=roi, scale=scale,
+                               size_check=size_check),
+            'masks': (green, red), 'rejected': rejected, 'roi': roi, 'scale': scale,
+            'size_check': size_check}
+
     def process(self, frame, settings=None, timestamp=None, *, motion=None):
         """motion opcional: delta (frente m, esquerda m, yaw rad), desde o frame anterior.
 
@@ -751,20 +773,32 @@ class ConePathDetector:
         """
         settings = settings or ConeSettings()
         now = time.monotonic() if timestamp is None else float(timestamp)
-        roi = self.roi_row(frame.shape[:2], settings)
-        green, red = self.segment(frame, settings, roi)
+        found = self.candidates(frame, settings)
+        green, red = found['masks']
+        gp, rp = found['green'], found['red']
+        rejected = found['rejected']
         result = ConePathResult(cv2.bitwise_or(green, red), green, red)
-        rejected = {'green': {}, 'red': {}}
-        scale = self.row_scale(frame.shape[:2], settings)
-        size_check = settings.size_check and scale is not None and self.calibration_trusted(settings)
-        gp = self._bases(green, settings, stats=rejected['green'], roi=roi, scale=scale, size_check=size_check)
-        rp = self._bases(red, settings, stats=rejected['red'], roi=roi, scale=scale, size_check=size_check)
-        result.green_points, result.red_points = gp, rp
         result.green_left = settings.green_left
+        detection = {'roi_row': found['roi'], 'size_check': bool(found['size_check'])}
+        if self.classifier is not None and found['scale'] is not None:
+            # A CNN confirma cada candidato pelo recorte em volta da base.
+            started = time.perf_counter()
+            verdict = self.classifier.classify(frame, {'green': gp, 'red': rp}, found['scale'],
+                                               settings.cone_height_cm/100)
+            for color in ('green', 'red'):
+                keep = verdict[color][0]
+                dropped = int(np.count_nonzero(~keep))
+                if dropped:
+                    rejected[color]['classificador'] = rejected[color].get('classificador', 0) + dropped
+            candidates = len(gp) + len(rp)
+            gp, rp = gp[verdict['green'][0]], rp[verdict['red'][0]]
+            detection['classifier'] = {'candidates': candidates, 'kept': len(gp) + len(rp),
+                                       'ms': _r(1000*(time.perf_counter()-started), 2)}
+        result.green_points, result.red_points = gp, rp
         result.debug = {'detection': {
             'green': {'bases': len(gp), 'rejected': rejected['green'], 'px': _polyline(gp, 20, 1)},
             'red': {'bases': len(rp), 'rejected': rejected['red'], 'px': _polyline(rp, 20, 1)},
-            'roi_row': roi, 'size_check': bool(size_check)}}
+            **detection}}
         if not math.isfinite(now):
             self.reset()
             result.status = "Horario de captura invalido"

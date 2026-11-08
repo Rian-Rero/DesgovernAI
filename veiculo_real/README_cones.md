@@ -162,6 +162,48 @@ Cones cortados na base (borda inferior da imagem) são descartados. Os cortados 
 pela lateral são aceitos com `partial_cones`. Cones com faixa branca devem manter
 a parte colorida inferior visível.
 
+## Classificador de cones (rede neural)
+
+A cor gera os candidatos. Uma CNN pequena (~24 mil parâmetros, ~100 KB) olha
+um recorte de 32×32 em volta de cada base e decide entre `cone_verde`,
+`cone_vermelho` e `nao_cone`. Só os cones confirmados, com a mesma cor da
+máscara, seguem para as bordas. A posição da base continua vindo da geometria.
+Com o classificador, a cor pode ser mais larga (`LOOSE_COLOR`) e pegar o verde
+escuro na sombra, porque a rede descarta porta, roupa e guarda-chuva. No Pi
+roda só com o OpenCV (`cv2.dnn`), sem PyTorch. O recorte é o mesmo no treino e
+no carro (`tools/cone_classifier.py`).
+
+Fluxo (o que só a equipe pode fazer está em **negrito**):
+
+1. **Gravar** quadros na pista e na luz da prova. As curvas e sombras são o
+   mais importante.
+   `python3 veiculo_real/main.py --record-frames 3 --speed 0.3`
+   Também dá para dirigir pelo rádio no modo manual; a visão grava do mesmo jeito.
+2. **Rotular** no notebook. O detector pré-marca os cones e você corrige com
+   cliques. Comece com uns 200–300 quadros revisados.
+   `python3 veiculo_real/tools/rotular_cones.py logs/<ensaio>`
+3. Gerar os recortes (positivos dos rótulos, negativos dos candidatos sem
+   rótulo):
+   `python3 veiculo_real/tools/extrair_recortes_cones.py logs/<a> logs/<b> --out cones_ds.npz --preview amostra.jpg`
+4. Treinar no notebook (`pip install torch --index-url https://download.pytorch.org/whl/cpu onnx`):
+   `python3 veiculo_real/tools/treinar_classificador_cones.py cones_ds.npz --out veiculo_real/modelos/cones.onnx`
+   A validação é separada por quadro. O script mostra a matriz de confusão e
+   recarrega o modelo no OpenCV para confirmar que a saída bate com o PyTorch.
+5. Medir antes e depois:
+   `python3 veiculo_real/tools/benchmark_visao.py --cones --image logs/<ensaio>/vision_camera.jpg --classifier veiculo_real/modelos/cones.onnx`
+   e `avaliar_cones.py` nos quadros rotulados que ficaram fora do treino.
+6. Usar no carro: `"cone_classifier": "veiculo_real/modelos/cones.onnx"` em
+   `main.py`, ou `--classifier ...` na linha de comando (`--classifier none`
+   desliga).
+
+O `.json` ao lado do `.onnx` guarda as classes, o recorte, os ajustes de cor
+dos candidatos usados no treino (aplicados automaticamente, salvo se
+`cone_settings` disser outra coisa) e a confiança mínima (`min_confidence`,
+padrão 0,6). O debug por quadro registra os candidatos, os aceitos e o tempo
+do classificador em `vision.detection.classifier`, e os descartes como
+`classificador`. O modelo em `tools/tests/dados/` é **só de teste**: foi
+treinado com pseudo-rótulos.
+
 ## Visão em processo separado
 
 No carro real (`vision_process: True`, padrão), a câmera e o detector rodam

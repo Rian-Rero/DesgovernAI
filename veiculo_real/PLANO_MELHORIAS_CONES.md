@@ -228,3 +228,12 @@ Caminho sugerido para o híbrido:
 3. Treinar uma CNN de 3 classes (cone_verde, cone_vermelho, nao_cone), com ~2 convoluções e entrada de 32×32, no notebook.
 4. Exportar para ONNX e rodar com `cv2.dnn` no Pi, com um único lote de recortes por quadro.
 5. Medir com `avaliar_cones.py` antes e depois.
+
+**Implementado (08/11):** a estrutura do classificador híbrido.
+- `tools/cone_classifier.py`: recorte e inferência com `cv2.dnn`.
+- `tools/extrair_recortes_cones.py`: gera o conjunto de treino.
+- `tools/treinar_classificador_cones.py`: treina, exporta ONNX e confere o modelo no OpenCV.
+- Integração no detector, no processo de visão e no `main.py` (`cone_classifier` e `--classifier`).
+
+Num teste com pseudo-rótulos, a exportação bateu com o PyTorch (diferença de 3e-7) e o custo ficou em 0,02–0,03 ms por recorte no notebook. **Falta gravar e rotular dados reais e treinar.**
+
