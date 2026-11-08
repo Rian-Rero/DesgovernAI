@@ -17,7 +17,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fva_car.cones import RealConeDetector
 from fva_car.lateral import GroundCalibration, RealLineDetector
-from main import parameters
+from main import corridor_settings, parameters
 
 
 def main(argv=None):
@@ -43,7 +43,8 @@ def main(argv=None):
         if args.cones:
             detectors = [RealConeDetector(calibration, settings=parameters['cone_settings'],
                                           processing_width=width,
-                                          classifier=args.classifier or parameters.get('cone_classifier'))
+                                          classifier=args.classifier or parameters.get('cone_classifier'),
+                                          corridor=corridor_settings(parameters))
                          for width in args.widths]
         else:
             detectors = [RealLineDetector(calibration, path_settings=parameters['path_settings'],

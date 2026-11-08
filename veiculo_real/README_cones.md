@@ -69,8 +69,73 @@ Stanley entra em *hold*. Prevê a trajetória por odometria, sem esterço de bus
 e reduz a vref em rampa. Também descarta saltos impossíveis entre quadros
 (`cone_max_lateral_jump_m` 0,25 m, `cone_max_heading_jump_rad` 0,35 rad).
 Esgotada a tolerância, neutraliza os comandos. `--loss-frames N` ajusta a
-tolerância. Com `--loss-frames 0`, para no primeiro quadro perdido. O adaptador calcula os erros do
-Stanley junto ao eixo dianteiro a partir do centro métrico.
+tolerância. Com `--loss-frames 0`, para no primeiro quadro perdido. Sem o estimador
+(`cone_estimator: False`), o adaptador calcula os erros do Stanley junto ao eixo
+dianteiro a partir do centro métrico de cada quadro.
+
+## Estimador do corredor (padrão)
+
+A câmera vê os dois lados juntos só entre ~1,9 e 3 m. Ela está apontada uns 8°
+para a direita, então o cone esquerdo entra bem depois do direito. E mede mal a
+distância: 1 px ≈ 5 cm a 2,5 m, e 1° de arfagem desloca ~10 linhas. Por isso, com
+`cone_estimator: True`, o corredor é um **estado filtrado**
+(`fva_car/corridor.py`, filtro de Kalman estendido iterado):
+
+| Estado | Significado |
+|--------|-------------|
+| `e` | centro em relação ao eixo dianteiro (esquerda +), m |
+| `psi` | rumo do centro no ponto mais próximo do eixo, rad |
+| `kappa` | curvatura do centro nesse ponto, 1/m |
+| `dkappa` | variação da curvatura por metro (clotoide): entrada e saída de curva |
+| `W` | largura do corredor, m |
+
+- **Previsão**: a odometria (`PoseHistory`, eixo traseiro, convertida para o
+  dianteiro com `wheelbase`) leva o estado de um quadro ao outro. Assim existe
+  centro junto ao eixo, onde a câmera é cega, e entre quadros sem cones.
+- **Correção**: cada cone é uma medida "a distância ao centro vale +W/2 (borda
+  esquerda) ou −W/2 (direita)". As duas cores entram num só ajuste. A incerteza
+  de cada cone vem da homografia: pequena na direção (coluna), grande na distância
+  (linha + arfagem). O erro do modelo cresce com a distância.
+- **Descarte**: um cone a mais de 3σ da previsão (porta, reflexo, cone de outro
+  trecho) fica de fora. Se a rejeição domina dois quadros seguidos, o estimador
+  recomeça pelos cones atuais.
+- **Estados e velocidade** (fração da vref, nunca abaixo de `curve_min_speed`):
+
+| Estado | Quando | vref |
+|--------|--------|------|
+| `AMBAS` | cones dos dois lados | ×1 |
+| `SO_EXTERNA` / `SO_INTERNA` | uma cor só, na curva (a de fora / a de dentro) | ×0,8 |
+| `UMA_BORDA_RETA` | uma cor só, \|κ\| < 0,15 | ×0,85 |
+| `MEMORIA` | nenhum cone aceito; segue a previsão por até `memory_m` (0,8 m) / 1 s | ×0,6 e teto de 0,35 m/s |
+| `PERDIDO` | além disso | neutro |
+
+- **Liberação**: o critério é a incerteza lateral do centro **1 m à frente**
+  (≤ 0,2 m), e não a do eixo. Com só cones distantes, como na partida do ensaio 1,
+  `e` e `psi` no eixo são incertos mas correlacionados, enquanto o caminho dos
+  próximos metros é conhecido. Com incerteza no eixo acima de 0,1 m, o teto é de
+  0,35 m/s até os cones chegarem perto.
+- Com o estimador, a tolerância de perda do Stanley cai para 2 quadros / 0,3 s,
+  para não somar outro trecho às cegas depois da `MEMORIA`.
+
+Ajustes em `cone_estimator` (dicionário, chaves de `CorridorSettings`), por
+exemplo `{"memory_m": 0.6, "row_sigma": 6}`. Para desligar, use
+`--no-estimator` ou `"cone_estimator": False`. No vídeo, as bordas do
+estimador aparecem em ciano e o centro em branco (tracejados quando sem
+validade). O `cones_debug.jsonl` traz `corridor` e `legacy_errors` (o ajuste
+antigo, para comparar). O `car.csv` traz `corridor_state` (índice em
+`STATES`), `corridor_sigma_e` e `corridor_speed_factor`.
+
+**Replay sem o carro** (só o `cones_debug.jsonl`; dispensa as imagens):
+
+```bash
+python3 tools/replay_corredor.py logs/<ensaio> --csv corredor.csv
+python3 tools/replay_corredor.py logs/<ensaio> --set row_sigma=6 --set memory_m=0.6
+```
+
+Nos ensaios de 23/10: E1 passa de 4 para 186 de 186 quadros válidos, e E2 de 113
+para 215 de 246 (os 31 restantes não têm cones). O salto entre quadros caiu de
+33 cm / 30° para 0,9 cm / 0,6° (p90 do E2). O custo é de ~1,7 ms por quadro no
+notebook; meça no Pi com `tools/benchmark_visao.py --cones`.
 
 ## Debug por quadro (leve para o Raspberry Pi 4)
 

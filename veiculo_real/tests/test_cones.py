@@ -46,6 +46,34 @@ class ConeTests(unittest.TestCase):
                 self.assertIsNone(observation.frame)
                 self.assertEqual(detector.with_preview(observation).frame.shape, frame.shape)
 
+    def test_corridor_estimator_drives_stanley_errors(self):
+        calibration, frame = scene(offset=.08)
+        detector = RealConeDetector(calibration, settings={'track_width_cm': 100}, corridor=True)
+        for k in range(4):
+            observation = detector.observe_frame(frame, 10. + .1*k)
+        self.assertTrue(observation.valid, observation.reason)
+        self.assertAlmostEqual(observation.errors[0], .08, delta=.03)
+        self.assertAlmostEqual(observation.errors[1], 0., delta=.05)
+        self.assertEqual(observation.debug['corridor']['state'], 'AMBAS')
+        self.assertEqual(observation.debug['corridor']['used'], [4, 4])
+        self.assertIsNotNone(observation.debug['legacy_errors'])
+        self.assertEqual(observation.speed_factor, 1.)
+        self.assertAlmostEqual(observation.corridor_width_m, 1., delta=.08)
+        self.assertEqual(detector.with_preview(observation).frame.shape, frame.shape)
+        # Sem cones: segue a memoria (sem odometria, parado) e reduz a velocidade.
+        empty = np.full_like(frame, 35)
+        observation = detector.observe_frame(empty, 10.5)
+        self.assertTrue(observation.valid, observation.reason)
+        self.assertEqual(observation.debug['corridor']['state'], 'MEMORIA')
+        self.assertLess(observation.speed_factor, 1.)
+        self.assertEqual(observation.speed_limit, CONE_RECOVERY_SPEED)
+
+    def test_corridor_estimator_rejects_unknown_settings(self):
+        calibration, _ = scene()
+        with self.assertRaises(ValueError):
+            RealConeDetector(calibration, corridor={'nao_existe': 1})
+        self.assertIsNone(RealConeDetector(calibration, corridor=False).corridor)
+
     def test_reduced_processing_preserves_coordinates(self):
         calibration, frame = scene(bend=.1)
         full = RealConeDetector(calibration).observe_frame(frame, 10.)

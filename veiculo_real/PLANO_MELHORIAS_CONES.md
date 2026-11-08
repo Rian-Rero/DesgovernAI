@@ -237,3 +237,35 @@ Caminho sugerido para o híbrido:
 
 Num teste com pseudo-rótulos, a exportação bateu com o PyTorch (diferença de 3e-7) e o custo ficou em 0,02–0,03 ms por recorte no notebook. **Falta gravar e rotular dados reais e treinar.**
 
+## 7. Estimador do corredor (implementado em 08/11)
+
+`fva_car/corridor.py` cobre as fases F4.3 e F4.4 com um único filtro de Kalman
+estendido iterado. O estado é `[e, psi, kappa, dkappa, W]` (clotoide), previsto
+pela odometria e corrigido pelos cones das duas cores num só ajuste. Os
+estados `AMBAS` / `SO_EXTERNA` / `SO_INTERNA` / `UMA_BORDA_RETA` / `MEMORIA` /
+`PERDIDO` da tabela 4.4 saem do próprio modelo. Está ligado por padrão
+(`cone_estimator`), com `--no-estimator` para voltar. Detalhes e replay estão em
+`README_cones.md`.
+
+Replay (`tools/replay_corredor.py`) nos ensaios de 23/10:
+
+| | E1 válidos | E2 válidos | Salto p90 E2 (e / psi) |
+|---|---|---|---|
+| Antes (log) | 4/186 | 113/246 | 33 cm / 30° |
+| Estimador | 186/186 | 215/246 | 0,9 cm / 0,6° |
+
+O que os logs mostraram:
+- **Um arco de curvatura constante não basta.** No grampo do E2, os cones verdes
+  atravessam a frente a 2,5–3 m. Daí a clotoide (`dkappa`).
+- **Carro parado é perigoso para um filtro**: o mesmo cone em vários quadros não é
+  informação nova. O ruído por tempo vale só para `e`/`psi`/`W`. Na curvatura, o
+  ruído por tempo fazia a reta do E1 "entortar" em 25 s parado.
+- **A calibração não cobre a região dos cones.** Os pontos vão de 0,75 a 1,65 m e de
+  ±0,3 m, mas os cones ficam a 1,5–3 m e ±0,9 m. No E1 (reta), as bordas medidas
+  divergem (largura de 1,74 m a 1,5 m e de 1,82 m a 2,7 m). O estimador então
+  dá o carro 0,12–0,15 m à direita do centro, com rumo de −0,04 a −0,07 rad, quando
+  o esperado era ~0. **Recalibrar com pontos até 3 m e ±1 m** (fase F1) é o
+  próximo passo de maior impacto para a precisão.
+- Falta validar no carro: custo no Pi (~1,7 ms no notebook) e ajuste de
+  `row_sigma`, `memory_m` e `kappa_noise` com logs novos.
+

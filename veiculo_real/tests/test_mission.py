@@ -100,8 +100,9 @@ class MissionTests(unittest.TestCase):
         with patch.object(mission, 'RealLineDetector') as line_factory, \
                 patch.object(mission, 'RealConeDetector', return_value=detector) as factory, \
                 patch.object(mission, 'RealStanleyFollower', side_effect=follower):
-            self.run_fake(dict(self.settings, navigation_mode='cones', save=False))
+            self.run_fake(dict(self.settings, navigation_mode='cones', save=False, cone_estimator=False))
         factory.assert_called_once()
+        self.assertIsNone(factory.call_args.kwargs['corridor'])
         line_factory.assert_not_called()
         # Cones: tolerancia propria com vref em rampa, sem esterco de busca.
         self.assertEqual(captured['line_loss_frames'], mission.parameters['cone_loss_frames'])
@@ -111,6 +112,23 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(captured['line_search_rate_deg_s'], 0.)
         self.assertEqual(captured['max_lateral_jump_m'], mission.parameters['cone_max_lateral_jump_m'])
         self.car.close.assert_called_once()
+
+    def test_cone_estimator_passes_wheelbase_and_shortens_blind_tolerance(self):
+        captured = {}
+        real_follower = mission.RealStanleyFollower
+        def follower(settings):
+            captured.update(settings)
+            return real_follower(settings)
+        with patch.object(mission, 'RealConeDetector', return_value=Mock()) as factory, \
+                patch.object(mission, 'RealStanleyFollower', side_effect=follower):
+            self.run_fake(dict(self.settings, navigation_mode='cones', save=False,
+                               cone_estimator={'memory_m': .6}))
+        corridor = factory.call_args.kwargs['corridor']
+        self.assertEqual(corridor['memory_m'], .6)
+        self.assertEqual(corridor['pose_offset_m'], mission.parameters['wheelbase'])
+        # O estimador ja cobre a memoria: o Stanley nao soma outro trecho as cegas.
+        self.assertLessEqual(captured['line_loss_frames'], 2)
+        self.assertLessEqual(captured['line_loss_tolerance'], .3)
 
     def test_cone_mode_writes_debug_per_frame_and_summary(self):
         detector = Mock()

@@ -106,6 +106,11 @@ parameters = {
     # caminho do .onnx treinado por tools/treinar_classificador_cones.py, com o
     # .json ao lado. None: so cor, forma e tamanho (como antes).
     "cone_classifier": None,
+    # Estimador do corredor (fva_car/corridor.py): posicao, rumo, curvatura e
+    # largura filtrados pela odometria, com as duas cores num so ajuste. True
+    # liga com os ajustes padrao; dicionario muda ajustes de CorridorSettings
+    # (ex.: {"memory_m": 0.6}); False volta ao ajuste quadro a quadro.
+    "cone_estimator": True,
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
@@ -117,6 +122,32 @@ parameters = {
     # Porta HTTP com a visao ao vivo (http://<ip-do-carro>:porta/); 0 desliga.
     "stream_port": 0,
 }
+
+
+def corridor_log(corridor):
+    """Colunas do car.csv com o estado do estimador (NaN quando desligado)."""
+    from fva_car.corridor import STATES
+
+    nan = float("nan")
+    if not corridor:
+        return dict(corridor_state=nan, corridor_sigma_e=nan, corridor_speed_factor=nan)
+    sigma = corridor.get("sigma") or [None]
+    return dict(corridor_state=float(STATES.index(corridor["state"])),
+                corridor_sigma_e=nan if sigma[0] is None else float(sigma[0]),
+                corridor_speed_factor=float(corridor.get("speed_factor", nan)))
+
+
+def corridor_settings(config):
+    """cone_estimator do config -> argumento corridor do RealConeDetector (None desliga)."""
+    value = config.get("cone_estimator", True)
+    if value in (None, False):
+        return None
+    if value is True:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("cone_estimator deve ser True, False ou um dicionario de ajustes.")
+    # A pose do Car e do eixo traseiro; os cones tem origem no eixo dianteiro.
+    return {"pose_offset_m": float(config.get("wheelbase", 0.36)), **value}
 
 
 def cone_calibration_warnings(calibration, detector):
@@ -269,10 +300,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
     mode = config.get("navigation_mode", "cones")
     if mode == "cones":
+        corridor = corridor_settings(config)
         detector = RealConeDetector(
             calibration, settings=config.get("cone_settings"), render_preview=False,
             processing_width=config.get("vision_width", 0),
-            classifier=config.get("cone_classifier"),
+            classifier=config.get("cone_classifier"), corridor=corridor,
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -283,6 +315,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         # apenas continua a trajetoria ja identificada, com a vref em rampa.
         config["line_loss_frames"] = config.get("cone_loss_frames", 6)
         config["line_loss_tolerance"] = config.get("cone_loss_tolerance", 0.6)
+        if corridor is not None:
+            # O estimador ja segue a memoria por ate memory_m; a tolerancia do
+            # Stanley so cobre quadros sem visao, sem somar outro trecho as cegas.
+            config["line_loss_frames"] = min(config["line_loss_frames"], 2)
+            config["line_loss_tolerance"] = min(config["line_loss_tolerance"], 0.3)
         config["line_search_rate_deg_s"] = 0.
         config["loss_speed_ramp"] = True
         config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
@@ -323,7 +360,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         if mode == "cones":
             detector_kwargs = dict(settings=config.get("cone_settings"),
                                    processing_width=config.get("vision_width", 0),
-                                   classifier=config.get("cone_classifier"))
+                                   classifier=config.get("cone_classifier"),
+                                   corridor=corridor_settings(config))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -494,7 +532,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                         cone_green_left=float(sides["green_left"]) if "green_left" in sides else float("nan"),
                         cone_estimated=float(bool(debug.get("estimated"))),
                         cone_branch=float(bool(debug.get("branch"))),
-                        cone_segment=float("nan") if segment is None else float(segment))
+                        cone_segment=float("nan") if segment is None else float(segment),
+                        **corridor_log(debug.get("corridor")))
             if recorder is not None and observation is not None:
                 recorder.record(observation, dict(
                     {"active": False} if manual else follower.last_state, status=control_status, manual=bool(manual),
@@ -654,6 +693,8 @@ def main():
     )
     parser.add_argument("--classifier", metavar="MODELO.onnx",
                         help="Rede que confirma os cones (com o .json ao lado); 'none' desliga")
+    parser.add_argument("--no-estimator", action="store_true",
+                        help="Cones: erros pelo ajuste quadro a quadro, sem o estimador do corredor")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
@@ -681,6 +722,8 @@ def main():
         settings["camera_calibration_file"] = args.calibration
     if args.classifier:
         settings["cone_classifier"] = None if args.classifier.lower() == "none" else args.classifier
+    if args.no_estimator:
+        settings["cone_estimator"] = False
 
     def interrupt_mission(_signum, _frame):
         # A GUI remota encerra com SIGTERM. Usa o mesmo finally do Ctrl+C.

@@ -34,6 +34,7 @@ class LineObservation:
     sequence: int = 0
     reference_source: str = "line"
     speed_limit: float = math.inf  # Teto opcional da referencia visual, em m/s.
+    speed_factor: float = 1.  # Fracao da vref pela confianca da referencia (estimador de cones).
 
     @property
     def valid(self):
@@ -483,6 +484,7 @@ class RealStanleyFollower:
         self.line_memory = None
         self.line_seen_at = None
         self.line_speed_limit = math.inf
+        self.line_speed_factor = 1.
         self.curvature = None
         self.curvature_at = None
         self.speed_target = None
@@ -616,6 +618,9 @@ class RealStanleyFollower:
         if line_seen:
             self.line_memory, self.line_seen_at = errors, float(now)
             self.line_speed_limit = speed_limit
+            factor = getattr(observation, 'speed_factor', 1.)
+            self.line_speed_factor = (float(np.clip(factor, 0., 1.))
+                                      if isinstance(factor, (int, float, np.number)) and math.isfinite(factor) else 1.)
             self.search_direction = None
         elif (self.line_memory is not None and finite_sample
                 and isinstance(now, (int, float, np.number)) and math.isfinite(now)):
@@ -662,6 +667,10 @@ class RealStanleyFollower:
                 ramped = max(min(self.min_speed, speed_raw), (1.-progress)*speed_raw + progress*self.min_speed)
                 self.hold_speed_factor = ramped/speed_raw if speed_raw > 0 else 1.
                 speed_raw = ramped
+            if self.line_speed_factor < 1.:
+                # Uma borda so ou memoria: menos certeza, menos velocidade (sem
+                # descer abaixo do minimo operacional).
+                speed_raw = max(min(self.min_speed, speed_raw), speed_raw*self.line_speed_factor)
             limit = min(speed_limit, self.line_speed_limit)
             speed_raw = min(speed_raw, limit)
             car.set_vel(min(self._filter_speed(speed_raw, car.dt), limit))
@@ -753,6 +762,7 @@ class RealStanleyFollower:
             active=bool(active), hold=bool(holding and active), outlier=bool(outlier),
             lost_frames=lost_frames, lost_s=lost_for, line_seen=bool(line_seen),
             hold_speed_factor=self.hold_speed_factor if active else invalid,
+            reference_speed_factor=self.line_speed_factor if active else invalid,
             speed_target=speed_raw, vref=float(car.vref), steer_rad=steer,
             cross_track_m=lateral, heading_rad=heading, curvature_m_inv=curvature,
             compensated_s=compensated, status=self.status)

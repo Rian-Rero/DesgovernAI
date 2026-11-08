@@ -10,9 +10,12 @@ import time
 import cv2
 import numpy as np
 
+from .corridor import CorridorEstimator, CorridorSettings, sample_centerline
 from .lateral import GroundCalibration, LineObservation, fit_line_errors
 from tools.cone_classifier import load_classifier
+from tools.cone_geometry import image_homography
 from tools.cone_path import ConePathDetector, ConeSettings, render_cones
+from tools.cone_tracking import transform_points
 
 
 CONE_RECOVERY_SPEED = .35  # m/s
@@ -33,6 +36,7 @@ class ConeObservation(LineObservation):
     corridor_width_m: float = math.nan
     cone_result: object = None
     cone_settings: object = None
+    corridor: object = None   # CorridorEstimate do quadro (estimador ligado)
     debug: dict | None = None  # Detalhes serializaveis do quadro (cones_debug.jsonl).
 
 
@@ -40,8 +44,12 @@ class ConeObservation(LineObservation):
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
-                 classifier=None):
+                 classifier=None, corridor=None):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
+
+        corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
+        ajuste quadro a quadro; True ou dicionario de CorridorSettings liga o
+        filtro, que passa a dar os erros do Stanley.
 
         Com classificador, os ajustes de cor usados para gerar o conjunto de
         treino (candidate_settings do .json) valem por padrao; chaves dadas
@@ -90,6 +98,14 @@ class RealConeDetector:
         # cones entre quadros; sem ela, o detector usa fluxo optico no piso.
         self.odometry = odometry
         self.last_timestamp = None
+        self.corridor = None
+        if corridor not in (None, False):
+            corridor_settings = CorridorSettings.from_value(
+                corridor, track_width_m=self.settings.track_width_cm/100,
+                max_range_m=min(3., self.settings.max_range_cm/100))
+            self.corridor = CorridorEstimator(
+                corridor_settings, image_homography(calibration, self.processing_size[::-1]),
+                pixel_scale=self.processing_size[0]/w)
 
     def observe_frame(self, frame, timestamp):
         metadata = dict(processing_size=self.processing_size)
@@ -139,24 +155,57 @@ class RealConeDetector:
                     recovery = errors is not None
             except (ValueError, np.linalg.LinAlgError, FloatingPointError):
                 pass
-        metadata['geometry_seconds'] = time.perf_counter()-started
         valid = errors is not None and np.all(np.isfinite(errors))
         reason = result.status if valid or not result.valid else 'Cones sem cobertura metrica junto ao eixo dianteiro'
         if valid and recovery and not result.recovery:
             reason = 'Recuperacao de centro por trecho distante de cones'
+        legacy = [round(float(e), 4) for e in errors] if valid else None
+        estimate = None
+        speed_factor = 1.
+        if self.corridor is not None:
+            estimate = self._corridor_step(result, timestamp, motion)
+            valid = estimate.valid
+            errors = estimate.errors
+            recovery = estimate.slow
+            reason = estimate.reason
+            speed_factor = estimate.speed_factor if valid else 1.
+            metadata['corridor'] = estimate
+        metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
+        if estimate is not None:
+            debug.update(corridor=estimate.debug(), legacy_errors=legacy)
         debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
                      recovery=bool(valid and recovery),
                      confidence=round(float(result.confidence), 3), branch=bool(result.branch),
                      detection_s=round(metadata['detection_seconds'], 4),
                      geometry_s=round(metadata['geometry_seconds'], 4),
                      stanley_errors=[round(float(e), 4) for e in errors] if valid else None)
+        if estimate is not None:
+            width = estimate.width_m if valid else math.nan
+        else:
+            width = result.corridor_width_m if valid else math.nan
         observation = ConeObservation(timestamp,
             errors=tuple(float(e) for e in errors) if valid else None,
             speed_limit=CONE_RECOVERY_SPEED if valid and recovery else math.inf,
-            reason=reason, debug=debug,
-            corridor_width_m=result.corridor_width_m if valid else math.nan, **metadata)
+            speed_factor=speed_factor, reason=reason, debug=debug,
+            corridor_width_m=width, **metadata)
         return self.with_preview(observation) if self.render_preview else observation
+
+    def _corridor_step(self, result, timestamp, motion):
+        """Cones deste quadro (ja confirmados pelo classificador) -> estimador."""
+        homography = self.corridor.homography
+        green_left = self.green_left if result.green_left is None else bool(result.green_left)
+        ground = {}
+        for color, points in (('green', result.green_points), ('red', result.red_points)):
+            mapped = transform_points(points, homography) if len(points) else np.empty((0, 2))
+            ground[color] = mapped[np.all(np.isfinite(mapped), axis=1)]
+        left, right = (ground['green'], ground['red']) if green_left else (ground['red'], ground['green'])
+        pose_frame = motion is not None
+        if motion is None:
+            # Sem odometria: o deslocamento estimado pelo fluxo optico do piso,
+            # ja no referencial dos cones.
+            motion = (result.debug.get('tracking') or {}).get('motion_m')
+        return self.corridor.step(float(timestamp), left, right, motion, pose_frame)
 
     def preview_bgr(self, observation):
         if observation is None or observation.source_frame is None:
@@ -164,7 +213,29 @@ class RealConeDetector:
         source = cv2.resize(observation.source_frame, self.processing_size)
         if observation.cone_result is None:
             return source
-        return render_cones(source, observation.cone_result, observation.cone_settings)
+        image = render_cones(source, observation.cone_result, observation.cone_settings)
+        estimate = getattr(observation, 'corridor', None)
+        if estimate is not None and estimate.state_vector is not None and self.corridor is not None:
+            # Corredor do estimador: bordas em ciano, centro branco (tracejado sem validade).
+            inverse = np.linalg.inv(self.corridor.homography)
+            arcs = np.linspace(0., 3., 31)
+            vector = estimate.state_vector
+            for offset, color in ((vector[4]/2, (255, 255, 0)), (-vector[4]/2, (255, 255, 0)), (0., (255, 255, 255))):
+                ground = sample_centerline(vector, arcs, offset)
+                ground = ground[ground[:, 0] > .3]
+                pixels = transform_points(ground, inverse)
+                pixels = pixels[np.all(np.isfinite(pixels) & (np.abs(pixels) < 1e4), axis=1)]
+                if len(pixels) < 2:
+                    continue
+                pixels = pixels.round().astype(np.int32)
+                if estimate.valid:
+                    cv2.polylines(image, [pixels], False, color, 2, cv2.LINE_AA)
+                else:
+                    for start in range(0, len(pixels)-1, 4):
+                        cv2.polylines(image, [pixels[start:start+2]], False, color, 1, cv2.LINE_AA)
+            cv2.putText(image, estimate.state, (6, image.shape[0]-8), cv2.FONT_HERSHEY_SIMPLEX, .5,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+        return image
 
     def with_preview(self, observation):
         if observation is None or observation.frame is not None:
