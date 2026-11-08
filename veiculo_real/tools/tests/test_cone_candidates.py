@@ -106,6 +106,43 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(len(calibrated.red_points), 1)
         self.assertEqual(len(plain.red_points), 0)
 
+    def test_lab_lookup_table_matches_direct_computation(self):
+        # A tabela (a*, b*) substitui cartToPolar por quadro: mesmo resultado.
+        rng = np.random.default_rng(3)
+        frame = rng.integers(0, 256, (480, 640, 3), dtype=np.uint8)
+        settings = ConeSettings(green_chroma_min=6)
+        green, red = ConePathDetector().segment(frame, settings, 200)
+        region = cv2.medianBlur(frame[200:], 3)
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
+        magnitude, angle = cv2.cartToPolar(lab[:, :, 1].astype(np.float32)-128,
+                                           lab[:, :, 2].astype(np.float32)-128, angleInDegrees=True)
+        green_c = (angle >= settings.green_angle_low) & (angle <= settings.green_angle_high) & (magnitude >= 6)
+        red_c = ((angle >= settings.red_angle_low) | (angle <= settings.red_angle_high)) & (magnitude >= 12)
+        strong_g = (cv2.inRange(hsv, (settings.green_h_min, settings.s_min, settings.v_min),
+                                (settings.green_h_max, 255, 255)) > 0) & green_c
+        strong_r = ((cv2.inRange(hsv, (0, settings.red_s_min, settings.red_v_min), (settings.red_hue, 255, 255))
+                     | cv2.inRange(hsv, (179-settings.red_hue, settings.red_s_min, settings.red_v_min),
+                                   (179, 255, 255))) > 0) & red_c
+        # Pixels fortes sempre sobrevivem a histerese e ao fechamento.
+        self.assertTrue(np.all(green[200:][strong_g]))
+        self.assertTrue(np.all(red[200:][strong_r]))
+
+    def test_cone_cut_by_image_side_keeps_its_base(self):
+        frame = np.full((480, 640, 3), 35, np.uint8)
+        u, v = floor_pixel(1.0, .4)
+        # Cone de 20 x 15 cm a 1 m (~20 x 15 px) com metade esquerda fora da imagem.
+        triangle(frame, 3, v, 20, 7, (0, 220, 0))
+        triangle(frame, u, v, 20, 7, (0, 220, 0))
+        result = self.detect(frame)
+        bases = sorted(np.round(result.green_points).astype(int).tolist())
+        self.assertEqual(len(bases), 2, bases)
+        self.assertLessEqual(abs(bases[0][1]-v), 1)
+        self.assertLessEqual(abs(bases[0][0]-3), 4)  # centro estimado pela meia base
+        cut = self.detect(frame, ConeSettings(tracking=False, partial_cones=False))
+        self.assertEqual(len(cut.green_points), 1)
+        self.assertEqual(cut.debug['detection']['green']['rejected'].get('cortado_borda'), 1)
+
     def test_cone_glued_to_wall_noise_is_recovered(self):
         frame = np.full((480, 640, 3), (160, 170, 175), np.uint8)
         cone = hsv_bgr(176, 168, 105)

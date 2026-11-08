@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compara larguras de processamento em uma foto, sem abrir camera ou motores."""
+"""Compara larguras de processamento em uma foto, sem abrir camera ou motores.
+
+--cones mede o detector de cones (modo padrao do carro). Rode no Raspberry com
+a vision_camera.jpg de um ensaio: se o tempo aqui for bem menor que o
+detection_s do log, a diferenca e disputa de CPU/GIL com as outras threads.
+"""
 import argparse
 import json
 from pathlib import Path
@@ -10,6 +15,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from fva_car.cones import RealConeDetector
 from fva_car.lateral import GroundCalibration, RealLineDetector
 from main import parameters
 
@@ -21,6 +27,7 @@ def main(argv=None):
     parser.add_argument('--widths', type=int, nargs='+', default=[0, 480, 320],
                         help='0 usa a resolucao calibrada; padrao: 0 480 320')
     parser.add_argument('--iterations', type=int, default=20)
+    parser.add_argument('--cones', action='store_true', help='detector de cones em vez da linha amarela')
     args = parser.parse_args(argv)
     if args.iterations < 1:
         parser.error('--iterations deve ser positivo')
@@ -32,9 +39,13 @@ def main(argv=None):
         calibration = GroundCalibration.from_file(args.calibration)
         if frame.shape[1::-1] != calibration.image_size:
             raise ValueError('A imagem deve ter a resolucao original da calibracao.')
-        detectors = [RealLineDetector(calibration, path_settings=parameters['path_settings'],
-                                     anchor=parameters['path_anchor'], render_preview=False,
-                                     processing_width=width) for width in args.widths]
+        if args.cones:
+            detectors = [RealConeDetector(calibration, settings=parameters['cone_settings'],
+                                          processing_width=width) for width in args.widths]
+        else:
+            detectors = [RealLineDetector(calibration, path_settings=parameters['path_settings'],
+                                         anchor=parameters['path_anchor'], render_preview=False,
+                                         processing_width=width) for width in args.widths]
     except (OSError, ValueError) as error:
         parser.error(str(error))
     print('Tempo de processamento da foto; nao inclui captura, motores ou demais threads.', flush=True)

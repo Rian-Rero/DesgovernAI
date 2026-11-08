@@ -366,4 +366,91 @@ class RealCarLoggingTests(unittest.TestCase):
         self.assertEqual(saved['line_valid'][1],1.)
 
 
+class fake_car_class:
+    """Troca fva_car.Car (atributo preguicoso do pacote) sem importar drivers.
+
+    patch.dict(sys.modules) apagaria modulos do multiprocessing importados no
+    meio do teste (um segundo resource_tracker); aqui so o atributo muda.
+    """
+    def __init__(self, factory):
+        self.factory = factory
+
+    def __enter__(self):
+        import fva_car
+        self.package = fva_car
+        fva_car.__dict__['Car'] = self.factory
+
+    def __exit__(self, *exc):
+        self.package.__dict__.pop('Car', None)
+
+
+class VisionProcessMissionTests(unittest.TestCase):
+    """Carro real (sem car_factory): camera e detector no processo de visao."""
+    def setUp(self):
+        self.folder=tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        path=Path(self.folder.name)/'camera.json'
+        path.write_text(json.dumps({'image_size':[640,480],
+            'image_points_px':[[160,400],[480,400],[260,200],[380,200]],
+            'ground_points_m':[[.4,.3],[.4,-.3],[1.5,.3],[1.5,-.3]]}))
+        self.settings={'camera_calibration_file':str(path),'ts':3.,'save':False,'navigation_mode':'cones'}
+        self.events=[]
+
+    def fake_vision(self, fail=False):
+        events=self.events
+        test=self
+        class Vision:
+            def __init__(self, vision_data, mode, calibration_file, detector_kwargs, camera_settings=None,
+                         poses=None, **_):
+                test.created=dict(mode=mode, kwargs=detector_kwargs, camera=camera_settings, poses=poses)
+                self.data=vision_data
+                self.process=Mock(pid=123)
+            def start(self):
+                events.append('vision_start')
+                if fail:
+                    raise RuntimeError('Camera/visao: camera nao encontrada')
+                self.data['observation']=mission.LineObservation(timestamp=10.,errors=(.05,0.,0.))
+                return self
+            def is_alive(self):return True
+            def stop(self):events.append('vision_stop')
+        return Vision
+
+    def car_factory(self, config):
+        self.events.append(('car', config['camera']))
+        car=FakeCar(self.events)
+        return car
+
+    def run_real(self, fail=False):
+        with patch.object(mission,'VisionProcess',self.fake_vision(fail)), \
+                fake_car_class(self.car_factory), \
+                patch.object(mission,'RealConeDetector',return_value=Mock()):
+            mission.run_mission(self.settings, clock=lambda:10.)
+
+    def test_camera_opens_in_vision_process_before_motors_and_stops_at_end(self):
+        self.run_real()
+        self.assertEqual(self.events[0],'vision_start')
+        self.assertEqual(self.events[1],('car',False))  # Car nao abre a camera
+        self.assertIn('start',self.events)
+        self.assertEqual(self.events.count('vision_stop'),1)
+        self.assertIsInstance(self.created['poses'],mission.SharedPoseHistory)
+        self.assertEqual(self.created['kwargs']['settings'],mission.parameters['cone_settings'])
+        self.assertTrue(any(e[0]=='speed' for e in self.events if isinstance(e,tuple)))
+        del self.created  # libera o semaforo do historico antes do fim do interpretador
+
+    def test_camera_failure_aborts_before_creating_the_car(self):
+        with self.assertRaisesRegex(RuntimeError,'camera nao encontrada'):
+            self.run_real(fail=True)
+        self.assertEqual(self.events,['vision_start'])
+
+    def test_vision_process_can_be_disabled(self):
+        self.settings['vision_process']=False
+        car=FakeCar(self.events)
+        car.get_image=Mock(return_value=None)
+        with patch.object(mission,'VisionProcess') as factory, \
+                fake_car_class(lambda config:car), \
+                patch.object(mission,'RealConeDetector',return_value=Mock()):
+            mission.run_mission(self.settings, clock=lambda:10.)
+        factory.assert_not_called()
+
+
 if __name__=='__main__':unittest.main()

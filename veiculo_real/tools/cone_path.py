@@ -77,6 +77,10 @@ class ConeSettings:
     # Vermelho saturado puro fica em ~40 graus; HSV H=8 (quase laranja) em 46.
     lab_filter: bool = True
     chroma_min: int = 12      # porta marrom: croma 7-13 (mediana 9); cones: ~29
+    # Verde escuro/azulado na sombra (ensaio de 23/10: croma 4-12, angulo 180-250)
+    # fica abaixo do limite do vermelho; o verde tem limite proprio.
+    green_chroma_min: int = 12
+    partial_cones: bool = True  # Aceita cone cortado so pela lateral, com base visivel.
     red_angle_low: int = 355   # faixa vermelha cruza o zero: 355..360 e 0..47
     red_angle_high: int = 47
     green_angle_low: int = 115  # HSV H=38 (limite verde) ~117 graus
@@ -190,11 +194,14 @@ def _grow(strong, weak):
     if count <= 1:
         return strong
     keep = np.zeros(count, np.uint8)
-    keep[np.unique(labels[strong > 0])] = 255
+    keep[labels[strong > 0]] = 255  # atribuicao repetida dispensa np.unique (ordenacao)
     keep[0] = 0
     return keep[labels]
 
 
+# Base observada / cone_base_cm nos cones do ensaio de 23/10 (vermelhos: ~0,7).
+PARTIAL_BASE_FRACTION = .7
+CLASS_GREEN, CLASS_RED = 1, 4  # bits da tabela de matiz/croma Lab
 STRAIGHT_MAX_CURVATURE = .25  # 1/m (raio 4 m): mesmo limiar de busca do Stanley.
 SIDE_MIN_SEPARATION_M = .15
 BRANCH_DIVERGENCE_M = .3
@@ -394,6 +401,30 @@ class ConePathDetector:
         self._scale_cache = (key, scale)
         return scale
 
+    def _chroma_lut(self, settings):
+        """(a*, b*) do Lab uint8 -> bits CLASS_GREEN/CLASS_RED de matiz e croma.
+
+        Mesmo calculo de antes (cartToPolar em float32), feito uma vez para as
+        65536 combinacoes: por quadro restam um indice uint16 e uma consulta.
+        """
+        key = (settings.chroma_min, settings.green_chroma_min, settings.red_angle_low,
+               settings.red_angle_high, settings.green_angle_low, settings.green_angle_high)
+        cached = getattr(self, '_chroma_cache', None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        a, b = np.meshgrid(np.arange(256, dtype=np.float32) - 128,
+                           np.arange(256, dtype=np.float32) - 128, indexing='ij')
+        magnitude, angle = cv2.cartToPolar(a, b, angleInDegrees=True)
+        low_r, high_r = settings.red_angle_low % 360, settings.red_angle_high % 360
+        red_hue = (((angle >= low_r) | (angle <= high_r)) if low_r > high_r
+                   else ((angle >= low_r) & (angle <= high_r)))
+        green_hue = (angle >= settings.green_angle_low) & (angle <= settings.green_angle_high)
+        lut = ((green_hue & (magnitude >= settings.green_chroma_min)) * np.uint8(CLASS_GREEN)
+               | (red_hue & (magnitude >= settings.chroma_min)) * np.uint8(CLASS_RED)
+               ).astype(np.uint8).reshape(-1)
+        self._chroma_cache = (key, lut)
+        return lut
+
     def segment(self, frame, settings, roi=None):
         height, width = frame.shape[:2]
         roi = int(height * settings.roi_top / 100) if roi is None else roi
@@ -413,26 +444,20 @@ class ConePathDetector:
             return green, red
 
         green, red = hsv_masks(1.)
-        chroma = None
+        green_chroma = red_chroma = None
         if settings.lab_filter:
             lab = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
-            a = lab[:, :, 1].astype(np.float32) - 128
-            b = lab[:, :, 2].astype(np.float32) - 128
-            magnitude, angle = cv2.cartToPolar(a, b, angleInDegrees=True)
-            chroma = magnitude >= settings.chroma_min
-            low_r, high_r = settings.red_angle_low % 360, settings.red_angle_high % 360
-            red_hue = (((angle >= low_r) | (angle <= high_r)) if low_r > high_r
-                       else ((angle >= low_r) & (angle <= high_r)))
-            green_hue = (angle >= settings.green_angle_low) & (angle <= settings.green_angle_high)
-            green_chroma = ((green_hue & chroma) * 255).astype(np.uint8)
-            red_chroma = ((red_hue & chroma) * 255).astype(np.uint8)
+            index = (lab[:, :, 1].astype(np.uint16) << 8) | lab[:, :, 2]
+            classes = np.take(self._chroma_lut(settings), index)
+            green_chroma = cv2.compare(cv2.bitwise_and(classes, CLASS_GREEN), 0, cv2.CMP_GT)
+            red_chroma = cv2.compare(cv2.bitwise_and(classes, CLASS_RED), 0, cv2.CMP_GT)
             green, red = cv2.bitwise_and(green, green_chroma), cv2.bitwise_and(red, red_chroma)
         if settings.hysteresis:
             # Mascara fraca (S/V 40% menores, mesma cromaticidade) so sobrevive
             # quando toca pixels fortes: recupera cones na sombra e distantes
             # sem trazer manchas novas.
             weak = hsv_masks(.6)
-            if chroma is not None:
+            if green_chroma is not None:
                 weak = (cv2.bitwise_and(weak[0], green_chroma), cv2.bitwise_and(weak[1], red_chroma))
             green, red = (_grow(strong, loose) for strong, loose in zip((green, red), weak))
         masks = []
@@ -445,7 +470,7 @@ class ConePathDetector:
 
     @staticmethod
     def _bases(mask, settings, split=True, stats=None, origin=(0, 0), shape=None, roi=None, scale=None,
-               size_check=False):
+               size_check=False, _tables=None):
         """stats opcional: conta componentes rejeitados por motivo (sem custo por pixel).
 
         origin/shape: mask e um recorte em (x, y) de uma imagem com shape (h, w).
@@ -462,16 +487,26 @@ class ConePathDetector:
         bases = []
         min_area = settings.min_area * height * width / (640 * 480)
         cone_h, cone_w = settings.cone_height_cm/100, settings.cone_base_cm/100
+        if _tables is None:
+            # (px/m, area minima) por linha da imagem, calculados uma vez por
+            # mascara: antes np.clip por componente custava ~10% da deteccao.
+            if scale is None:
+                px_rows = np.full(height, math.nan)
+            else:
+                px_rows = np.asarray(scale, float)
+                px_rows = np.where(np.isfinite(px_rows) & (px_rows > 0), px_rows, math.nan)
+            with np.errstate(invalid='ignore'):
+                # Cones longe sao pequenos: a area minima acompanha o tamanho esperado.
+                min_rows = np.maximum(4., np.minimum(min_area, .25*.5*cone_h*cone_w*px_rows*px_rows))
+            min_rows = np.where(np.isfinite(px_rows), min_rows, min_area)
+            _tables = (px_rows, min_rows, px_rows.tolist(), min_rows.tolist())
+        px_rows, min_rows, px_list, min_list = _tables
+        last_row = len(px_list)-1
 
         def expected(bottom):
             """(px/m, area minima) para um cone com base na linha bottom."""
-            if scale is None:
-                return math.nan, min_area
-            px = float(scale[int(np.clip(bottom, 0, len(scale)-1))])
-            if not math.isfinite(px) or px <= 0:
-                return math.nan, min_area
-            # Cones longe sao pequenos: a area minima acompanha o tamanho esperado.
-            return px, max(4., min(min_area, .25*.5*cone_h*cone_w*px*px))
+            row = min(max(int(bottom), 0), last_row)
+            return px_list[row], min_list[row]
 
         reason = [None]
         def contact(component, x, y):
@@ -500,16 +535,30 @@ class ConePathDetector:
                 return None
             # Exige contato inteiro no piso, mesmo ao recuperar uma regiao unida.
             foot = np.flatnonzero(np.any(component[-max(2, h//10):], axis=0))
+            at_left, at_right = x+foot.min() <= 0, x+foot.max() >= width-1
+            # Cone proximo cortado so pela lateral da imagem: a base (linha de
+            # baixo) e vista e a altura confirma o tamanho. Eram os cones mais
+            # proximos, descartados como "tamanho"/"cortado_borda" (23/10).
+            partial = (settings.partial_cones and (at_left != at_right) and math.isfinite(px)
+                       and y > roi and y+h < height and h >= .6*cone_h*px)
             if size_check and math.isfinite(px):
                 # Tamanho metrico: base ~cone_base_cm e altura ~cone_height_cm.
-                foot_m = (foot.max()-foot.min()+1)/px
-                if not .4*cone_w <= foot_m <= 2.2*cone_w or not .3*cone_h*px <= h <= 2.5*cone_h*px:
+                # Largura pelo terco inferior: as 2 linhas de baixo de um cone na
+                # sombra sao finas e recusavam cones reais.
+                lower = np.flatnonzero(np.any(component[-max(2, h//3):], axis=0))
+                foot_m = (lower.max()-lower.min()+1)/px
+                foot_ok = foot_m <= 2.2*cone_w and (partial or foot_m >= .4*cone_w)
+                if not foot_ok or not .3*cone_h*px <= h <= 2.5*cone_h*px:
                     reason[0] = reason[0] or "tamanho"
                     return None
-            if (x+foot.min() <= 0 or x+foot.max() >= width-1
-                    or y <= roi or y+h >= height):
+            if (at_left or at_right) and not partial or y <= roi or y+h >= height:
                 reason[0] = reason[0] or "cortado_borda"
                 return None
+            if partial:
+                # Centro da base estimado pela borda visivel e meia base esperada.
+                half = .5*cone_w*px*PARTIAL_BASE_FRACTION
+                visible = x+foot.max()-half if at_left else x+foot.min()+half
+                return float(visible), float(y+h-1)
             if not .18 <= w/h <= 1.5 or w > .2*width:
                 reason[0] = reason[0] or "proporcao"
                 return None
@@ -523,18 +572,26 @@ class ConePathDetector:
                 return None
             return x+float(np.mean(foot)), float(y+h-1)
 
-        for label in range(1, count):
-            x, y, w, h, area = component_stats[label]
+        # Filtro vetorizado antes do laco em Python: a maioria das componentes
+        # e ruido (centenas de "pequeno" por ensaio) e nao chega a contact().
+        blobs = component_stats[1:]
+        bottoms = np.clip(blobs[:, 1]+blobs[:, 3]-1+oy, 0, last_row)
+        small = blobs[:, 4] < min_rows[bottoms]
+        # Blob que toca a linha da ROI segue: o cone pode estar na parte de
+        # baixo, unido a parede/porta (ensaio real), e a separacao o recupera.
+        cut = blobs[:, 1]+oy+blobs[:, 3] >= height
+        # Menos de 4 linhas ou 3 colunas: contact() recusaria e nao ha o que separar.
+        tiny = (blobs[:, 3] < 4) | (blobs[:, 2] < 3)
+        if stats is not None:
+            for key, flags in (("pequeno", small | (tiny & ~cut)), ("cortado_borda", cut & ~small)):
+                total = int(np.count_nonzero(flags))
+                if total:
+                    stats[key] = stats.get(key, 0) + total
+        for label in (np.flatnonzero(~(small | cut | tiny)) + 1).tolist():
+            x, y, w, h, area = component_stats[label].tolist()
             component = labels[y:y+h, x:x+w] == label
             x, y = x+ox, y+oy
             local_min = expected(y+h-1)[1]
-            # Blob que toca a linha da ROI segue: o cone pode estar na parte de
-            # baixo, unido a parede/porta (ensaio real), e a separacao o recupera.
-            if area < local_min or y+h >= height:
-                if stats is not None:
-                    key = "pequeno" if area < local_min else "cortado_borda"
-                    stats[key] = stats.get(key, 0) + 1
-                continue
             reason[0] = None
             base = contact(component, x, y)
             first_reason = reason[0]
@@ -563,11 +620,20 @@ class ConePathDetector:
                 # restaurado separadamente e limitado a cor realmente observada.
                 # A dilatacao conjunta voltaria a fundir os cones.
                 local = component.astype(np.uint8)
+                # Erosao por quadrado de lado 2r+1 == distancia de tabuleiro > r:
+                # uma transformada de distancia serve aos 8 niveis (antes: 8 pad+erode).
+                depth = cv2.distanceTransform(np.pad(local, 1), cv2.DIST_C, 3)[1:-1, 1:-1]
+                previous = -1
                 for nominal in (3, 5, 7, 9, 11, 13, 15, 17):
                     size = max(3, int(round(nominal*height/480)) | 1)
                     kernel = np.ones((size, size), np.uint8)
-                    padded = np.pad(local, size)
-                    eroded = cv2.erode(padded, kernel)
+                    eroded = (depth > size//2).astype(np.uint8)
+                    remaining = int(np.count_nonzero(eroded))
+                    if remaining < max(4, local_min*.2):
+                        break  # niveis maiores so encolhem os nucleos: nenhum seria elegivel
+                    if remaining == previous:
+                        continue  # mesmos nucleos do nivel anterior: mesmos candidatos
+                    previous = remaining
                     n, cores, core_stats, _ = cv2.connectedComponentsWithStats(eroded, 8)
                     eligible = [i for i in range(1, n) if core_stats[i, -1] >= max(4, local_min*.2)]
                     # Sem base, um unico nucleo basta: cone preso a um ruido fino.
@@ -575,11 +641,10 @@ class ConePathDetector:
                         continue
                     candidates = []
                     for i in eligible:
-                        restored = cv2.dilate((cores == i).astype(np.uint8), kernel)
-                        restored = restored[size:size+h, size:size+w] & local
+                        restored = cv2.dilate((cores == i).astype(np.uint8), kernel) & local
                         candidates.extend(ConePathDetector._bases(
                             restored*255, settings, split=False, origin=(x, y), shape=(height, width),
-                            roi=roi, scale=scale, size_check=size_check))
+                            roi=roi, scale=scale, size_check=size_check, _tables=_tables))
                     if len(candidates) > len(recovered):
                         recovered = candidates
                 if len(recovered) >= (1 if base is None else 2):

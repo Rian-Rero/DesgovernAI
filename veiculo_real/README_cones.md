@@ -135,6 +135,12 @@ Em `main.py`, `cone_settings` permite ajustar:
 - `red_hue`: largura das faixas vermelhas nos extremos de H (padrão 18).
 - `s_min` / `v_min`: mínimos de saturação e brilho do verde (65 e 45).
 - `red_s_min` / `red_v_min`: mínimos próprios para vermelho escuro (45 e 35).
+- `chroma_min` / `green_chroma_min`: croma Lab mínimo do vermelho e do verde (12 e 12).
+  O verde-azulado escuro na sombra fica entre 4 e 12. Baixe só o do verde e
+  confira os falsos positivos, porque a porta marrom tem croma entre 7 e 13.
+- `partial_cones`: aceita o cone cortado só pela lateral da imagem quando a base
+  e pelo menos 60% da altura estão visíveis (padrão True). O centro da base é
+  estimado pela borda visível.
 - `min_area`: área mínima na escala 640×480 (28 pixels).
 - `min_span` / `max_gap`: extensão e continuidade das bordas na imagem.
 - `min_width_cm` / `max_width_cm`: largura admissível (40–500 cm).
@@ -152,8 +158,51 @@ Os campos são os de `ConeSettings` da interface HSV. Com `auto_sides`,
 H usa 0–179; S e V usam 0–255. Ajuste a segmentação conforme a iluminação.
 A detecção por cor pode confundir objetos vermelhos/verdes com cones; esta
 implementação ainda precisa ser validada com imagens e ensaios do veículo real.
-Cones cortados nas bordas da imagem são descartados por não fornecerem uma base
-confiável. Cones com faixa branca devem manter a parte colorida inferior visível.
+Cones cortados na base (borda inferior da imagem) são descartados. Os cortados só
+pela lateral são aceitos com `partial_cones`. Cones com faixa branca devem manter
+a parte colorida inferior visível.
+
+## Visão em processo separado
+
+No carro real (`vision_process: True`, padrão), a câmera e o detector rodam
+num processo próprio, que é outro interpretador Python em outro núcleo. O
+processo principal fica com o laço de controle a 50 Hz, o log e o stream. Num
+processo só, os dois disputavam o GIL. Num teste com o controle ocupando 60%
+de um núcleo, a detecção inflava de ~10 para 35 ms em thread e ficava em
+~11 ms em processo.
+
+- A câmera abre no processo de visão **antes** dos motores. Se ela falhar, a
+  missão para com `Camera/visao: ...` sem mover o carro.
+- A odometria chega ao detector por um histórico de poses em memória
+  compartilhada (`SharedPoseHistory`).
+- Cada quadro volta ao controle pronto, com a imagem original para o debug e
+  o stream. As máscaras não são enviadas: ~0,9 MB e ~0,3 ms por quadro.
+- Se o processo de visão morrer, o controle neutraliza o carro e encerra,
+  como antes acontecia com a thread.
+- `vision_process: False` volta às threads no mesmo processo. Um carro injetado
+  (testes e simulação) sempre usa threads.
+
+## Câmera: exposição e balanço de branco
+
+Com exposição automática, a câmera escurece ou clareia conforme o que aparece
+na imagem. Num corredor escuro, isso também reduz o fps. Fixar a imagem deixa
+as cores dos cones estáveis entre quadros. No Raspberry, com o carro parado na
+pista:
+
+```sh
+sudo apt install v4l-utils   # uma vez
+python3 veiculo_real/tools/ajustar_camera.py
+```
+
+A ferramenta testa várias exposições e mostra fps, brilho, área estourada e
+saturação dos cones. Ela salva uma foto por ajuste em `ajuste_camera/` e imprime
+a linha para colar em `main.py`, por exemplo
+`"camera_settings": {"fourcc": "MJPG", "exposure": 150, "auto_wb": False}`.
+Com `camera_settings` vazio, a câmera fica no modo automático, como antes.
+
+Para separar o custo do detector da disputa com as demais threads, rode no Pi
+`python3 veiculo_real/tools/benchmark_visao.py --cones --image logs/<ensaio>/vision_camera.jpg`
+e compare com o `detection_s` do log.
 
 Os logs acrescentam `cone_red_count`, `cone_green_count`, `corridor_width_m`,
 `cone_green_left`, `cone_estimated`, `cone_branch`, `cone_segment` (0 reta,

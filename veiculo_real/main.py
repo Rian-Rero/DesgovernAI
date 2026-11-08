@@ -2,7 +2,6 @@
 """Stanley no veiculo real: linha amarela ou centro de cones pela camera."""
 
 import argparse
-from dataclasses import replace
 import json
 from pathlib import Path
 import queue
@@ -16,7 +15,8 @@ import cv2
 
 from fva_car.cone_debug import ConeDebugRecorder
 from fva_car.cones import RealConeDetector
-from fva_car.odometry import PoseHistory
+from fva_car.odometry import PoseHistory, SharedPoseHistory
+from fva_car.vision_process import VisionProcess, capture_func, vision_func  # noqa: F401
 from fva_car.lateral import (
     GroundCalibration,
     LineObservation,
@@ -102,6 +102,9 @@ parameters = {
     # Coleta para rotular/avaliar (tools/rotular_cones.py): quadros originais em
     # logs/<ensaio>/frames/ a esta taxa (Hz). 0 desliga; nao usar na prova.
     "record_frames_hz": 0.0,
+    # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
+    # com o controle a 50 Hz). False volta as threads no mesmo processo.
+    "vision_process": True,
     "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
@@ -141,73 +144,6 @@ def stop_vehicle(car):
     car.vel_error_integral = 0.0
     car.set_u(0.0)
     car.set_steer(0.0)
-
-
-def capture_func(car, frames, stop_event, clock=time.monotonic):
-    """Captura continuamente; a fila guarda somente o frame mais recente."""
-    while not stop_event.is_set():
-        captured_at = clock()
-        error = None
-        try:
-            frame = car.get_image(gray=False)
-        except Exception as failure:
-            frame, error = None, str(failure)
-        sample = (frame, captured_at, clock() - captured_at, error)
-        try:
-            frames.put_nowait(sample)
-        except queue.Full:
-            try:
-                frames.get_nowait()
-            except queue.Empty:
-                pass
-            frames.put_nowait(sample)
-        if error is not None:
-            return
-        if frame is None:
-            stop_event.wait(0.02)
-
-
-def vision_func(
-    car, vision_data, stop_event, detector, clock=time.monotonic, frames=None
-):
-    """Apenas percebe; a thread principal e a unica que envia comandos."""
-    sequence = 0
-    while not stop_event.is_set():
-        if frames is not None:
-            try:
-                frame, captured_at, capture_seconds, capture_error = frames.get(
-                    timeout=0.1
-                )
-            except queue.Empty:
-                continue
-        else:
-            captured_at = clock()
-            capture_seconds, capture_error = float("nan"), None
-        try:
-            if capture_error is not None:
-                raise RuntimeError(capture_error)
-            if frames is None:
-                frame = car.get_image(gray=False)  # a Camera real entrega BGR
-                capture_seconds = clock() - captured_at
-            processing_at = clock()
-            observation = detector.observe_frame(frame, captured_at)
-            sequence += 1
-            observation = replace(
-                observation,
-                capture_seconds=capture_seconds,
-                processing_seconds=clock() - processing_at,
-                sequence=sequence,
-            )
-        except Exception as error:
-            vision_data["observation"] = LineObservation(
-                timestamp=captured_at, reason=f"Falha de visao: {error}"
-            )
-            print(f"Visao interrompida: {error}", flush=True)
-            return
-        # Erros, imagem e horario pertencem ao mesmo frame.
-        vision_data["observation"] = observation
-        if frame is None:
-            stop_event.wait(0.02)
 
 
 def save_vision_snapshot(car, observation, status, now):
@@ -364,13 +300,46 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             lambda observation, lines: render_stream_frame(detector, observation, lines),
             port=config["stream_port"],
         )
+    vision_data = {"observation": None}
+    # Carro real: camera e detector em outro processo, fora do GIL do laco de
+    # controle. Um carro injetado (testes, simulacao) fornece as proprias
+    # imagens por get_image(), entao a visao continua em threads.
+    use_process = bool(config.get("vision_process", True)) and car_factory is None
+    poses = None
+    if mode == "cones":
+        # A visao leva o mapa de cones pela odometria registrada pelo controle.
+        poses = SharedPoseHistory() if use_process else PoseHistory()
+        if not use_process:
+            detector.odometry = poses
+    vision = None
+    if use_process:
+        if mode == "cones":
+            detector_kwargs = dict(settings=config.get("cone_settings"),
+                                   processing_width=config.get("vision_width", 0))
+        else:
+            detector_kwargs = dict(path_settings=config.get("path_settings", {}),
+                                   anchor=config.get("path_anchor", 0.5),
+                                   processing_width=config.get("vision_width", 0))
+        vision = VisionProcess(vision_data, mode, config["camera_calibration_file"], detector_kwargs,
+                               camera_settings=config.get("camera_settings") or {}, poses=poses)
+        try:
+            # Abre a camera antes dos motores: falha cedo sem mover o carro.
+            vision.start()
+        except BaseException:
+            if stream is not None:
+                stream.close()
+            raise
+        print(f"Visao: processo separado (pid {vision.process.pid})", flush=True)
     if car_factory is None:
         from fva_car import Car
 
         car_factory = Car
     try:
-        car = car_factory(config)
+        # Com a visao em processo, a camera pertence a ele, nao ao Car.
+        car = car_factory(dict(config, camera=False) if use_process else config)
     except BaseException:
+        if vision is not None:
+            vision.stop()
         if stream is not None:
             stream.close()
         raise
@@ -385,11 +354,6 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             recorder.notes["calibration_warnings"] = calibration_warnings
         except OSError as error:
             print(f"Debug de cones desativado: {error}", flush=True)
-    poses = None
-    if mode == "cones":
-        poses = PoseHistory()
-        detector.odometry = poses  # a visao leva o mapa de cones pela odometria
-    vision_data = {"observation": None}
     stop_event = threading.Event()
     frames = queue.Queue(maxsize=1)
     thread_vision = None
@@ -416,21 +380,22 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         print(
             f"Direcao: filtro de {config['steering_filter_size']} amostras", flush=True
         )
-        thread_capture = threading.Thread(
-            target=capture_func,
-            args=(car, frames, stop_event, clock),
-            daemon=True,
-            name="captura-camera",
-        )
-        thread_capture.start()
-        thread_vision = threading.Thread(
-            target=vision_func,
-            args=(car, vision_data, stop_event, detector, clock),
-            kwargs={"frames": frames},
-            daemon=True,
-            name="linha-hsv",
-        )
-        thread_vision.start()
+        if vision is None:
+            thread_capture = threading.Thread(
+                target=capture_func,
+                args=(car, frames, stop_event, clock),
+                daemon=True,
+                name="captura-camera",
+            )
+            thread_capture.start()
+            thread_vision = threading.Thread(
+                target=vision_func,
+                args=(car, vision_data, stop_event, detector, clock),
+                kwargs={"frames": frames},
+                daemon=True,
+                name="linha-hsv",
+            )
+            thread_vision.start()
         if stream is not None:
             stream.start()
             print(
@@ -536,9 +501,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 stream.publish(observation, stream_text(car, control_status, observation))
             now = clock()
             last_control_at = now
-            if not thread_vision.is_alive():
+            if not (vision.is_alive() if vision is not None else thread_vision.is_alive()):
                 stop_vehicle(car)
-                print("Thread de visao encerrada; missao interrompida.", flush=True)
+                print("Visao encerrada; missao interrompida.", flush=True)
                 break
             if now - t_diagnostic >= 1.0:
                 timing = ""
@@ -597,6 +562,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 stream.close()
             if recorder is not None:
                 recorder.close()
+            if vision is not None:
+                vision.stop()
             if thread_vision is not None:
                 thread_vision.join(timeout=1.0)
             if thread_capture is not None:

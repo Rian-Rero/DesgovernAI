@@ -195,3 +195,36 @@ v_alvo     = clamp(min(v_set, v_curva, v_conf, v_erro), v_min, v_set)
 2. A câmera pode ser inclinada para baixo, ou a montagem é fixa pela prova?
 3. Por que a IMU foi comentada (`1ae7dc0`)? Falha de hardware ou ruído? O giroscópio é importante para o mapa.
 4. As cores podem **realmente** trocar de lado no meio da pista, ou isso só acontece entre provas? Se for só entre provas, fixar cor ↔ lado no início simplifica muito.
+
+---
+
+## 6. Visão: o que já foi feito e próximos passos (revisão de 08/11)
+
+**Feito** (resultado medido em 154 quadros reais dos ensaios E1/E2):
+- Segmentação: a tabela (a\*, b\*) → matiz/croma Lab substitui `cartToPolar` em float, e `_grow` não usa mais `np.unique`. O resultado é **idêntico** e 23% mais rápido.
+- `_bases`: filtro vetorizado das manchas, tabelas de escala por linha e uma única transformada de distância no lugar de 8 `pad+erode`. A saída também é **idêntica** (154/154 quadros), com −19% no quadro 640×480.
+- Cones cortados só pela lateral (`partial_cones`) e largura do pé pelo terço inferior: +40 bases verdes, +51 vermelhas, e 22 quadros passaram a ser válidos contra 6 que deixaram de ser (103 → 119 válidos).
+- `green_chroma_min` separado do vermelho, para o verde-azulado escuro na sombra (croma 4–12). Fica no padrão 12 porque a faixa larga trouxe ruído nesses ensaios. O ajuste deve ser feito com a câmera em exposição fixa.
+- `tools/ajustar_camera.py` (exposição/WB/MJPG) e `benchmark_visao.py --cones`.
+
+**Gargalos restantes**
+1. **O laço Python por mancha** ainda consome cerca de 70% da detecção. Quase todas as manchas que chegam ao laço não são cones. Isso se resolve com um classificador (abaixo) e limiares de cor mais estreitos.
+2. ✅ **GIL**: a visão agora roda em processo separado (`fva_car/vision_process.py`, `vision_process: True`). Num teste com carga simulada, a detecção ficou em ~11 ms em processo, contra 35 ms em thread. Falta medir no Pi com `benchmark_visao.py --cones` e com o log de um ensaio.
+3. **FOV estreito**: com ~60°, os cones a ±0,9 m só aparecem a partir de ~1,6 m. **Uma câmera grande-angular (~120°)** veria os cones ao lado do carro. É a maior alavanca de hardware para o seguimento: basta corrigir a distorção apenas dos pontos de base (`cv2.undistortPoints`, custo desprezível) e recalibrar.
+4. **Câmera baixa**: perto do horizonte, 1 px de erro na base a 2,5 m vale cerca de 5 cm. Inclinar a câmera para baixo ou subi-la melhora a precisão métrica.
+
+**Redes neurais no Pi 4 (sem acelerador)**
+
+| Opção | Custo por quadro (estimativa; medir no Pi) | Prós | Contras |
+|-------|-------------------------------------------|------|---------|
+| **Híbrido: cor gera candidatos + CNN mínima classifica recortes 32×32** (recomendado) | ~0,2 ms por recorte × 10–30 = 2–6 ms | Elimina falsos positivos (roupa, porta, guarda-chuva). Permite afrouxar a cor para pegar o verde escuro. Treina com poucos dados. Mantém a base precisa do pipeline atual. | Exige montar o conjunto de recortes (dá para extrair dos logs). |
+| YOLOv8n/YOLO11n 320×320 int8 (NCNN ou ONNX Runtime) | ~70–120 ms, ocupando os 4 núcleos | Muito robusto à luz e ao tom de cor | Latência alta e disputa CPU com o controle. Exige ~300–500 imagens rotuladas com caixa. |
+| YOLO no Coral USB Edge TPU | ~10–20 ms | Robusto e rápido | Hardware extra (~US$ 60) e conversão para Edge TPU |
+| Sem rede: tabela de cor aprendida (pixels rotulados → LUT 3D) + HOG+SVM nos recortes | ~1–3 ms | Simples e determinístico | Menos robusto que a CNN a mudanças de luz |
+
+Caminho sugerido para o híbrido:
+1. Gravar ensaios com `--record-frames 3`.
+2. Extrair recortes em volta de cada candidato (aceitos e rejeitados) e revisar os rótulos com `rotular_cones.py`.
+3. Treinar uma CNN de 3 classes (cone_verde, cone_vermelho, nao_cone), com ~2 convoluções e entrada de 32×32, no notebook.
+4. Exportar para ONNX e rodar com `cv2.dnn` no Pi, com um único lote de recortes por quadro.
+5. Medir com `avaliar_cones.py` antes e depois.
