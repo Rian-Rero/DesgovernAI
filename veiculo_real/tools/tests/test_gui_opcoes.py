@@ -87,21 +87,99 @@ class TerminalLogTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(gui.command_label(command), label)
 
-    def test_log_keeps_text_and_sends_telemetry_to_csv(self):
+    def test_remote_log_goes_inside_logs_folder_collected_by_the_gui(self):
+        import time
+        now = time.strptime("2026-11-10 19:05:12", "%Y-%m-%d %H:%M:%S")
+        folder, path = gui.remote_log_path("/home/alunos/Desktop/fva", "testes_unitarios", now)
+        self.assertEqual(folder, "/home/alunos/Desktop/fva/logs/terminal/2026-11-10")
+        self.assertEqual(path, folder + "/19h05m12_testes_unitarios.log")
+        for name in ("fva_gui_0a1b2c.log", "fva_teste_ff00.log", "fva_camera_http_12ab.log"):
+            self.assertTrue(gui.LEGACY_TMP_LOGS.match(name), name)
+        for name in ("fva_gui_0a1b2c.exit", "outro.log"):
+            self.assertFalse(gui.LEGACY_TMP_LOGS.match(name), name)
+
+
+class LocalCar:
+    """Faz o papel do SSH/SFTP do carro: roda o comando e le arquivos no proprio notebook."""
+    def exec_command(self, command, timeout=None):
+        import io
+        import subprocess
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        return None, io.StringIO(result.stdout), io.BytesIO(result.stderr.encode())
+
+    def open_sftp(self):
+        return self
+
+    def open(self, path, mode="r"):
+        return open(path, mode)
+
+    def listdir_attr(self, path):
+        import os
+        entries = []
+        for entry in os.scandir(path):
+            info = entry.stat()
+            attr = type("A", (), {})()
+            attr.filename, attr.st_mode, attr.st_size, attr.st_mtime = entry.name, info.st_mode, info.st_size, info.st_mtime
+            entries.append(attr)
+        return entries
+
+    def get(self, remote, local):
+        import shutil
+        shutil.copyfile(remote, local)
+
+    def get_transport(self):
+        return type("T", (), {"is_active": lambda self: True})()
+
+    def get_channel(self):
+        return type("C", (), {"settimeout": lambda self, t: None})()
+
+    def close(self):
+        pass
+
+
+@unittest.skipUnless(__import__("os").environ.get("FVA_TEST_TK") == "1", "Set FVA_TEST_TK=1 for real Tk testing")
+class CollectTerminalLogsTests(unittest.TestCase):
+    def test_command_output_is_saved_in_logs_and_comes_with_collect_data(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as folder:
-            log = gui.RunLog("vermelho", "missao_cones_0.7ms_purepursuit", {"comando": "python3 main.py"}, folder)
-            log.write("\x1b[32mEncoder: leitura OK.\x1b[0m")
-            log.write("DATA,0.1,0,0,1,1,0,0,0,0")
-            log.write("DATA,0.2,0,0,1,1,0,0,0,0")
-            log.close("codigo de saida 0")
-            again = gui.RunLog("vermelho", "missao_cones_0.7ms_purepursuit", {}, folder)
-            again.close()
-            self.assertRegex(log.path.name, r"^\d\dh\d\dm\d\d_vermelho_missao_cones_0\.7ms_purepursuit\.txt$")
-            self.assertNotEqual(log.path, again.path)  # mesmo segundo: nao sobrescreve
-            text = log.path.read_text(encoding="utf-8")
-            self.assertIn("# comando: python3 main.py", text)
-            self.assertIn("Encoder: leitura OK.\n", text)  # sem codigos de cor
-            self.assertNotIn("DATA,", text)
-            self.assertIn("codigo de saida 0", text)
-            self.assertEqual(log.telemetry_path.read_text().count("DATA,"), 2)
+        import time
+        with tempfile.TemporaryDirectory() as car_dir, tempfile.TemporaryDirectory() as notebook:
+            Path(car_dir, "main.py").write_text(
+                "print('Encoder: leitura OK.')\nprint('DATA,0.1,0,0,1,1,0,0,0,0')\n", encoding="utf-8")
+            with patch.object(gui.RsyncGUI, "refresh_ips"):
+                app = gui.RsyncGUI()
+            try:
+                app.active_device = ("vermelho", "127.0.0.1")
+                app._connect_ssh = lambda *args: LocalCar()
+                app.dest_entry.delete(0, "end")
+                app.dest_entry.insert(0, car_dir)
+                app.data_dest_entry.delete(0, "end")
+                app.data_dest_entry.insert(0, notebook)
+                app.cmd_text.delete("1.0", "end")
+                app.cmd_text.insert("end", "python3 -u main.py --navigation cones --speed 1.5 --stanley")
+                started = time.monotonic()
+                state = {"phase": "run"}
+
+                def step():
+                    text = app.cmd_log.get("1.0", "end")
+                    if time.monotonic() - started > 20:
+                        app.quit()
+                    elif state["phase"] == "run" and "Execução encerrada" in text:
+                        state["phase"] = "collect"
+                        app.collect_data()
+                    elif state["phase"] == "collect" and "Coleta finalizada" in app.data_log.get("1.0", "end"):
+                        app.quit()
+                    if state["phase"] != "done":
+                        app.after(100, step)
+
+                app.after(100, app.run_cmds_on_selected)
+                app.after(200, step)
+                app.mainloop()
+                on_car = list(Path(car_dir, "logs", "terminal").rglob("*.log"))
+                collected = [p for p in Path(notebook, "vermelho", "terminal").rglob("*.log")
+                             if p.parent.name != "recuperados_tmp"]
+            finally:
+                app.destroy()
+            self.assertEqual(len(on_car), 1)
+            self.assertRegex(on_car[0].name, r"^\d\dh\d\dm\d\d_missao_cones_1\.5ms_stanley\.log$")
+            self.assertIn("Encoder: leitura OK.", on_car[0].read_text(encoding="utf-8"))
+            self.assertEqual([p.name for p in collected], [on_car[0].name])

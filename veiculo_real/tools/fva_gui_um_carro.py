@@ -139,13 +139,23 @@ CAR_ICON = "🚗 "
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
-# Saida de cada comando/teste remoto, salva no notebook para enviar depois:
-# logs_terminal/<AAAA-MM-DD>/<HHhMMmSS>_<carro>_<o-que-rodou>.txt
-TERMINAL_LOG_DIR = Path(__file__).resolve().parents[2] / "logs_terminal"
+# Saida de cada comando/teste remoto fica NO CARRO, dentro de logs/ (o que o
+# "Coletar Dados" baixa): logs/terminal/<AAAA-MM-DD>/<HHhMMmSS>_<o-que-rodou>.log
+# A hora e a do notebook: no hotspot, sem internet, o relogio do Pi pode estar errado.
+REMOTE_TERMINAL_DIR = "logs/terminal"
+# Logs antigos (antes de logs/terminal), recuperados pelo Coletar Dados.
+LEGACY_TMP_LOGS = re.compile(r"^fva_(gui|teste|camera_http)_[0-9a-f]+\.log$")
 
 
 def _slug(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z._]+", "-", text).strip("-._").lower() or "comando"
+
+
+def remote_log_path(workdir: str, label: str, now=None):
+    """(pasta, arquivo) do log no carro para um comando com este rotulo."""
+    now = time.localtime() if now is None else now
+    folder = posixpath.join(workdir, REMOTE_TERMINAL_DIR, time.strftime("%Y-%m-%d", now))
+    return folder, posixpath.join(folder, f"{time.strftime('%Hh%Mm%S', now)}_{label}.log")
 
 
 def command_label(command: str) -> str:
@@ -187,61 +197,6 @@ def command_label(command: str) -> str:
     if script:
         return _slug(script)
     return _slug(Path(argv[0]).name if argv[0] not in ("sudo", "nohup") or len(argv) < 2 else argv[1])
-
-
-class RunLog:
-    """Grava a saida de um comando remoto num .txt (e a telemetria DATA num .csv ao lado).
-
-    Escreve linha a linha com flush: se a GUI ou a conexao cair, o que chegou
-    fica salvo.
-    """
-    def __init__(self, car: str, label: str, header: dict, folder: Path = None):
-        now = time.localtime()
-        folder = Path(folder or TERMINAL_LOG_DIR) / time.strftime("%Y-%m-%d", now)
-        folder.mkdir(parents=True, exist_ok=True)
-        stem = f"{time.strftime('%Hh%Mm%S', now)}_{_slug(car)}_{label}"
-        path = folder / f"{stem}.txt"
-        counter = 2
-        while path.exists():
-            path = folder / f"{stem}_{counter}.txt"
-            counter += 1
-        self.path = path
-        self.telemetry_path = path.with_name(path.stem + "_telemetria.csv")
-        self.lock = threading.Lock()
-        self.file = open(path, "w", encoding="utf-8")
-        self.telemetry = None
-        self.data_lines = 0
-        self.file.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S', now)}\n")
-        for key, value in header.items():
-            self.file.write(f"# {key}: {value}\n")
-        self.file.write("\n")
-        self.file.flush()
-
-    def write(self, text: str):
-        text = ANSI_ESCAPE_RE.sub("", str(text)).rstrip("\r\n")
-        with self.lock:
-            if self.file.closed:
-                return
-            if text.lstrip().startswith("DATA,"):
-                if self.telemetry is None:
-                    self.telemetry = open(self.telemetry_path, "w", encoding="utf-8")
-                self.telemetry.write(text.lstrip() + "\n")
-                self.data_lines += 1
-                return
-            self.file.write(text + "\n")
-            self.file.flush()
-
-    def close(self, status: str = ""):
-        with self.lock:
-            if self.file.closed:
-                return
-            if self.data_lines:
-                self.file.write(f"\n# {self.data_lines} linhas de telemetria em {self.telemetry_path.name}\n")
-            if status:
-                self.file.write(f"# {status}\n")
-            self.file.close()
-            if self.telemetry is not None:
-                self.telemetry.close()
 
 
 def open_folder(path: Path):
@@ -657,7 +612,7 @@ class RsyncGUI(tk.Tk):
         ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
-            cmd_buttons, text="📂 Logs salvos", command=lambda: open_folder(TERMINAL_LOG_DIR)
+            cmd_buttons, text="📂 Dados coletados", command=self.open_collected_data
         ).pack(side="left")
 
         # area inferior: grafico e terminal lado a lado
@@ -1068,7 +1023,7 @@ class RsyncGUI(tk.Tk):
         ttk.Button(controls, text="Limpar", command=self.clear_test_log).pack(
             side="left", padx=4
         )
-        ttk.Button(controls, text="📂 Logs salvos", command=lambda: open_folder(TERMINAL_LOG_DIR)).pack(
+        ttk.Button(controls, text="📂 Dados coletados", command=self.open_collected_data).pack(
             side="left", padx=4
         )
 
@@ -1328,8 +1283,8 @@ class RsyncGUI(tk.Tk):
         """Inicia camera.py --stream por SSH e exibe /frame.png na janela Tkinter."""
         workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         run_id = self.test_run_id
-        base = f"/tmp/fva_camera_http_{run_id}"
-        log_path, exit_path = base + ".log", base + ".exit"
+        log_dir, log_path = remote_log_path(workdir, "teste_camera_" + _slug(camera_mode))
+        exit_path = f"/tmp/fva_camera_http_{run_id}.exit"
         port = 8081  # independente da porta 8080 utilizada pelo main.py
         client = None
         pid = None
@@ -1350,6 +1305,7 @@ class RsyncGUI(tk.Tk):
                 f"{command}; rc=$?; printf '%s\\n' \"$rc\" > {shlex.quote(exit_path)}"
             )
             launch = (
+                f"mkdir -p {shlex.quote(log_dir)}; "
                 f"nohup setsid sh -c {shlex.quote(inner)} "
                 f"> {shlex.quote(log_path)} 2>&1 < /dev/null & echo FVA_PID:$!"
             )
@@ -1417,8 +1373,8 @@ class RsyncGUI(tk.Tk):
         """Executa módulo em sessão independente e acompanha log persistente por SFTP."""
         remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         run_id = self.test_run_id
-        base = f"/tmp/fva_teste_{run_id}"
-        log_path, exit_path = base + ".log", base + ".exit"
+        log_dir, log_path = remote_log_path(remote_workdir, "teste_" + _slug(Path(module_path).stem))
+        exit_path = f"/tmp/fva_teste_{run_id}.exit"
         client = None
         sftp = None
         buffer = b""
@@ -1426,17 +1382,7 @@ class RsyncGUI(tk.Tk):
         pid = None
         finished = False
         connection_errors = 0
-        run_log = None
-        try:
-            run_log = RunLog(name, "teste_" + _slug(Path(module_path).stem),
-                             {"carro": f"{name} ({ip})", "pasta": remote_workdir, "modulo": module_path})
-        except OSError as exc:
-            self._queue_test_output(f"Não foi possível criar o log local: {exc}")
-
-        def emit(text):
-            self._queue_test_output(text)
-            if run_log:
-                run_log.write(text)
+        emit = self._queue_test_output
 
         try:
             command = f"cd {shlex.quote(remote_workdir)} && python3 -u {shlex.quote(module_path)}"
@@ -1447,6 +1393,7 @@ class RsyncGUI(tk.Tk):
                 f"{command}; rc=$?; printf '%s\\n' \"$rc\" > {shlex.quote(exit_path)}"
             )
             launch = (
+                f"mkdir -p {shlex.quote(log_dir)}; "
                 f"nohup setsid sh -c {shlex.quote(inner)} "
                 f"> {shlex.quote(log_path)} 2>&1 < /dev/null & echo FVA_PID:$!"
             )
@@ -1459,7 +1406,7 @@ class RsyncGUI(tk.Tk):
                 )
             pid = int(response.split(":", 1)[1])
             self.test_remote_pid = pid
-            emit(f"Log remoto: {log_path}")
+            emit(f"Log no carro (vem no Coletar Dados): {log_path}")
             # Se Parar foi pressionado enquanto a conexão inicial era estabelecida.
             if not self.test_running:
                 self._stop_remote_test_process(ip, pid)
@@ -1537,9 +1484,6 @@ class RsyncGUI(tk.Tk):
                     f"Erro no teste de {name.upper()} ({ip}): {exc}"
                 )
         finally:
-            if run_log:
-                run_log.close()
-                self._queue_test_output(f"Log salvo: {run_log.path}")
             if sftp:
                 try:
                     sftp.close()
@@ -2378,14 +2322,12 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             for raw_cmd in cmds:
                 client = None
                 sftp = None
-                run_log = None
-                final_status = "interrompido"
                 try:
                     # Nome exclusivo evita misturar execuções antigas e novas.
                     run_id = uuid.uuid4().hex
-                    base = f"/tmp/fva_gui_{run_id}"
-                    log_path = base + ".log"
-                    exit_path = base + ".exit"
+                    label = "gravar_arduino" if arduino_flash else command_label(raw_cmd)
+                    log_dir, log_path = remote_log_path(remote_workdir, label)
+                    exit_path = f"/tmp/fva_gui_{run_id}.exit"
                     if not arduino_flash:
                         report(f"$ cd {remote_workdir} && {raw_cmd}")
                     # Processo remoto em segundo plano: grava stdout/stderr na Raspberry.
@@ -2396,6 +2338,7 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                         f"printf '%s\\n' \"$rc\" > {shlex.quote(exit_path)}"
                     )
                     launch = (
+                        f"mkdir -p {shlex.quote(log_dir)}; "
                         f"nohup sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 "
                         "< /dev/null & echo FVA_PID:$!"
                     )
@@ -2407,14 +2350,7 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                             f"Não foi possível iniciar comando remoto: {response} {err.read(500).decode(errors='replace')}"
                         )
                     if not arduino_flash:
-                        report(f"📄 Saída persistente: {log_path}")
-                        try:
-                            run_log = RunLog(name, command_label(raw_cmd), {
-                                "carro": f"{name} ({ip})", "pasta": remote_workdir,
-                                "comando": raw_cmd, "log no carro": log_path})
-                            report(f"💾 Log local: {run_log.path}")
-                        except OSError as exc:
-                            report(f"⚠️ Não foi possível criar o log local: {exc}")
+                        report(f"📄 Log no carro (vem no Coletar Dados): {log_path}")
                     flash_lines = []
                     # Reabre SFTP se necessário; mantém offset para não duplicar dados.
                     offset = 0
@@ -2447,8 +2383,6 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                                         flash_lines.append(decoded)
                                     else:
                                         self._handle_remote_log_line(name, decoded)
-                                        if run_log:
-                                            run_log.write(decoded)
                             try:
                                 with sftp.open(exit_path, "r") as status_file:
                                     rc = int(status_file.read().strip())
@@ -2487,8 +2421,7 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                             self._handle_remote_log_line(
                                 name, buffer.decode("utf-8", errors="replace")
                             )
-                            if run_log:
-                                run_log.write(buffer.decode("utf-8", errors="replace"))
+
                     if arduino_flash:
                         if rc == 0 and any(
                             "SUCESSO: firmware gravado" in line for line in flash_lines
@@ -2513,15 +2446,10 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                         report(f"⚠️ Retorno {rc} para comando: {raw_cmd}")
                     else:
                         report(f"✅ Comando finalizado (código 0)")
-                    final_status = f"codigo de saida {rc}"
                 except Exception as exc:
                     report(f"❌ Erro em {name.upper()} ({ip}): {exc}")
-                    final_status = f"erro: {exc}"
                     break
                 finally:
-                    if run_log:
-                        run_log.close(final_status)
-                        report(f"💾 Log salvo: {run_log.path}")
                     if sftp:
                         try:
                             sftp.close()
@@ -2549,6 +2477,10 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             self.refresh_experiments()
 
     ########################################
+    def open_collected_data(self):
+        """Abre a pasta onde o Coletar Dados salva (aba Coletar Dados)."""
+        open_folder(os.path.abspath(self.data_dest_entry.get().strip() or "experimentos"))
+
     def collect_data(self):
 
         targets = self.get_selected_devices()
@@ -2591,6 +2523,29 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                 sftp.get(remote_path, local_path)
 
     ########################################
+    def _collect_legacy_tmp_logs(self, sftp, local_dest):
+        """Saidas gravadas em /tmp pelas versoes antigas da GUI (fva_gui_<id>.log...).
+
+        Nomeadas pela hora do arquivo no carro; baixadas so uma vez.
+        """
+        try:
+            entries = sftp.listdir_attr("/tmp")
+        except (OSError, IOError):
+            return 0
+        folder = os.path.join(local_dest, "terminal", "recuperados_tmp")
+        count = 0
+        for entry in entries:
+            if not LEGACY_TMP_LOGS.match(entry.filename) or not entry.st_size:
+                continue
+            stamp = time.strftime("%Y-%m-%d_%Hh%Mm%S", time.localtime(entry.st_mtime or 0))
+            local_path = os.path.join(folder, f"{stamp}_{entry.filename}")
+            if os.path.isfile(local_path) and os.path.getsize(local_path) == entry.st_size:
+                continue
+            os.makedirs(folder, exist_ok=True)
+            sftp.get(posixpath.join("/tmp", entry.filename), local_path)
+            count += 1
+        return count
+
     def _collect_data(self, targets, local_base):
         remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         remote_logs = posixpath.join(remote_workdir, "logs")
@@ -2608,7 +2563,11 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                 client = self._connect_ssh(ip)
                 sftp = client.open_sftp()
                 self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
-                self.ui(self.datalog_write, f"✅ Dados de {name.upper()} coletados.")
+                recovered = self._collect_legacy_tmp_logs(sftp, local_dest)
+                if recovered:
+                    self.ui(self.datalog_write,
+                            f"   + {recovered} log(s) antigo(s) de /tmp em terminal/recuperados_tmp/")
+                self.ui(self.datalog_write, f"✅ Dados de {name.upper()} coletados em: {os.path.abspath(local_dest)}")
             except FileNotFoundError:
                 self.ui(
                     self.datalog_write, f"❌ Pasta remota não encontrada: {remote_logs}"

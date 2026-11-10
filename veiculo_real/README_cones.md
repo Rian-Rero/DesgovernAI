@@ -411,7 +411,7 @@ python3 veiculo_real/tools/ajustar_camera.py
 ```
 
 A ferramenta testa várias exposições e mostra fps, brilho, área estourada e
-saturação dos cones. Ela salva uma foto por ajuste em `ajuste_camera/` e imprime
+saturação dos cones. Ela salva uma foto por ajuste em `logs/ajuste_camera/<data_hora>/` (vem no Coletar Dados da GUI) e imprime
 a linha para colar em `main.py`, por exemplo
 `"camera_settings": {"fourcc": "MJPG", "exposure": 150, "auto_wb": False}`.
 Com `camera_settings` vazio, a câmera fica no modo automático, como antes.

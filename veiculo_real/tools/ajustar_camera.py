@@ -9,7 +9,8 @@ Rode NO RASPBERRY, com o carro parado na pista e os cones a 1-3 m:
 Para cada exposicao manual (e para a automatica, como referencia) mede:
   fps real entregue pela camera, brilho medio do piso, % de pixels estourados
   (brancos) e a saturacao mediana dos pixels coloridos (cones);
-e salva um JPG por ajuste em --out para comparar a olho. No fim imprime a
+e salva um JPG por ajuste em --out (padrao logs/ajuste_camera/<data_hora>, que o
+Coletar Dados da GUI baixa) para comparar a olho. No fim imprime a
 linha pronta para colar em main.py:
 
     "camera_settings": {"fourcc": "MJPG", "exposure": 120, "auto_wb": False},
@@ -76,7 +77,8 @@ def main(argv=None):
     parser.add_argument('--wb', type=float, default=None,
                         help='temperatura de cor fixa (K), ex. 4500; sem ela so desliga o WB automatico')
     parser.add_argument('--frames', type=int, default=45)
-    parser.add_argument('--out', type=Path, default=Path('ajuste_camera'))
+    parser.add_argument('--out', type=Path, default=Path('logs')/'ajuste_camera'/time.strftime('%Y-%m-%d_%Hh%Mm%S'),
+                        help='pasta das fotos (padrao em logs/: vem no Coletar Dados da GUI)')
     args = parser.parse_args(argv)
 
     if shutil.which('v4l2-ctl'):
