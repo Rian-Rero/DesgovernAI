@@ -211,10 +211,17 @@ class RealConeDetector:
             motion = (result.debug.get('tracking') or {}).get('motion_m')
         return self.corridor.step(float(timestamp), left, right, motion, pose_frame)
 
+    def roi_row(self):
+        """Primeira linha util na grade de processamento: acima, so o que fica alem
+        do alcance dos cones (horizonte). A deteccao ja ignora essa faixa."""
+        return self.detector.roi_row(self.processing_size[::-1], self.settings)
+
     def preview_bgr(self, observation):
         if observation is None or observation.source_frame is None:
             return None
-        source = cv2.resize(observation.source_frame, self.processing_size)
+        source = observation.source_frame
+        source = (source.copy() if source.shape[1::-1] == tuple(self.processing_size)
+                  else cv2.resize(source, self.processing_size, interpolation=cv2.INTER_AREA))
         if observation.cone_result is None:
             return source
         image = render_cones(source, observation.cone_result, observation.cone_settings)

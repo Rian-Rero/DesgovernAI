@@ -238,6 +238,10 @@ class RealLineDetector:
             return observation
         return replace(observation, frame=self._preview(observation.source_frame, observation.path_result))
 
+    def roi_row(self):
+        """Primeira linha usada pelo detector da linha (roi_top), na grade de processamento."""
+        return int(self.processing_size[1] * self.settings.roi_top / 100)
+
     def preview_bgr(self, observation):
         """Deteccao desenhada na grade de processamento, em BGR (transmissao)."""
         if observation is None or observation.source_frame is None:

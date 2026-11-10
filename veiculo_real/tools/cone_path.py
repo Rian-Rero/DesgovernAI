@@ -40,7 +40,7 @@ def floor_color(frame):
     return np.median(sample, axis=0).astype(np.float32)
 
 
-def normalize_light(frame, settings):
+def normalize_light(frame, settings, roi=0):
     """(imagem, ganhos BGR) com o piso levado a cor de referencia de settings.
 
     Ganho comum (brilho) e razao entre canais (cor da luz) separados, cada um
@@ -48,7 +48,8 @@ def normalize_light(frame, settings):
     e a imagem de referencia passa intacta. Ganho limitado a 0,5-3,5x e cor a
     +-50%, para um piso de outra cor nao virar outra coisa; e o ganho nunca
     estoura os pixels mais claros (percentil 99): canal saturado muda o matiz
-    (vermelho estourado vira laranja).
+    (vermelho estourado vira laranja). roi: linhas acima dela (horizonte, fora
+    do alcance dos cones) sao copiadas sem corrigir.
     """
     if not settings.auto_light:
         return frame, None
@@ -71,7 +72,14 @@ def normalize_light(frame, settings):
     if np.all(np.abs(scale - 1.) < 1e-3):
         return frame, scale
     table = np.clip(np.arange(256, dtype=np.float32)[:, None]*scale[None, :], 0, 255)
-    return cv2.LUT(frame, table.astype(np.uint8).reshape(1, 256, 3)), scale
+    table = table.astype(np.uint8).reshape(1, 256, 3)
+    roi = int(np.clip(roi, 0, frame.shape[0]-1))
+    if not roi:
+        return cv2.LUT(frame, table), scale
+    output = np.empty_like(frame)
+    output[:roi] = frame[:roi]
+    output[roi:] = cv2.LUT(frame[roi:], table)
+    return output, scale
 
 
 @dataclass
@@ -804,8 +812,8 @@ class ConePathDetector:
         que vai julgar no carro. 'frame' devolve a imagem com a luz normalizada,
         de onde saem os recortes do classificador.
         """
-        frame, light = normalize_light(frame, settings)
         roi = self.roi_row(frame.shape[:2], settings)
+        frame, light = normalize_light(frame, settings, roi)
         green, red = self.segment(frame, settings, roi)
         rejected = {'green': {}, 'red': {}}
         scale = self.row_scale(frame.shape[:2], settings)

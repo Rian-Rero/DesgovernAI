@@ -426,6 +426,16 @@ Os logs acrescentam `cone_red_count`, `cone_green_count`, `corridor_width_m`,
 `line_valid`, `cross_track_m`, `heading_error_rad` e `curvature_m_inv` continuam
 representando a referência usada pelo controlador, agora o centro do corredor.
 
+**ROI (horizonte fora).** A primeira linha útil sai da homografia: o ponto a
+`max_range_cm` (3 m) mais 1,5 altura de cone. Na calibração atual é a linha 247
+de 480, então ~51% da imagem (parede, portas, placas) nunca entra na
+segmentação, na correção de luz nem na escolha de cones. A **transmissão**
+(`--stream`) também manda só essa região, com a legenda numa faixa preta
+acima, em vez de escrita sobre a imagem: 640×323 em vez de 640×480 e ~17 kB em
+vez de ~24 kB por quadro (JPEG 70). Os quadros brutos (`--record-frames`) e os
+de evento continuam inteiros, porque a rotulagem e a calibração usam a imagem
+completa.
+
 A transmissão mostra a contagem de cones aceitos por cor, inclusive quando
 a geometria do corredor é inválida. Regiões unidas por sobreposição podem
 fornecer a base inferior visível; bases ocultas não são inventadas.

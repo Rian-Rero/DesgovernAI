@@ -284,17 +284,26 @@ def stream_text(car, status, observation):
 
 
 def render_stream_frame(detector, observation, lines):
+    """Quadro transmitido: so a regiao que o detector usa (abaixo do ROI), com a
+    legenda numa faixa preta acima. O horizonte nao e transmitido: JPEG menor,
+    menos CPU no Pi e nada escondendo os cones."""
     image = detector.preview_bgr(observation)
     if image is None:
         width, height = detector.processing_size
         image = np.zeros((height, width, 3), np.uint8)
-    else:
-        image = image.copy()
+    roi_row = getattr(detector, "roi_row", None)
+    top = 0
+    if callable(roi_row):
+        try:
+            top = int(np.clip(roi_row(), 0, image.shape[0] - 2))
+        except (TypeError, ValueError):
+            top = 0
+    view = image[top:]
+    band = np.zeros((6 + 14 * len(lines), image.shape[1], 3), np.uint8)
     for index, line in enumerate(lines):
-        origin = (4, 14 + 14 * index)
-        cv2.putText(image, line, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(image, line, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
-    return image
+        cv2.putText(band, line, (4, 14 + 14 * index), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+    return np.vstack([band, view]) if lines else view.copy()
 
 
 def follower_config(config, mode, corridor):

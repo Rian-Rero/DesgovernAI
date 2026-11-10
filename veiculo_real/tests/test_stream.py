@@ -92,8 +92,25 @@ class VisionStreamTests(unittest.TestCase):
             with self.subTest(observation=observation):
                 lines = mission.stream_text(car, 'Faixa valida; controle liberado', observation)
                 image = mission.render_stream_frame(detector, observation, lines)
-                self.assertEqual(image.shape, (240, 320, 3))
+                # Sem a faixa acima do ROI; legenda numa faixa propria por cima.
+                self.assertEqual(image.shape, (240 - detector.roi_row() + 6 + 14*len(lines), 320, 3))
         self.assertIsNone(valid.frame)  # o desenho nao altera a observacao da missao
+
+    def test_cone_stream_drops_the_horizon_above_the_roi(self):
+        from pathlib import Path
+        from fva_car.cones import RealConeDetector
+        from fva_car.lateral import GroundCalibration
+        calibration = GroundCalibration.from_file(
+            Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+        detector = RealConeDetector(calibration)
+        frame = np.full((480, 640, 3), 120, np.uint8)
+        observation = detector.observe_frame(frame, 1.)
+        top = detector.roi_row()
+        self.assertGreater(top, 150)  # horizonte: quase metade da imagem
+        image = mission.render_stream_frame(detector, observation, [])
+        self.assertEqual(image.shape, (480 - top, 640, 3))
+        image = mission.render_stream_frame(detector, observation, ['a', 'b'])
+        self.assertEqual(image.shape, (480 - top + 6 + 28, 640, 3))
 
     def test_cli_stream_uses_default_port(self):
         from unittest.mock import patch
