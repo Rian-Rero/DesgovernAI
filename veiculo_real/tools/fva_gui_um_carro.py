@@ -44,6 +44,66 @@ SPEED_PRESETS = ("0.7", "1.0", "1.5")  # m/s; mesmos MAIN_VEL e FAST_VEL de main
 STREAM_PORT = 8080  # main.py --stream
 
 
+# Opcoes da missao na aba de comandos: cada uma vira um argumento do main.py.
+MISSION_DEFAULTS = {
+    "navigation": "cones",        # cones | line
+    "speed": SPEED_PRESETS[0],
+    "stream": True,               # --stream 8080 (video no navegador)
+    "estimator": True,            # False: --no-estimator
+    "pure_pursuit": True,         # False: --stanley
+    "preview": True,              # False: --no-preview
+    "cone_debug": True,           # False: --no-cone-debug
+    "record_frames": False,       # --record-frames HZ (coleta para a rede)
+    "record_hz": "3",
+    "classifier": False,          # --classifier CAMINHO
+    "classifier_path": "modelos/cones.onnx",
+    "vision_width": "0",
+    "steering_filter": "3",
+}
+VISION_WIDTHS = ("0", "320", "480")
+STEERING_FILTERS = ("1", "3", "5")
+RECORD_RATES = ("1", "3", "5")
+CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier")
+
+
+def build_main_command(options: dict) -> str:
+    """Linha do main.py com as opcoes marcadas (padroes de MISSION_DEFAULTS).
+
+    Opcoes so dos cones sao ignoradas na linha amarela; pure pursuit e previa
+    de curva dependem do estimador (sem ele o main.py ja usa o Stanley).
+    """
+    o = {**MISSION_DEFAULTS, **options}
+    parts = ["python3 -u main.py", f"--navigation {o['navigation']}",
+             f"--vision-width {o['vision_width']}", f"--steering-filter {o['steering_filter']}",
+             f"--speed {o['speed']}"]
+    if o["stream"]:
+        parts.append(f"--stream {STREAM_PORT}")
+    if o["navigation"] == "cones":
+        if not o["estimator"]:
+            parts.append("--no-estimator")
+        else:
+            if not o["pure_pursuit"]:
+                parts.append("--stanley")
+            if not o["preview"]:
+                parts.append("--no-preview")
+        if not o["cone_debug"]:
+            parts.append("--no-cone-debug")
+        if o["record_frames"]:
+            parts.append(f"--record-frames {o['record_hz']}")
+        if o["classifier"] and str(o["classifier_path"]).strip():
+            parts.append(f"--classifier {shlex.quote(str(o['classifier_path']).strip())}")
+    return " ".join(parts)
+
+
+def with_main_command(command: str, main_line: str) -> str:
+    """Troca as linhas que executam main.py pela nova; sem nenhuma, poe no inicio."""
+    lines = command.splitlines()
+    replaced = [main_line if re.search(r"\bmain\.py\b", line) else line for line in lines]
+    if replaced == lines and not any(re.search(r"\bmain\.py\b", line) for line in lines):
+        replaced = [main_line] + [line for line in lines if line.strip()]
+    return "\n".join(replaced)
+
+
 def with_speed(command: str, speed: str) -> str:
     """Troca --speed/--fast das linhas que executam main.py, sem tocar nas demais."""
     lines = []
@@ -442,10 +502,16 @@ class RsyncGUI(tk.Tk):
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
 
+        self._build_mission_options(parent)
         cmds_frame = ttk.Frame(parent)
         cmds_frame.pack(fill="x", padx=10, pady=4)
         ttk.Label(cmds_frame, text="Comandos (1 por linha):").pack(anchor="w")
 
+        ttk.Label(
+            cmds_frame,
+            text="As opções acima reescrevem a linha do main.py; dá para editar à mão antes de Executar.",
+            foreground="#888",
+        ).pack(anchor="w")
         self.cmd_text = scrolledtext.ScrolledText(
             cmds_frame,
             height=3,
@@ -455,28 +521,8 @@ class RsyncGUI(tk.Tk):
             font=("Courier", 11),
         )
 
-        self.cmd_text.insert(
-            "end",
-            f"python3 -u main.py --navigation cones --vision-width 0 --steering-filter 3"
-            f" --speed {SPEED_PRESETS[0]} --stream {STREAM_PORT}\n",
-        )
+        self.cmd_text.insert("end", build_main_command(self.mission_options()) + "\n")
         self.cmd_text.pack(fill="x", pady=4)
-
-        speed_frame = ttk.Frame(cmds_frame)
-        speed_frame.pack(fill="x")
-        ttk.Label(speed_frame, text="Velocidade [m/s]:").pack(side="left", padx=(0, 5))
-        self.speed_var = tk.StringVar(value=SPEED_PRESETS[0])
-        speed_combo = ttk.Combobox(
-            speed_frame,
-            textvariable=self.speed_var,
-            state="readonly",
-            values=SPEED_PRESETS,
-            width=6,
-        )
-        speed_combo.pack(side="left")
-        speed_combo.bind(
-            "<<ComboboxSelected>>", lambda event: self.apply_speed_preset()
-        )
 
         cmd_buttons = ttk.Frame(parent)
         cmd_buttons.pack(fill="x", padx=10, pady=6)
@@ -575,6 +621,87 @@ class RsyncGUI(tk.Tk):
                 bottom.sashpos(0, int(width * 0.60))
 
         self.after(100, set_initial_panes)
+
+    def _build_mission_options(self, parent):
+        """Caixas da missao (main.py): cada mudanca reescreve a linha do comando."""
+        box = ttk.LabelFrame(parent, text="Opções da missão (main.py)")
+        box.pack(fill="x", padx=10, pady=(4, 2))
+        self.mission_vars = {}
+        for key, value in MISSION_DEFAULTS.items():
+            variable = tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=value)
+            variable.trace_add("write", lambda *_: self.apply_mission_options())
+            self.mission_vars[key] = variable
+        self.speed_var = self.mission_vars["speed"]  # compatibilidade
+
+        row = ttk.Frame(box)
+        row.pack(fill="x", padx=6, pady=(4, 2))
+        ttk.Label(row, text="Navegação:").pack(side="left")
+        for value, label in (("cones", "Cones"), ("line", "Linha amarela")):
+            ttk.Radiobutton(row, text=label, value=value,
+                            variable=self.mission_vars["navigation"]).pack(side="left", padx=(4, 8))
+        for label, key, values, width in (("Velocidade [m/s]:", "speed", SPEED_PRESETS, 6),
+                                          ("Largura da visão:", "vision_width", VISION_WIDTHS, 5),
+                                          ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4)):
+            ttk.Label(row, text=label).pack(side="left", padx=(12, 4))
+            ttk.Combobox(row, textvariable=self.mission_vars[key], state="readonly",
+                         values=values, width=width).pack(side="left")
+
+        checks = ttk.Frame(box)
+        checks.pack(fill="x", padx=6, pady=2)
+        self.mission_checks = {}
+        items = (
+            ("stream", "Transmitir vídeo (Ver câmera)"),
+            ("estimator", "Estimador do corredor"),
+            ("pure_pursuit", "Pure pursuit (desmarcado: Stanley)"),
+            ("preview", "Reduzir antes da curva"),
+            ("cone_debug", "Debug de cones (jsonl + quadros)"),
+        )
+        for index, (key, label) in enumerate(items):
+            check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])
+            check.grid(row=index // 3, column=index % 3, sticky="w", padx=(0, 18), pady=1)
+            self.mission_checks[key] = check
+
+        extra = ttk.Frame(box)
+        extra.pack(fill="x", padx=6, pady=(2, 6))
+        check = ttk.Checkbutton(extra, text="Gravar quadros para a rede, Hz:",
+                                variable=self.mission_vars["record_frames"])
+        check.pack(side="left")
+        self.mission_checks["record_frames"] = check
+        self.record_combo = ttk.Combobox(extra, textvariable=self.mission_vars["record_hz"],
+                                         state="readonly", values=RECORD_RATES, width=3)
+        self.record_combo.pack(side="left", padx=(4, 18))
+        check = ttk.Checkbutton(extra, text="Classificador (rede):",
+                                variable=self.mission_vars["classifier"])
+        check.pack(side="left")
+        self.mission_checks["classifier"] = check
+        self.classifier_entry = ttk.Entry(extra, textvariable=self.mission_vars["classifier_path"], width=26)
+        self.classifier_entry.pack(side="left", padx=(4, 0))
+        self._update_mission_widgets()
+
+    def mission_options(self):
+        return {key: variable.get() for key, variable in getattr(self, "mission_vars", {}).items()}
+
+    def _update_mission_widgets(self):
+        """Desabilita o que nao se aplica: opcoes de cones na linha amarela,
+        pure pursuit e previa sem o estimador, Hz/caminho com a caixa desmarcada."""
+        options = self.mission_options()
+        cones = options.get("navigation") == "cones"
+        for key, check in self.mission_checks.items():
+            enabled = cones or key not in CONE_ONLY_OPTIONS
+            if key in ("pure_pursuit", "preview"):
+                enabled = enabled and options.get("estimator", True)
+            check.state(["!disabled"] if enabled else ["disabled"])
+        self.record_combo.state(["!disabled"] if cones and options.get("record_frames") else ["disabled"])
+        self.classifier_entry.state(["!disabled"] if cones and options.get("classifier") else ["disabled"])
+
+    def apply_mission_options(self):
+        if not hasattr(self, "cmd_text") or not hasattr(self, "mission_checks"):
+            return
+        self._update_mission_widgets()
+        command = with_main_command(self.cmd_text.get("1.0", "end-1c"),
+                                    build_main_command(self.mission_options()))
+        self.cmd_text.delete("1.0", "end")
+        self.cmd_text.insert("end", command + "\n")
 
     def _build_tab_video(self, parent):
         controls = ttk.Frame(parent)
@@ -1951,9 +2078,7 @@ class RsyncGUI(tk.Tk):
     # Execução remota (aba 2)
     ########################################
     def apply_speed_preset(self):
-        command = with_speed(self.cmd_text.get("1.0", "end-1c"), self.speed_var.get())
-        self.cmd_text.delete("1.0", "end")
-        self.cmd_text.insert("end", command + "\n")
+        self.apply_mission_options()
 
     def open_camera_stream(self):
         """A missao precisa estar rodando com --stream; abre no navegador local."""
