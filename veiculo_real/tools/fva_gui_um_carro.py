@@ -10,6 +10,7 @@
 ########################################
 # GUI Tkinter para envio de arquivos e execução remota em múltiplas Raspberry Pis,
 # com senha SSH padrão (DEFAULT_PASS) pré-preenchida no campo.
+import hashlib
 import os
 import re
 import posixpath
@@ -41,7 +42,10 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 SSH_USER = "alunos"
 DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp123"
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
-SPEED_PRESETS = ("0.7", "1.0", "1.5")  # m/s; mesmos MAIN_VEL e FAST_VEL de main.py
+# m/s; nos cones e a velocidade MAXIMA NAS RETAS (o carro reduz sozinho antes
+# das curvas e pelo limite de visibilidade, ~1,6 m/s com curva de R = 1,5 m).
+SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0")
+CURVE_RADII = ("1.2", "1.5", "2.0", "3.0")  # m: curva mais fechada da pista (--min-radius)
 STREAM_PORT = 8080  # main.py --stream
 
 
@@ -60,6 +64,7 @@ MISSION_DEFAULTS = {
     "classifier_path": "modelos/cones.onnx",
     "vision_width": "0",
     "steering_filter": "3",
+    "min_radius": "1.5",          # --min-radius (so cones; 1.5 e o padrao do main.py)
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
@@ -91,6 +96,8 @@ def build_main_command(options: dict) -> str:
             parts.append("--no-cone-debug")
         if o["record_frames"]:
             parts.append(f"--record-frames {o['record_hz']}")
+        if str(o["min_radius"]) != MISSION_DEFAULTS["min_radius"]:
+            parts.append(f"--min-radius {o['min_radius']}")
         if o["classifier"] and str(o["classifier_path"]).strip():
             parts.append(f"--classifier {shlex.quote(str(o['classifier_path']).strip())}")
     return " ".join(parts)
@@ -197,6 +204,145 @@ def command_label(command: str) -> str:
     if script:
         return _slug(script)
     return _slug(Path(argv[0]).name if argv[0] not in ("sudo", "nohup") or len(argv) < 2 else argv[1])
+
+
+# ---------------------------------------------------------------- envio incremental
+# Nunca enviados: lixo do Python/sistema e as pastas de DADOS (o que o carro
+# grava; a copia local nao pode sobrescrever o que esta la).
+SYNC_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".idea", ".vscode"}
+SYNC_SKIP_TOP_DIRS = {"logs", "experimentos", "ajuste_camera"}
+SYNC_SKIP_SUFFIXES = (".pyc", ".pyo", ".swp")
+SYNC_SKIP_FILES = {".DS_Store", "Thumbs.db"}
+
+
+def local_tree(local_dir: str) -> dict:
+    """{caminho relativo posix: (tamanho, mtime inteiro, caminho local)} do que deve ir ao carro."""
+    files = {}
+    for root, dirs, names in os.walk(local_dir):
+        rel_root = os.path.relpath(root, local_dir)
+        top = rel_root == "."
+        dirs[:] = sorted(d for d in dirs if d not in SYNC_SKIP_DIRS
+                         and not (top and d in SYNC_SKIP_TOP_DIRS))
+        for name in names:
+            if name in SYNC_SKIP_FILES or name.endswith(SYNC_SKIP_SUFFIXES):
+                continue
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            info = os.stat(path)
+            rel = name if top else posixpath.join(*rel_root.split(os.sep), name)
+            files[rel] = (info.st_size, int(info.st_mtime), path)
+    return files
+
+
+def _output_text(stream) -> str:
+    data = stream.read()
+    return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+
+
+def remote_tree(client, remote_dir: str) -> dict:
+    """{caminho relativo: (tamanho, mtime inteiro)} no carro, numa so ida e volta (find)."""
+    command = (f"cd {shlex.quote(remote_dir)} 2>/dev/null && "
+               "find . -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null")
+    _, out, _ = client.exec_command(command, timeout=60)
+    files = {}
+    for line in _output_text(out).splitlines():
+        parts = line.rsplit("\t", 2)
+        if len(parts) == 3:
+            try:
+                files[parts[0]] = (int(parts[1]), int(float(parts[2])))
+            except ValueError:
+                continue
+    return files
+
+
+def remote_md5(client, remote_dir: str, paths, chunk=150) -> dict:
+    """md5 no carro de varios arquivos (lotes de `chunk` por comando)."""
+    sums = {}
+    paths = list(paths)
+    for start in range(0, len(paths), chunk):
+        names = " ".join(shlex.quote(p) for p in paths[start:start + chunk])
+        _, out, _ = client.exec_command(f"cd {shlex.quote(remote_dir)} && md5sum -- {names} 2>/dev/null",
+                                        timeout=60)
+        for line in _output_text(out).splitlines():
+            digest, _, name = line.partition("  ")
+            if name:
+                sums[name] = digest
+    return sums
+
+
+def local_md5(path: str) -> str:
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sync_plan(local: dict, remote: dict, force=False):
+    """(enviar, conferir conteudo, iguais): mesmo tamanho e data = igual; mesmo
+    tamanho e data diferente = conferir o md5 (1a vez depois de enviar sem data)."""
+    send, check, same = [], [], []
+    for rel, (size, mtime, _) in sorted(local.items()):
+        there = remote.get(rel)
+        if force or there is None or there[0] != size:
+            send.append(rel)
+        elif there[1] == mtime:
+            same.append(rel)
+        else:
+            check.append(rel)
+    return send, check, same
+
+
+def sync_directory(client, sftp, local_dir, remote_dir, log, force=False, delete_py=False):
+    """Envia so o que mudou de local_dir para remote_dir. Devolve um resumo (dict)."""
+    started = time.monotonic()
+    local = local_tree(local_dir)
+    remote = remote_tree(client, remote_dir)
+    send, check, same = sync_plan(local, remote, force)
+    touched = []
+    if check:
+        sums = remote_md5(client, remote_dir, check)
+        for rel in check:
+            if sums.get(rel) == local_md5(local[rel][2]):
+                touched.append(rel)  # conteudo igual: so acerta a data no carro
+            else:
+                send.append(rel)
+    known_dirs = {""} | {posixpath.dirname(rel) for rel in remote}
+    sent_bytes = 0
+    for rel in send:
+        folder = posixpath.dirname(rel)
+        if folder not in known_dirs:
+            path = ""
+            for part in folder.split("/"):
+                path = posixpath.join(path, part) if path else part
+                if path not in known_dirs:
+                    try:
+                        sftp.mkdir(posixpath.join(remote_dir, path))
+                    except IOError:
+                        pass  # ja existe
+                    known_dirs.add(path)
+        size, mtime, path = local[rel]
+        target = posixpath.join(remote_dir, rel)
+        sftp.put(path, target)
+        sftp.utime(target, (mtime, mtime))
+        sent_bytes += size
+        log(f"   ↑ {rel}")
+    for rel in touched:
+        mtime = local[rel][1]
+        sftp.utime(posixpath.join(remote_dir, rel), (mtime, mtime))
+    removed = []
+    if delete_py:
+        # So .py que sumiram daqui (arquivo renomeado/apagado, testes de outra
+        # branch); nunca dentro das pastas de dados.
+        for rel in sorted(set(remote) - set(local)):
+            if (rel.endswith(".py") and rel.split("/")[0] not in SYNC_SKIP_TOP_DIRS
+                    and not any(part in SYNC_SKIP_DIRS for part in rel.split("/"))):
+                sftp.remove(posixpath.join(remote_dir, rel))
+                removed.append(rel)
+                log(f"   ✗ {rel} (não existe mais aqui)")
+    return {"sent": len(send), "same": len(same) + len(touched), "bytes": sent_bytes,
+            "removed": len(removed), "seconds": time.monotonic() - started}
 
 
 def open_folder(path: Path):
@@ -544,6 +690,13 @@ class RsyncGUI(tk.Tk):
         ttk.Button(send, text="Enviar arquivos", command=self.send_to_selected).pack(
             side="left", padx=4
         )
+        # Envio incremental: so o que mudou desde o ultimo envio vai pelo Wi-Fi.
+        self.sync_force_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(send, text="Enviar tudo (ignorar o que já está no carro)",
+                        variable=self.sync_force_var).pack(side="left", padx=(12, 4))
+        self.sync_delete_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(send, text="Apagar no carro .py que não existem mais aqui",
+                        variable=self.sync_delete_var).pack(side="left", padx=(12, 4))
 
         # Log
         log_frame = ttk.Frame(parent)
@@ -715,12 +868,15 @@ class RsyncGUI(tk.Tk):
         for value, label in (("cones", "Cones"), ("line", "Linha amarela")):
             ttk.Radiobutton(row, text=label, value=value,
                             variable=self.mission_vars["navigation"]).pack(side="left", padx=(4, 8))
-        for label, key, values, width in (("Velocidade [m/s]:", "speed", SPEED_PRESETS, 6),
+        for label, key, values, width in (("Vel. máx. retas [m/s]:", "speed", SPEED_PRESETS, 6),
+                                          ("Curva mais fechada R [m]:", "min_radius", CURVE_RADII, 5),
                                           ("Largura da visão:", "vision_width", VISION_WIDTHS, 5),
                                           ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4)):
             ttk.Label(row, text=label).pack(side="left", padx=(12, 4))
-            ttk.Combobox(row, textvariable=self.mission_vars[key], state="readonly",
-                         values=values, width=width).pack(side="left")
+            combo = ttk.Combobox(row, textvariable=self.mission_vars[key], state="readonly",
+                                 values=values, width=width)
+            combo.pack(side="left")
+            self.mission_combos = {**getattr(self, "mission_combos", {}), key: combo}
 
         checks = ttk.Frame(box)
         checks.pack(fill="x", padx=6, pady=2)
@@ -768,6 +924,10 @@ class RsyncGUI(tk.Tk):
                 enabled = enabled and options.get("estimator", True)
             check.state(["!disabled"] if enabled else ["disabled"])
         self.record_combo.state(["!disabled"] if cones and options.get("record_frames") else ["disabled"])
+        radius = getattr(self, "mission_combos", {}).get("min_radius")
+        if radius is not None:  # limite de visibilidade usa o caminho do estimador
+            radius.state(["readonly", "!disabled"] if cones and options.get("estimator", True)
+                         else ["disabled"])
         self.classifier_entry.state(["!disabled"] if cones and options.get("classifier") else ["disabled"])
 
     def apply_mission_options(self):
@@ -2125,9 +2285,13 @@ class RsyncGUI(tk.Tk):
                 self.ui(self.log_write, "   - " + item)
             return
 
+        force = bool(getattr(self, "sync_force_var", None) and self.sync_force_var.get())
+        delete_py = bool(getattr(self, "sync_delete_var", None) and self.sync_delete_var.get())
+        log = lambda text: self.ui(self.log_write, text)
         for name, ip in targets:
             self.ui(self.log_write, "=" * 60)
-            self.ui(self.log_write, f"🚀 Enviando via SFTP para {name.upper()} ({ip})")
+            self.ui(self.log_write, f"🚀 Enviando via SFTP para {name.upper()} ({ip})"
+                    + (" — tudo" if force else " — só o que mudou"))
             client = None
             sftp = None
             try:
@@ -2140,7 +2304,12 @@ class RsyncGUI(tk.Tk):
                         # Mesmo comportamento do antigo rsync com barra final:
                         # envia o CONTEÚDO da pasta para o destino.
                         self.ui(self.log_write, f"📁 {path} -> {dest}/")
-                        self._sftp_upload_directory_contents(sftp, path, dest)
+                        summary = sync_directory(client, sftp, path, dest, log, force, delete_py)
+                        self.ui(self.log_write,
+                                f"   {summary['sent']} enviado(s) ({summary['bytes']/1024:.0f} kB),"
+                                f" {summary['same']} igual(is) pulado(s)"
+                                + (f", {summary['removed']} apagado(s)" if summary["removed"] else "")
+                                + f" — {summary['seconds']:.1f} s")
                     else:
                         remote_path = posixpath.join(dest, os.path.basename(path))
                         self.ui(self.log_write, f"📄 {path} -> {remote_path}")

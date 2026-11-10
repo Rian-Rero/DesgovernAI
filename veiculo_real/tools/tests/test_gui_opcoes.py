@@ -48,10 +48,12 @@ class MissionOptionsTests(unittest.TestCase):
                 self.assertEqual("cone_classifier" in settings, options["classifier"])
 
     def test_values_and_line_mode(self):
-        settings = parsed(gui.build_main_command({"speed": "1.5", "vision_width": "320", "steering_filter": "1",
-                                                  "record_hz": "5", "record_frames": True}))
+        settings = parsed(gui.build_main_command({"speed": "2.0", "vision_width": "320", "steering_filter": "1",
+                                                  "record_hz": "5", "record_frames": True, "min_radius": "1.2"}))
         self.assertEqual((settings["velocity_reference"], settings["vision_width"],
-                          settings["steering_filter_size"], settings["record_frames_hz"]), (1.5, 320, 1, 5.))
+                          settings["steering_filter_size"], settings["record_frames_hz"],
+                          settings["min_curve_radius_m"]), (2., 320, 1, 5., 1.2))
+        self.assertNotIn("min_curve_radius_m", parsed(gui.build_main_command({})))  # 1.5: padrao do main.py
         line = gui.build_main_command({"navigation": "line", "pure_pursuit": False, "record_frames": True,
                                        "classifier": True, "estimator": False})
         settings = parsed(line)
@@ -127,6 +129,27 @@ class LocalCar:
         import shutil
         shutil.copyfile(remote, local)
 
+    def put(self, local, remote):
+        import shutil
+        self.puts = getattr(self, "puts", 0) + 1
+        shutil.copyfile(local, remote)
+
+    def utime(self, path, times):
+        import os
+        os.utime(path, times)
+
+    def mkdir(self, path):
+        import os
+        os.mkdir(path)
+
+    def stat(self, path):
+        import os
+        return os.stat(path)
+
+    def remove(self, path):
+        import os
+        os.remove(path)
+
     def get_transport(self):
         return type("T", (), {"is_active": lambda self: True})()
 
@@ -135,6 +158,70 @@ class LocalCar:
 
     def close(self):
         pass
+
+
+class IncrementalSendTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.folders = [tempfile.TemporaryDirectory() for _ in range(2)]
+        self.local, self.car = (Path(f.name) for f in self.folders)
+        for rel, text in {"main.py": "print(1)\n", "fva_car/corridor.py": "x = 1\n",
+                          "tools/tests/test_a.py": "pass\n", "calibracao/camera.json": "{}",
+                          "fva_car/__pycache__/corridor.cpython-312.pyc": "lixo",
+                          "logs/20261023/car.csv": "dado local", ".DS_Store": "x"}.items():
+            path = self.local / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        (self.car / "logs").mkdir()
+        (self.car / "logs" / "car.csv").write_text("dado do carro", encoding="utf-8")
+
+    def tearDown(self):
+        for folder in self.folders:
+            folder.cleanup()
+
+    def sync(self, **options):
+        car = LocalCar()
+        lines = []
+        summary = gui.sync_directory(car, car, str(self.local), str(self.car), lines.append, **options)
+        return summary, lines, getattr(car, "puts", 0)
+
+    def test_only_changed_files_are_sent(self):
+        import os
+        summary, _, puts = self.sync()
+        self.assertEqual((summary["sent"], puts), (4, 4))  # sem __pycache__, .pyc, logs/, .DS_Store
+        self.assertFalse((self.car / "fva_car" / "__pycache__").exists())
+        self.assertEqual((self.car / "logs" / "car.csv").read_text(encoding="utf-8"), "dado do carro")
+        summary, _, puts = self.sync()
+        self.assertEqual((summary["sent"], summary["same"], puts), (0, 4, 0))
+        edited = self.local / "fva_car" / "corridor.py"
+        edited.write_text("x = 2\n", encoding="utf-8")  # mesmo tamanho, conteudo novo
+        later = os.stat(edited).st_mtime + 30  # edicao real: segundos depois do envio
+        os.utime(edited, (later, later))
+        summary, lines, puts = self.sync()
+        self.assertEqual((summary["sent"], puts), (1, 1))
+        self.assertIn("   ↑ fva_car/corridor.py", lines)
+        self.assertEqual((self.car / "fva_car" / "corridor.py").read_text(encoding="utf-8"), "x = 2\n")
+        # So a data mudou (git checkout, copia): confere o md5 e nao reenvia.
+        os.utime(self.local / "main.py", (1e9, 1e9))
+        summary, _, puts = self.sync()
+        self.assertEqual((summary["sent"], puts), (0, 0))
+        self.assertEqual(int(os.stat(self.car / "main.py").st_mtime), int(1e9))
+        summary, _, puts = self.sync(force=True)
+        self.assertEqual(puts, 4)
+
+    def test_optional_cleanup_removes_only_stale_python_files(self):
+        self.sync()
+        for rel in ("tests/test_adas.py", "logs/script.py", "notas.txt"):
+            path = self.car / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("antigo", encoding="utf-8")
+        summary, _, _ = self.sync()
+        self.assertTrue((self.car / "tests" / "test_adas.py").exists())  # padrao: nao apaga nada
+        summary, lines, _ = self.sync(delete_py=True)
+        self.assertEqual(summary["removed"], 1)
+        self.assertFalse((self.car / "tests" / "test_adas.py").exists())
+        self.assertTrue((self.car / "logs" / "script.py").exists())
+        self.assertTrue((self.car / "notas.txt").exists())
 
 
 @unittest.skipUnless(__import__("os").environ.get("FVA_TEST_TK") == "1", "Set FVA_TEST_TK=1 for real Tk testing")

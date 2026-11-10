@@ -193,6 +193,7 @@ class RealConeDetector:
         estimate = None
         speed_factor = 1.
         path_dkappa = math.nan
+        speed_cap = math.inf
         if self.corridor is not None:
             estimate = self._corridor_step(result, timestamp, motion)
             valid = estimate.valid
@@ -202,6 +203,8 @@ class RealConeDetector:
             speed_factor = estimate.speed_factor if valid else 1.
             if valid:
                 path_dkappa = float(estimate.state_vector[3])
+                if estimate.state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA'):
+                    speed_cap = self.corridor.settings.one_border_speed
             metadata['corridor'] = estimate
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
@@ -219,7 +222,7 @@ class RealConeDetector:
             width = result.corridor_width_m if valid else math.nan
         observation = ConeObservation(timestamp,
             errors=tuple(float(e) for e in errors) if valid else None,
-            speed_limit=CONE_RECOVERY_SPEED if valid and recovery else math.inf,
+            speed_limit=CONE_RECOVERY_SPEED if valid and recovery else speed_cap,
             speed_factor=speed_factor, path_dkappa=path_dkappa, reason=reason, debug=debug,
             corridor_width_m=width, **metadata)
         return self.with_preview(observation) if self.render_preview else observation

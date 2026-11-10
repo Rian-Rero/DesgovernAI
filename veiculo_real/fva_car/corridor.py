@@ -88,6 +88,9 @@ class CorridorSettings:
     slow_sigma_e: float = .1       # acima disso, velocidade de recuperacao
     straight_curvature: float = .15  # 1/m: abaixo disso uma borda so e "reta"
     pose_offset_m: float = .36     # do ponto da pose (eixo traseiro) ao eixo dianteiro
+    # Teto absoluto (m/s) com uma borda so (SO_EXTERNA/SO_INTERNA/UMA_BORDA_RETA):
+    # com velocidade alta nas retas, uma fracao da vref ainda seria rapido demais.
+    one_border_speed: float = .9
 
     @classmethod
     def from_value(cls, value, **defaults):

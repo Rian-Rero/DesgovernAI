@@ -452,18 +452,25 @@ def pure_pursuit_steer(errors, dkappa, lookahead, wheelbase, max_curvature=math.
 
 
 def preview_speed(errors, dkappa, reference, distance, lateral_accel=.6, deceleration=.5,
-                  reaction=.3, speed=0., min_speed=.15, max_curvature=math.inf):
+                  reaction=.3, speed=0., min_speed=.15, max_curvature=math.inf, sight_curvature=0.):
     """Maior velocidade agora que ainda permite fazer as curvas dos proximos `distance` m.
 
     O carro nao freia: so perde velocidade rolando (~deceleration m/s^2). Uma
     curva a s metros, com limite v_c = sqrt(a_lat/|kappa|), aceita hoje
     sqrt(v_c^2 + 2*desacel*(s - v*reacao)). Devolve (velocidade, curvatura
     maxima a frente, distancia dela).
+
+    sight_curvature (1/m): o que vem DEPOIS de `distance` nao e visto; supoe
+    ali uma curva com essa curvatura (a mais fechada da pista). E o limite de
+    visibilidade: na reta o carro corre o maximo que ainda deixa rolar ate a
+    velocidade dessa curva dentro do trecho visto.
     """
     lateral, heading, curvature = errors
     dkappa = dkappa if math.isfinite(dkappa) else 0.
     s = np.linspace(0., max(distance, 0.), 26)
     kappa = np.abs(np.clip(curvature + dkappa*s, -max_curvature, max_curvature))
+    if sight_curvature > 0:
+        kappa[-1] = max(kappa[-1], min(sight_curvature, max_curvature))
     bend = np.sqrt(lateral_accel/np.maximum(kappa, 1e-6))
     margin = np.maximum(s - abs(speed)*reaction, 0.)
     allowed = np.sqrt(bend*bend + 2.*deceleration*margin)
@@ -573,6 +580,9 @@ class RealStanleyFollower:
         self.preview_distance = nonnegative('speed_preview_m', 0.)
         self.coast_deceleration = positive('coast_deceleration', .5)
         self.preview_reaction = nonnegative('speed_preview_reaction_s', .3)
+        # Curva mais fechada que pode aparecer logo depois do trecho visto (1/m);
+        # 0 desliga o limite de visibilidade (so curvas ja vistas reduzem).
+        self.sight_curvature = nonnegative('speed_sight_curvature', 0.)
         # Rampa assimetrica da vref: sobe no maximo speed_rise_m_s2 (m/s^2) e
         # desce na hora. 0 mantem o passa-baixas simetrico speed_filter_s.
         self.speed_rise = nonnegative('speed_rise_m_s2', 0.)
@@ -775,7 +785,7 @@ class RealStanleyFollower:
                     errors, self.path_dkappa, self.reference, self.preview_distance,
                     lateral_accel=self.lateral_accel, deceleration=self.coast_deceleration,
                     reaction=self.preview_reaction, speed=car.v, min_speed=self.min_speed,
-                    max_curvature=self.max_curvature)
+                    max_curvature=self.max_curvature, sight_curvature=self.sight_curvature)
                 speed_raw = min(speed_raw, self.preview[0])
             self.hold_speed_factor = 1.
             if holding and self.loss_speed_ramp:

@@ -55,6 +55,30 @@ class PathGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(inside, math.sqrt(.4/.5), places=3)
 
 
+class SightLimitTests(unittest.TestCase):
+    def test_straight_top_speed_is_what_still_lets_it_coast_into_the_tightest_curve(self):
+        # Reta vista ate 2,5 m; depois pode vir curva de R = 1,5 m. Carro so rola (0,5 m/s^2).
+        speed = 2.
+        for _ in range(30):  # ponto fixo: a reacao depende da velocidade atual
+            speed, kappa, where = preview_speed((0., 0., 0.), 0., 2., 2.5, lateral_accel=.4,
+                                                deceleration=.5, speed=speed, sight_curvature=1/1.5)
+        bend = math.sqrt(.4*1.5)
+        self.assertAlmostEqual(where, 2.5)
+        self.assertGreater(speed, 1.4)    # corre bem mais que a curva...
+        self.assertLess(speed, 1.75)      # ...mas so o que ainda da para rolar ate ela
+        self.assertAlmostEqual(speed**2, bend**2 + 2*.5*(2.5 - .3*speed), places=2)
+        # Sem o limite, so curvas vistas reduzem: na reta fica na referencia.
+        self.assertEqual(preview_speed((0., 0., 0.), 0., 2., 2.5, lateral_accel=.4)[0], 2.)
+
+    def test_mission_turns_min_radius_into_sight_limit_only_with_estimator(self):
+        config = dict(main.parameters)
+        self.assertAlmostEqual(main.follower_config(config, 'cones', {})['speed_sight_curvature'], 1/1.5)
+        self.assertEqual(main.follower_config(dict(config, min_curve_radius_m=0), 'cones', {})
+                         ['speed_sight_curvature'], 0.)
+        self.assertEqual(main.follower_config(config, 'cones', None)['speed_sight_curvature'], 0.)
+        self.assertNotIn('speed_sight_curvature', main.follower_config(config, 'line', None))
+
+
 class FollowerTests(unittest.TestCase):
     settings = dict(velocity_reference=1., curve_min_speed=.2, vision_latency_compensation=False,
                     speed_filter_s=0.)

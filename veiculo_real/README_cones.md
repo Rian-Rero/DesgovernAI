@@ -186,6 +186,34 @@ RMS, contra 7,5–9,4 cm do Stanley. O maior erro isolado é no grampo de R = 1,
 `pursuit_target_y_m`, `path_dkappa`, `preview_speed_m_s` e
 `preview_curvature_m_inv`.
 
+### Rápido nas retas, cuidado nas curvas
+
+Nos cones, `velocity_reference` (a velocidade da GUI) é a **velocidade máxima
+nas retas**. Quem decide quanto o carro corre em cada trecho:
+
+- **Curva vista** (prévia de 2,5 m): reduz antes dela, para fazer a curva com
+  `curve_lateral_accel` (0,4 m/s²).
+- **Limite de visibilidade** (`min_curve_radius_m`, padrão 1,5 m; `--min-radius`;
+  na GUI, "Curva mais fechada"). A câmera vê ~2,5 m e o carro só rola para reduzir
+  (~0,5 m/s²). Então ele supõe que, logo depois do trecho visto, pode vir a curva
+  mais fechada da pista, e corre só o que ainda deixa rolar até a velocidade
+  dela. Na reta, isso dá ~1,6 m/s.
+- **Confiança**: com uma borda só, o teto é de 0,9 m/s (`one_border_speed`); na
+  memória ou com incerteza alta, 0,35 m/s; perdido, para.
+
+Na pista virtual, com vref 2,0 contra 0,7 hoje, a volta ficou de 26 a 46% mais
+rápida (retas longas: 52 → 30 s). Não houve toques, o erro foi de 2–4 cm RMS e a
+aceleração lateral, de 0,31–0,46 m/s². Os piores casos (rolar só 0,35 m/s²,
+calibração +8 px, visão a 10 quadros/s com servo lento) também ficaram sem
+toques, com erro máximo de 16 cm. Sem o limite de visibilidade, o carro chegava
+no grampo com 0,57 m/s².
+
+**No carro, subam aos poucos:** 0,7 → 1,0 → 1,5 → 2,0. Confiram em cada passo se
+ele reduz antes das curvas (`preview_speed_m_s` no `car.csv`) e se não abre a
+curva. Se ele chegar rápido demais, aumentem a margem: menor raio
+(`--min-radius 1.2`) ou `coast_deceleration` menor (o carro rola menos do que se
+supôs).
+
 ### Pista virtual (sem o carro)
 
 `tools/pista_virtual.py` roda o **mesmo código do carro** em malha fechada:

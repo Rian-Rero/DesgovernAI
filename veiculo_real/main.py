@@ -128,6 +128,13 @@ parameters = {
     "speed_preview_m": 2.5,
     "speed_rise_m_s2": 1.0,
     "coast_deceleration": 0.5,
+    # Limite de visibilidade: a camera ve ~2,5 m e o carro so rola para reduzir;
+    # depois do trecho visto supoe uma curva de raio min_curve_radius_m (a mais
+    # fechada da pista). Assim velocity_reference vira a velocidade MAXIMA NAS
+    # RETAS: o carro acelera ate o que ainda deixa rolar ate essa curva (~1,6 m/s
+    # com R = 1,5 m) e reduz antes das curvas vistas. Pista virtual, vref 2,0:
+    # volta 26-46% mais rapida que a 0,7 m/s, sem toques (tools/pista_virtual.py).
+    "min_curve_radius_m": 1.5,
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
@@ -329,6 +336,8 @@ def follower_config(config, mode, corridor):
         config["steering_law"] = "stanley"
         config["speed_preview_m"] = 0.0
         config["speed_rise_m_s2"] = 0.0
+    radius = float(config.get("min_curve_radius_m", 0) or 0)
+    config["speed_sight_curvature"] = 1.0 / radius if radius > 0 and corridor is not None else 0.0
     config["line_search_rate_deg_s"] = 0.
     config["loss_speed_ramp"] = True
     config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
@@ -458,7 +467,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             f"{'Pure pursuit' if config.get('steering_law') == 'pure_pursuit' else 'Stanley'} {mode}"
             f" | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s"
             + (f" | previa de curva {float(config['speed_preview_m']):.1f} m"
-               if config.get("speed_preview_m") else ""),
+               if config.get("speed_preview_m") else "")
+            + (f" | curva mais fechada R={1/float(config['speed_sight_curvature']):.1f} m"
+               if config.get("speed_sight_curvature") else ""),
             flush=True,
         )
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
@@ -746,6 +757,9 @@ def main():
                         help="Cones: Stanley no eixo em vez do pure pursuit no centro estimado")
     parser.add_argument("--no-preview", action="store_true",
                         help="Cones: sem previa de curva (vref so pela curvatura no eixo)")
+    parser.add_argument("--min-radius", type=float, metavar="R",
+                        help="Cones: raio (m) da curva mais fechada da pista; limita a velocidade nas retas"
+                             " (padrao 1.5; 0 desliga)")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
@@ -777,6 +791,10 @@ def main():
         settings["cone_estimator"] = False
     if args.stanley:
         settings["steering_law"] = "stanley"
+    if args.min_radius is not None:
+        if args.min_radius < 0:
+            parser.error("--min-radius deve ser >= 0")
+        settings["min_curve_radius_m"] = args.min_radius
     if args.no_preview:
         settings["speed_preview_m"] = 0.0
         settings["speed_rise_m_s2"] = 0.0

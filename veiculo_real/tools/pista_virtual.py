@@ -57,6 +57,8 @@ TRACKS = {
     's': [('reta', 3.), ('curva', 2.2, 90), ('curva', -2.2, 180), ('curva', 2.2, 90), ('reta', 4.)],
     'chicane': [('reta', 3.), ('curva', 3., 45), ('curva', -3., 90), ('curva', 3., 45), ('reta', 2.),
                 ('curva', -2., 120), ('reta', 4.)],
+    # Retas longas terminando em curvas fechadas: onde se ganha (ou se perde) tempo.
+    'retas': [('reta', 10.), ('curva', -1.6, 180), ('reta', 10.), ('curva', 2., 90), ('reta', 6.)],
 }
 
 
@@ -280,9 +282,11 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
             states[estimate.state] += 1
             valid += estimate.valid
             ready = now + rng.uniform(*latency)
+            one_border = estimate.valid and estimate.state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA')
             fields = dict(speed_factor=estimate.speed_factor if estimate.valid else 1.,
                           path_dkappa=float(estimate.state_vector[3]) if estimate.valid else math.nan,
-                          speed_limit=CONE_RECOVERY_SPEED if estimate.valid and estimate.slow else math.inf)
+                          speed_limit=(CONE_RECOVERY_SPEED if estimate.valid and estimate.slow
+                                       else settings.one_border_speed if one_border else math.inf))
             pending.append((ready, LineObservation(now, errors=estimate.errors, reason=estimate.reason,
                                                    reference_source='cones', **fields)))
             next_capture = now + rng.normal(1./fps, .006)
