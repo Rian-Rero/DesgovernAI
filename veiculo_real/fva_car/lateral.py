@@ -279,6 +279,7 @@ class StanleyController:
         self.max_steer, self.max_rate = max_steer, max_rate
         self.wheelbase, self.curvature_gain = wheelbase, curvature_gain
         self.gain_scale = self.rate_scale = 1.  # reforco temporario (curva por uma cor)
+        self.trim = 0.  # correcao integral de centralizacao (rad), dada pelo seguidor
         self.reset()
 
     def reset(self):
@@ -313,9 +314,10 @@ class StanleyController:
     def steer_to(self, raw_steer, dt, gain=1., rate=1.):
         """Satura no batente e limita a taxa (comum ao Stanley e ao pure pursuit).
 
-        gain multiplica o esterco pedido; rate, a taxa maxima do volante.
+        gain multiplica o esterco pedido; rate, a taxa maxima do volante; trim
+        (correcao de centralizacao, rad) e somado depois.
         """
-        self.raw_steer = float(raw_steer)*gain
+        self.raw_steer = float(raw_steer)*gain + self.trim
         self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
         limit = self.max_rate*rate*dt
         self.steer += float(np.clip(self.target_steer - self.steer, -limit, limit))
@@ -595,6 +597,22 @@ class RealStanleyFollower:
         # tendia a virar tarde/pouco.
         self.one_border_steer_gain = positive('one_border_curve_steer_gain', 1.)
         self.one_border_rate_gain = positive('one_border_curve_rate_gain', 1.)
+        # Centralizacao: integral do erro lateral vira um esterco de correcao
+        # (trim), igual para Stanley e pure pursuit. Corrige vies fixo (centro
+        # do servo, assimetria esquerda/direita): sem ela o carro ficava 2-12 cm
+        # a direita do centro nos ensaios de 10/11. Integra so com referencia
+        # confiavel (duas bordas, sem perda), andando, e com limite.
+        self.centering_gain = nonnegative('centering_gain', 0.)  # rad por (m*s)
+        self.centering_limit = math.radians(nonnegative('centering_limit_deg', 4.))
+        self.centering_min_speed = nonnegative('centering_min_speed', .2)
+        # So aprende em reta (|kappa| no eixo e 1,5 m a frente abaixo disto): em
+        # curva o erro natural do seguimento nao e vies do carro.
+        self.centering_max_curvature = positive('centering_max_curvature', .15)
+        self.centering = 0.  # fora de reset(): o vies do carro nao muda ao perder a faixa
+        self.centering_time = 0.  # s de reta em que aprendeu (para salvar o trim)
+        # Trim fixo do carro (graus): ponto de partida do aprendido.
+        self.trim_base = math.radians(float(self.settings.get('steering_trim_deg', 0.) or 0.))
+        self.trim_sent = None
         # Rampa assimetrica da vref: sobe no maximo speed_rise_m_s2 (m/s^2) e
         # desce na hora. 0 mantem o passa-baixas simetrico speed_filter_s.
         self.speed_rise = nonnegative('speed_rise_m_s2', 0.)
@@ -641,6 +659,19 @@ class RealStanleyFollower:
             return math.copysign(1., curvature)
         ahead = lateral + SEARCH_LOOKAHEAD * math.sin(heading)
         return math.copysign(1., ahead) if abs(ahead) > SEARCH_MIN_OFFSET else 0.
+
+    @property
+    def steer_trim(self):
+        """Centro da direcao em uso (rad, geometrico): fixo + aprendido."""
+        return self.trim_base + self.centering
+
+    def _send_trim(self, car):
+        """Trim no SERVO (Car.set_steer_trim), fora do esterco usado na odometria."""
+        setter = getattr(car, 'set_steer_trim', None)
+        trim = self.steering_sign*self.steer_trim
+        if callable(setter) and (self.trim_sent is None or abs(trim - self.trim_sent) > 1e-4):
+            setter(trim)
+            self.trim_sent = trim
 
     def _filter_speed(self, target, dt):
         if self.speed_target is None or self.speed_filter <= 0 and self.speed_rise <= 0:
@@ -822,6 +853,15 @@ class RealStanleyFollower:
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
                                and math.isfinite(stanley_speed))
             active = active and reference_valid
+            dkappa = self.path_dkappa if math.isfinite(self.path_dkappa) else 0.
+            straight = max(abs(curvature), abs(curvature + 1.5*dkappa)) < self.centering_max_curvature
+            if (self.centering_gain > 0 and line_seen and not holding and not search and straight
+                    and self.line_speed_factor >= .999 and abs(lateral) < .4
+                    and abs(float(car.v)) >= self.centering_min_speed):
+                self.centering = float(np.clip(self.centering + self.centering_gain*lateral*car.dt,
+                                               -self.centering_limit, self.centering_limit))
+                self.centering_time += float(car.dt)
+            self._send_trim(car)
             boost = self.one_border_curve and not search
             gain = self.one_border_steer_gain if boost else 1.
             rate = self.one_border_rate_gain if boost else 1.
@@ -920,6 +960,7 @@ class RealStanleyFollower:
                 pursuit_target_y_m=self.pursuit_target[2] if active and self.pursuit_target else invalid,
                 path_dkappa=self.path_dkappa,
                 one_border_curve=int(self.one_border_curve),
+                steer_trim_rad=self.steer_trim,
                 preview_speed_m_s=self.preview[0] if active and self.preview else invalid,
                 preview_curvature_m_inv=self.preview[1] if active and self.preview else invalid,
                 vref=float(car.vref), u=float(car.u))
@@ -930,6 +971,7 @@ class RealStanleyFollower:
             reference_speed_factor=self.line_speed_factor if active else invalid,
             speed_target=speed_raw, vref=float(car.vref), steer_rad=steer,
             steering_law='pure_pursuit' if active and self.pursuit_target else 'stanley',
+            steer_trim_deg=round(math.degrees(self.steer_trim), 2),
             pursuit=None if not (active and self.pursuit_target) else [round(v, 3) for v in self.pursuit_target],
             preview=None if not (active and self.preview) else [round(v, 3) for v in self.preview],
             cross_track_m=lateral, heading_rad=heading, curvature_m_inv=curvature,

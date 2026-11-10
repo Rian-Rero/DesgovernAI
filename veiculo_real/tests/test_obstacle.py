@@ -41,6 +41,13 @@ class CurveEchoTests(unittest.TestCase):
         self.assertTrue(ignore, reason)
         self.assertIn('direita', reason)
 
+    def test_curve_entry_before_the_wheel_turns_is_also_ignored(self):
+        # Stanley e pure pursuit vao virar: a roda ainda reta nao trava o carro.
+        distance = first_echo(self.LEFT_CURVE, 'direita')
+        for steer in (0., math.radians(3)):
+            with self.subTest(steer=steer):
+                self.assertTrue(curve_echo(distance, observation(self.LEFT_CURVE), steer, .8, 10.1)[0])
+
     def test_obstacle_in_the_middle_of_the_lane_still_stops(self):
         # Eco a 0,3 m: nenhuma borda passa no feixe tao perto.
         self.assertIsNone(border_echo(.3, self.LEFT_CURVE))
@@ -52,12 +59,11 @@ class CurveEchoTests(unittest.TestCase):
         distance = first_echo(self.LEFT_CURVE, 'direita')
         cases = {
             'reta': (observation((0., 0., 0., 0., WIDTH)), math.radians(12), 10.1),
-            'nao virou': (observation(self.LEFT_CURVE), math.radians(3), 10.1),
             'virando para fora': (observation(self.LEFT_CURVE), math.radians(-12), 10.1),
-            'sem corredor': (observation(self.LEFT_CURVE, state='MEMORIA'), math.radians(12), 10.1),
+            'sem corredor': (observation(self.LEFT_CURVE, state='PERDIDO'), math.radians(12), 10.1),
             'invalido': (observation(self.LEFT_CURVE, valid=False), math.radians(12), 10.1),
             'visao velha': (observation(self.LEFT_CURVE), math.radians(12), 11.),
-            'perto da borda': (observation((.5, .15, .5, 0., WIDTH)), math.radians(12), 10.1),
+            'perto da borda': (observation((.6, .15, .5, 0., WIDTH)), math.radians(12), 10.1),
             'sem visao': (SimpleNamespace(timestamp=10.), math.radians(12), 10.1),
         }
         for name, (obs, steer, now) in cases.items():

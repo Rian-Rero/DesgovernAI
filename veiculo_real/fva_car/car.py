@@ -506,6 +506,14 @@ class Car:
 
     ########################################
     # seta steer do veiculo
+    def set_steer_trim(self, trim):
+        """Centro da direcao (rad, esquerda +) somado no servo. self.st (usado na
+        odometria) continua sendo o esterco pretendido: com o centro certo, a
+        roda faz o que a odometria supoe."""
+        trim = float(trim) if np.isfinite(trim) else 0.0
+        self.atuador.set_trim(steer=trim, throttle=getattr(self.atuador, "trim_throttle", 0.0))
+        return trim
+
     def set_steer(self, st):
         # emergencia
         if self.emergencia or not self._encoder_ready():

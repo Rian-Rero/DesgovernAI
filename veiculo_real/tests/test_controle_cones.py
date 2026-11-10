@@ -4,6 +4,9 @@ from pathlib import Path
 import sys
 import unittest
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -124,6 +127,58 @@ class FollowerTests(unittest.TestCase):
         follower.speed_target = 1.
         self.apply(follower, LineObservation(10.04, errors=(0., 0., 1.)), car, 10.04)
         self.assertAlmostEqual(car.vref, math.sqrt(.4/1.), places=2)  # curva: desce na hora
+
+
+class CenteringTests(unittest.TestCase):
+    settings = dict(velocity_reference=1., curve_min_speed=.2, vision_latency_compensation=False,
+                    speed_filter_s=0., centering_gain=.5)
+
+    def run_steps(self, errors, steps=100, **extra):
+        follower = RealStanleyFollower(dict(self.settings, **extra))
+        car = fake_car()
+        car.v, car.dt = .6, .02
+        trims = []
+        car.set_steer_trim = Mock(side_effect=lambda trim: trims.append(trim))
+        for k in range(steps):
+            now = 10. + k*car.dt
+            follower.apply(car, LineObservation(now, errors=errors, path_dkappa=0.), now)
+        return follower, car, trims
+
+    def test_constant_offset_on_a_straight_becomes_servo_trim(self):
+        # Centro 5 cm a esquerda o tempo todo (vies do carro): trim para a esquerda.
+        follower, car, trims = self.run_steps((.05, 0., 0.))
+        self.assertAlmostEqual(follower.centering, .5*.05*100*.02, places=4)
+        self.assertGreater(trims[-1], 0.)
+        self.assertAlmostEqual(follower.centering_time, 2., places=6)
+        # O trim vai para o servo: o esterco pretendido (odometria) nao o inclui.
+        self.assertLess(abs(car.st - follower.controller.steer), 1e-9)
+
+    def test_no_learning_in_curves_with_one_border_or_disabled(self):
+        for errors, extra in (((.05, 0., .5), {}),                    # curva
+                              ((.05, 0., 0.), {'centering_gain': 0.})):  # desligado
+            with self.subTest(errors=errors, extra=extra):
+                follower, _, _ = self.run_steps(errors, **extra)
+                self.assertEqual(follower.centering, 0.)
+        follower = RealStanleyFollower(self.settings)
+        car = fake_car()
+        car.v = .6
+        follower.apply(car, LineObservation(10., errors=(.05, 0., 0.), speed_factor=.8), 10.)  # uma borda so
+        self.assertEqual(follower.centering, 0.)
+
+    def test_trim_is_saved_for_the_next_run_and_loaded_back(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'direcao_trim.json'
+            config = dict(main.parameters, steering_trim_deg=1.0)
+            follower = SimpleNamespace(centering=math.radians(2.), centering_time=5.)
+            self.assertAlmostEqual(main.save_steering_trim(follower, config, path), 2.0)  # 1 + 0,5*2
+            self.assertAlmostEqual(main.load_steering_trim(dict(config, steering_trim_deg=0.), path), 2.0)
+            short = SimpleNamespace(centering=math.radians(2.), centering_time=1.)  # pouca reta: nao salva
+            self.assertIsNone(main.save_steering_trim(short, config, path))
+            off = dict(config, steering_trim_learning=False)
+            self.assertEqual(main.load_steering_trim(off, path), 1.0)
+            self.assertIsNone(main.save_steering_trim(follower, off, path))
 
 
 class MissionConfigTests(unittest.TestCase):

@@ -223,6 +223,29 @@ volante gira 1,5× mais rápido (`one_border_curve_rate_gain`; 120 → 180°/s).
 pista virtual, 1,1–1,2 foi de neutro a um pouco melhor, inclusive com servo
 lento; 1,3/2,0 já passava do ponto. Com 1 o reforço fica desligado.
 
+### Centralização (trim da direção)
+
+Nos ensaios de 10/11, o carro andava 2–12 cm à direita do centro: nas retas, e
+sobretudo nas curvas à direita. Nem o Stanley nem o pure pursuit têm termo
+integral, então um viés fixo (centro do servo fora, assimetria esquerda/direita)
+vira desvio fixo. Agora o erro lateral **em reta e com as duas bordas** é
+integrado (`centering_gain` = 0,15 rad por m·s, limite ±4°) e vira **trim do
+servo** (`Car.set_steer_trim`). A odometria continua usando o esterço pretendido:
+com o centro certo, a roda faz o que a odometria supõe. Se o trim fosse somado
+ao comando, o próprio estimador ficaria enviesado (testado na pista virtual).
+
+O trim aprendido é salvo em `logs/direcao_trim.json` no fim de cada corrida (se
+houve ao menos 3 s de reta), e a corrida seguinte começa dele. Cada corrida move
+o trim salvo só metade do que aprendeu. Na pista virtual, com 3° de viés na
+direção, o pure pursuit ficava em média 10 cm de lado (RMS 10,5 cm); da 2ª
+corrida em diante, RMS de 3,1–3,7 cm, igual a um carro sem viés. O terminal
+mostra o trim no início e no fim. Para desligar: `--no-trim-learning`, ou a
+caixa "Aprender o centro da direção" na GUI (aí vale `steering_trim_deg`).
+
+Se o carro continuar fora do centro com o trim já estabilizado, a suspeita passa
+a ser a calibração da câmera, porque o carro está centrado no centro *estimado*.
+Nesse caso, façam o teste da trena.
+
 ### Ultrassom em curva
 
 Em curva, com a roda já esterçada, o ultrassom (que aponta para a frente) vê o
@@ -230,13 +253,19 @@ cone da borda de fora muito perto. Antes, isso travava o carro até o fim do
 ensaio, embora ele fosse passar ao lado. Agora (`fva_car/obstacle.py`) o eco é
 **ignorado** só se tudo isto vale:
 
-1. a visão vê o corredor agora (estimador com uma ou duas bordas, imagem com
+1. a visão vê o corredor agora (uma ou duas bordas, ou memória; imagem com
    menos de 0,5 s);
-2. há curva no próximo 1 m (R ≤ 4 m), e a direção já está pelo menos 6° virada
-   para o lado dela;
-3. o carro está dentro do corredor com folga (|e| ≤ W/2 − 0,23 m);
-4. há uma borda do corredor exatamente onde está o eco: dentro do feixe (±20°)
-   e a ±15 cm da distância medida, descontado o quanto o carro andou desde a foto.
+2. há curva no próximo 1,5 m (R ≤ 6,7 m). A roda não precisa já estar virada,
+   porque Stanley e pure pursuit vão seguir a curva; só não pode estar virada
+   mais de 6° para o lado contrário;
+3. o carro está dentro do corredor com folga (|e| ≤ W/2 − 0,18 m);
+4. há uma borda do corredor onde está o eco: dentro do feixe (±35°, porque um
+   cone perto e de lado ainda ecoa) e a ±25 cm da distância medida, descontado o
+   quanto o carro andou desde a foto.
+
+Além disso, um eco curto só para o carro se durar 0,15 s (`obstacle_confirm_s`,
+cerca de 2 leituras): nos ensaios de 10/11, 9 de 13 rodadas pararam por uma
+leitura isolada falsa de 0,1–0,2 m.
 
 Um obstáculo no meio da faixa não coincide com nenhuma borda e **para como
 antes**, assim como em reta, sem corredor válido ou sem esterço. O terminal

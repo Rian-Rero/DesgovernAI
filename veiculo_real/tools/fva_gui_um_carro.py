@@ -66,6 +66,7 @@ MISSION_DEFAULTS = {
     "steering_filter": "3",
     "min_radius": "1.2",          # --min-radius (so cones; 1.2 e o padrao do main.py)
     "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
+    "trim_learning": True,        # False: --no-trim-learning (trim da direcao fixo)
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
@@ -98,6 +99,8 @@ def build_main_command(options: dict) -> str:
             parts.append("--no-cone-debug")
         if not o["curve_echo"]:
             parts.append("--strict-ultrasonic")
+        if not o["trim_learning"]:
+            parts.append("--no-trim-learning")
         if o["record_frames"]:
             parts.append(f"--record-frames {o['record_hz']}")
         if str(o["min_radius"]) != MISSION_DEFAULTS["min_radius"]:
@@ -996,6 +999,7 @@ class RsyncGUI(tk.Tk):
             ("preview", "Reduzir antes da curva"),
             ("cone_debug", "Debug de cones (jsonl + quadros)"),
             ("curve_echo", "Ultrassom ignora cone da borda na curva"),
+            ("trim_learning", "Aprender o centro da direção (trim)"),
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])

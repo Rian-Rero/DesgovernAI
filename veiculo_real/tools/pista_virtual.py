@@ -109,8 +109,9 @@ def build_track(segments, width=1.8, width_end=None, spacing=.5, cone_noise=.03,
 
 class SimCar:
     """Mesma interface que o RealStanleyFollower usa do Car real."""
-    def __init__(self, pose, rng, coast=.5, scale_error=.02, steer_bias_deg=.5, servo_tau=.06):
+    def __init__(self, pose, rng, coast=.5, scale_error=.02, steer_bias_deg=.5, servo_tau=.06, fixed_bias_deg=0.):
         self.servo_tau = servo_tau
+        self.trim = 0.
         self.X, self.Y, self.th = pose          # verdade, eixo traseiro
         self.odo = list(pose)                   # odometria do Car (encoder + esterco)
         self.v_true = 0.
@@ -132,7 +133,7 @@ class SimCar:
         self.rng = rng
         self.coast = coast
         self.scale = 1. + rng.normal(0., scale_error)
-        self.steer_bias = math.radians(rng.normal(0., steer_bias_deg))
+        self.steer_bias = math.radians(rng.normal(0., steer_bias_deg) + fixed_bias_deg)
         self.last_log = {}
 
     def _set_ref(self, vref):
@@ -143,6 +144,10 @@ class SimCar:
 
     def set_u(self, u):
         self.u = u
+
+    def set_steer_trim(self, trim):
+        self.trim = float(trim)  # centro do servo: muda a roda, nao a odometria
+        return self.trim
 
     def set_steer(self, steer):
         self.st = float(np.clip(steer, -STEER_MAX, STEER_MAX))
@@ -156,7 +161,7 @@ class SimCar:
         dt = self.dt
         # Direcao: media de 3 amostras (steering_filter_size) + servo ~60 ms; vies mecanico.
         self.steer_actual += (self.st_filtered - self.steer_actual)*(1. - math.exp(-dt/self.servo_tau))
-        steer = self.steer_actual + self.steer_bias
+        steer = self.steer_actual + self.steer_bias + self.trim
         # Velocidade: PI rapido para subir; para descer o carro so rola.
         error = self.vref - self.v_true
         if error > 0:
@@ -246,7 +251,7 @@ def track_error(track, point, hint):
 
 
 def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), duration=None, coast=.5,
-        camera_kwargs=None, trace=False, servo_tau=.06):
+        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0.):
     """Uma volta; devolve dicionario de metricas (e a serie, com trace)."""
     import main as vehicle_main
 
@@ -258,10 +263,11 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         corridor, track_width_m=config['cone_settings'].get('track_width_cm', 90)/100, max_range_m=3.)
     estimator = CorridorEstimator(settings, calibration.homography)
     follower = RealStanleyFollower(vehicle_main.follower_config(config, 'cones', corridor))
+    run.last_follower = follower  # trim aprendido (corridas seguidas)
     poses = PoseHistory()
     start = -WHEELBASE  # eixo dianteiro no inicio da pista
     car = SimCar((start*math.cos(track.heading[0]), start*math.sin(track.heading[0]), track.heading[0]),
-                 rng, coast=coast, servo_tau=servo_tau)
+                 rng, coast=coast, servo_tau=servo_tau, fixed_bias_deg=steer_bias_deg)
     duration = duration or (track.length/.25 + 5.)
     pending, observation = [], None
     next_capture, last_capture = 0., None
@@ -298,7 +304,7 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         follower.apply(car, observation, now)
         error, hint, half = track_error(track, car.front, hint)
         max_index = max(max_index, hint)
-        lateral_accel = car.v_true**2*math.tan(car.steer_actual + car.steer_bias)/WHEELBASE
+        lateral_accel = car.v_true**2*math.tan(car.steer_actual + car.steer_bias + car.trim)/WHEELBASE
         rows.append((now, car.X, car.Y, car.front[0], car.front[1], error, half, car.v_true, car.vref,
                      car.st, follower.last_state.get('active', False), lateral_accel))
         if track.s[max_index] >= track.length - 3.2:
@@ -316,6 +322,7 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         finished=finished, time_s=float(data[-1, 0]), distance_m=float(track.s[max_index]),
         mean_speed=float(track.s[max_index]/max(data[-1, 0], 1e-6)),
         rms_m=float(np.sqrt(np.mean(errors**2))), max_m=float(np.max(np.abs(errors))),
+        mean_m=float(np.mean(errors)),
         min_clearance_m=float(np.min(clearance)), hits=int(np.sum(np.diff(np.r_[0, clearance < 0, 0]) > 0)),
         stops=int(np.sum(stopped > 0)), valid=valid/max(frames, 1),
         max_lateral_accel=float(np.max(np.abs(data[:, 11]))),
@@ -374,6 +381,7 @@ def main(argv=None):
     parser.add_argument('--latency', type=float, nargs=2, default=(.12, .18), help='atraso da visao, s (min max)')
     parser.add_argument('--fps', type=float, default=15.)
     parser.add_argument('--servo-tau', type=float, default=.06, help='constante de tempo do servo, s')
+    parser.add_argument('--steer-bias', type=float, default=0., help='vies fixo da direcao (graus, + esquerda)')
     parser.add_argument('--row-bias', type=float, default=0., help='erro fixo da calibracao na linha, px')
     parser.add_argument('--column-bias', type=float, default=0., help='erro fixo da calibracao na coluna, px')
     parser.add_argument('--set', action='append', default=[], metavar='AJUSTE=VALOR',
@@ -385,7 +393,8 @@ def main(argv=None):
         key, _, value = item.partition('=')
         changes[key.strip()] = parse_value(value.strip())
     print(f"{'pista':8s} {'lei':13s} {'ok':>3s} {'tempo':>6s} {'v med':>6s} {'rms cm':>7s} {'max cm':>7s}"
-          f" {'folga cm':>8s} {'toques':>6s} {'paradas':>7s} {'valid':>6s} {'W apr':>6s} {'alat max':>8s} {'s acima':>7s}")
+          f" {'folga cm':>8s} {'toques':>6s} {'paradas':>7s} {'valid':>6s} {'W apr':>6s} {'alat max':>8s} {'s acima':>7s}"
+          f" {'media cm':>8s}")
     for name in args.pista:
         traced = {}
         for law in args.law:
@@ -396,6 +405,7 @@ def main(argv=None):
                                     rng=np.random.default_rng(100 + seed))
                 result = run(track, config, seed=seed, coast=args.coast, trace=bool(args.plot) and seed == 0,
                              latency=tuple(args.latency), fps=args.fps, servo_tau=args.servo_tau,
+                             steer_bias_deg=args.steer_bias,
                              camera_kwargs=dict(row_bias=args.row_bias, column_bias=args.column_bias))
                 results.append(result)
                 if 'trace' in result:
@@ -408,7 +418,7 @@ def main(argv=None):
                   f" {100*worst('max_m'):7.1f} {100*worst('min_clearance_m', min):8.1f}"
                   f" {sum(r['hits'] for r in results):6d} {sum(r['stops'] for r in results):7d}"
                   f" {mean('valid'):6.2f} {np.mean(learned) if learned else float('nan'):6.2f}"
-                  f" {worst('max_lateral_accel'):8.2f} {mean('over_accel_s'):7.2f}", flush=True)
+                  f" {worst('max_lateral_accel'):8.2f} {mean('over_accel_s'):7.2f} {100*mean('mean_m'):+8.1f}", flush=True)
         if args.plot and traced:
             path = args.plot if len(args.pista) == 1 else args.plot.with_name(f'{args.plot.stem}_{name}{args.plot.suffix}')
             plot(build_track(TRACKS[name], args.width, args.width_end, args.spacing, rng=np.random.default_rng(100)),

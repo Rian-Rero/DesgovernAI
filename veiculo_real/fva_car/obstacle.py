@@ -15,15 +15,17 @@ import numpy as np
 
 from .corridor import sample_centerline
 
-BEAM_HALF_DEG = 20.       # meia abertura util do feixe do ultrassom (HC-SR04 ~15 graus)
-ECHO_TOLERANCE_M = .15    # eco e borda a mesma distancia, com esta folga
-MIN_STEER_DEG = 6.        # "ja esta virando"
-MIN_CURVATURE = .25       # 1/m (R <= 4 m) em algum ponto do proximo 1 m de caminho
+# HC-SR04: feixe nominal de +-15 graus, mas cone perto e de lado ecoa ate ~+-35.
+BEAM_HALF_DEG = 35.
+ECHO_TOLERANCE_M = .25    # eco e borda a mesma distancia, com esta folga (borda junto ao carro e extrapolada)
+MIN_STEER_DEG = 6.        # roda virada para o lado CONTRARIO da curva alem disto: nao confia
+MIN_CURVATURE = .15       # 1/m (R <= 6,7 m) em algum ponto do proximo 1,5 m de caminho
+CURVE_LOOKAHEAD_M = 1.5
 CAR_HALF_WIDTH_M = .13
-SIDE_MARGIN_M = .10       # folga lateral minima ate a borda, alem da meia largura do carro
+SIDE_MARGIN_M = .05       # folga lateral minima ate a borda, alem da meia largura do carro
 SENSOR_X_M = .05          # ultrassom a frente do eixo dianteiro
 MAX_AGE_S = .5            # estado da visao mais velho que isto nao serve
-ONE_OR_TWO_BORDERS = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA')
+ONE_OR_TWO_BORDERS = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA')
 
 
 def border_echo(distance, state_vector, sensor_x=SENSOR_X_M, beam_half_deg=BEAM_HALF_DEG,
@@ -56,13 +58,15 @@ def curve_echo(distance, observation, steer_rad, speed, now):
         return False, f'visao atrasada ({age:.2f} s)'
     vector = np.asarray(corridor.state_vector, float)
     e, kappa, dkappa, width = vector[0], vector[2], vector[3], vector[4]
-    ahead = kappa + dkappa*np.linspace(0., 1., 11)
+    ahead = kappa + dkappa*np.linspace(0., CURVE_LOOKAHEAD_M, 16)
     turn = ahead[np.argmax(np.abs(ahead))]
     if abs(turn) < MIN_CURVATURE:
         return False, 'reta'
-    if not math.isfinite(steer_rad) or abs(steer_rad) < math.radians(MIN_STEER_DEG) \
-            or math.copysign(1., steer_rad) != math.copysign(1., turn):
-        return False, 'direcao ainda nao virou para a curva'
+    # Stanley e pure pursuit seguem a curva: nao precisa a roda ja estar virada,
+    # so nao pode estar virada claramente para o lado contrario.
+    if not math.isfinite(steer_rad) or (abs(steer_rad) >= math.radians(MIN_STEER_DEG)
+                                        and math.copysign(1., steer_rad) != math.copysign(1., turn)):
+        return False, 'direcao virada para fora da curva'
     if abs(e) > width/2 - CAR_HALF_WIDTH_M - SIDE_MARGIN_M:
         return False, 'carro perto da borda'
     # O estado e do instante da foto: desde entao o carro andou ~v*idade.

@@ -151,6 +151,14 @@ parameters = {
     # parada: 9 das 13 rodadas de 10/11 pararam por uma leitura isolada falsa.
     # Entra tambem na distancia de parada. 0 volta a parar na primeira leitura.
     "obstacle_confirm_s": 0.15,
+    # Centralizacao: o erro lateral em reta (duas bordas) vira um ajuste do centro
+    # do SERVO (trim), igual para Stanley e pure pursuit; a odometria continua com
+    # o esterco pretendido. Nos ensaios de 10/11 o carro andava 2-12 cm a direita.
+    # O trim aprendido e salvo em logs/direcao_trim.json e a corrida seguinte
+    # comeca dele (pista virtual: vies de 3 graus some na 2a corrida).
+    "centering_gain": 0.15,          # rad por (m*s), so em reta
+    "steering_trim_deg": 0.0,        # trim inicial se ainda nao houver o arquivo
+    "steering_trim_learning": True,  # False: trim fixo (steering_trim_deg), sem aprender
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
@@ -202,6 +210,41 @@ def cone_calibration_warnings(calibration, detector):
         return calibration_report(calibration, max_range_m=max_range / 100)["warnings"]
     except (ValueError, TypeError, np.linalg.LinAlgError) as error:
         return [f"nao foi possivel verificar a calibracao: {error}"]
+
+
+# Trim da direcao aprendido entre corridas (fva_car/lateral.py, centralizacao).
+# Em logs/: a limpeza do envio da GUI nao apaga e o Coletar Dados traz junto.
+TRIM_FILE = Path(__file__).resolve().parent / "logs" / "direcao_trim.json"
+TRIM_MIN_STRAIGHT_S = 3.0  # so salva se aprendeu em pelo menos isto de reta
+TRIM_BLEND = 0.5           # cada corrida move o trim salvo so metade do que aprendeu
+
+
+def load_steering_trim(config, path=TRIM_FILE):
+    """Trim inicial (graus): o salvo pelas corridas anteriores, senao steering_trim_deg."""
+    base = float(config.get("steering_trim_deg", 0.0) or 0.0)
+    if not config.get("steering_trim_learning", True):
+        return base
+    try:
+        value = float(json.loads(Path(path).read_text(encoding="utf-8"))["steering_trim_deg"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return base
+    return value if math.isfinite(value) and abs(value) <= 10.0 else base
+
+
+def save_steering_trim(follower, config, path=TRIM_FILE):
+    """Grava o trim para a proxima corrida; devolve o valor salvo ou None."""
+    learned_time = float(getattr(follower, "centering_time", 0.0) or 0.0)
+    if not config.get("steering_trim_learning", True) or learned_time < TRIM_MIN_STRAIGHT_S:
+        return None
+    base = float(config.get("steering_trim_deg", 0.0) or 0.0)
+    learned = math.degrees(float(follower.centering))
+    value = round(base + TRIM_BLEND * learned, 2)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps({
+        "steering_trim_deg": value, "anterior_deg": round(base, 2),
+        "aprendido_nesta_corrida_deg": round(learned, 2), "reta_s": round(learned_time, 1),
+        "salvo_em": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2) + "\n", encoding="utf-8")
+    return value
 
 
 def now_print_ok(last, now, period=1.0):
@@ -413,6 +456,12 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         config = follower_config(config, mode, None)
     else:
         raise ValueError("navigation_mode deve ser line ou cones")
+    if car_factory is None:  # carro real: comeca com o trim aprendido nas corridas anteriores
+        config["steering_trim_deg"] = load_steering_trim(config)
+        print(f"Direcao: trim {config['steering_trim_deg']:+.1f} graus"
+              + (" (aprendendo nas retas)" if config.get("steering_trim_learning", True) else ""), flush=True)
+    if not config.get("steering_trim_learning", True):
+        config["centering_gain"] = 0.0
     follower = RealStanleyFollower(config)
     stream = None
     if config.get("stream_port"):
@@ -732,6 +781,15 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 if config["save"] and getattr(car, "traj", None):
                     car.save()
             finally:
+                if car_factory is None:
+                    try:
+                        saved = save_steering_trim(follower, config)
+                        if saved is not None:
+                            print(f"Direcao: trim aprendido nesta corrida"
+                                  f" {math.degrees(follower.centering):+.1f} graus; proxima comeca em"
+                                  f" {saved:+.1f} graus ({TRIM_FILE.name}).", flush=True)
+                    except (OSError, TypeError, ValueError) as error:
+                        print(f"Trim da direcao nao salvo: {error}", flush=True)
                 car.close()
                 if plot is not None:
                     plot[0].close(plot[1])
@@ -805,6 +863,8 @@ def main():
                         help="Cones: Stanley no eixo em vez do pure pursuit no centro estimado")
     parser.add_argument("--no-preview", action="store_true",
                         help="Cones: sem previa de curva (vref so pela curvatura no eixo)")
+    parser.add_argument("--no-trim-learning", action="store_true",
+                        help="Direcao: nao aprende nem usa o trim salvo (usa steering_trim_deg)")
     parser.add_argument("--strict-ultrasonic", action="store_true",
                         help="Para por qualquer eco do ultrassom, inclusive o cone da borda na curva")
     parser.add_argument("--min-radius", type=float, metavar="R",
@@ -841,6 +901,8 @@ def main():
         settings["cone_estimator"] = False
     if args.stanley:
         settings["steering_law"] = "stanley"
+    if args.no_trim_learning:
+        settings["steering_trim_learning"] = False
     if args.strict_ultrasonic:
         settings["ultrasonic_curve_filter"] = False
     if args.min_radius is not None:

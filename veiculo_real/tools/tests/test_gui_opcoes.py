@@ -32,7 +32,7 @@ class MissionOptionsTests(unittest.TestCase):
 
     def test_every_checkbox_combination_is_accepted_by_main(self):
         keys = ("stream", "estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
-                "curve_echo")
+                "curve_echo", "trim_learning")
         for values in itertools.product((False, True), repeat=len(keys)):
             options = dict(zip(keys, values))
             with self.subTest(**options):
@@ -48,6 +48,7 @@ class MissionOptionsTests(unittest.TestCase):
                 self.assertEqual(settings.get("record_frames_hz", 0) > 0, options["record_frames"])
                 self.assertEqual("cone_classifier" in settings, options["classifier"])
                 self.assertEqual(settings.get("ultrasonic_curve_filter", True), options["curve_echo"])
+                self.assertEqual(settings.get("steering_trim_learning", True), options["trim_learning"])
 
     def test_values_and_line_mode(self):
         settings = parsed(gui.build_main_command({"speed": "2.0", "vision_width": "320", "steering_filter": "1",
