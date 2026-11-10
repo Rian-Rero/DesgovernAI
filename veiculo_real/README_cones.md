@@ -193,7 +193,7 @@ nas retas**. Quem decide quanto o carro corre em cada trecho:
 
 - **Curva vista** (prévia de 2,5 m): reduz antes dela, para fazer a curva com
   `curve_lateral_accel` (0,4 m/s²).
-- **Limite de visibilidade** (`min_curve_radius_m`, padrão 1,5 m; `--min-radius`;
+- **Limite de visibilidade** (`min_curve_radius_m`, padrão 1,2 m, a pista de 10/11; `--min-radius`;
   na GUI, "Curva mais fechada"). A câmera vê ~2,5 m e o carro só rola para reduzir
   (~0,5 m/s²). Então ele supõe que, logo depois do trecho visto, pode vir a curva
   mais fechada da pista, e corre só o que ainda deixa rolar até a velocidade

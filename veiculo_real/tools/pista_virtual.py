@@ -59,6 +59,8 @@ TRACKS = {
                 ('curva', -2., 120), ('reta', 4.)],
     # Retas longas terminando em curvas fechadas: onde se ganha (ou se perde) tempo.
     'retas': [('reta', 10.), ('curva', -1.6, 180), ('reta', 10.), ('curva', 2., 90), ('reta', 6.)],
+    # Pista dos ensaios de 10/11: curvas de raio ~1,2 m (kappa 0,8), largura ~1,3 m.
+    'fechada': [('reta', 6.), ('curva', 1.25, 180), ('reta', 4.), ('curva', -1.25, 90), ('reta', 5.)],
 }
 
 

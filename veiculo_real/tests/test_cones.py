@@ -296,9 +296,55 @@ class CorridorSideTests(unittest.TestCase):
         side, info = detector._corridor_sides(green, red, fallback=True)
         self.assertFalse(side)  # o detector dizia verde a esquerda; os cones dizem o contrario
         self.assertTrue(info['flipped'])
-        self.assertEqual(info['source'], 'cones')
+        self.assertEqual(info['source'], 'pares')
         # Um quadro contrario isolado (reflexo) nao troca; dois seguidos trocam.
         self.assertFalse(detector._corridor_sides(red, green, fallback=True)[0])
         self.assertTrue(detector._corridor_sides(red, green, fallback=True)[0])
         # Uma cor so: mantem o lado decidido.
         self.assertTrue(detector._corridor_sides(red, np.empty((0, 2)), fallback=False)[0])
+
+
+class HairpinSideTests(unittest.TestCase):
+    """Ensaios de 10/11: num grampo a esquerda (raio ~1,3 m) a borda de fora da a
+    volta pela frente; comparar cones a mesma distancia trocava o lado e o carro
+    saia da pista. Com o corredor estimado, o lado vem da linha central."""
+
+    def test_tight_curve_does_not_flip_the_sides(self):
+        from fva_car.cones import SideTracker, side_evidence
+        from fva_car.corridor import CorridorEstimator, CorridorSettings, sample_centerline
+        width = 1.3
+        state = np.array([0., 0., .75, 0., width])  # curva a esquerda, raio 1,33 m
+        arcs = np.arange(0., 4., .4)  # um cone a cada 40 cm de caminho
+        left = sample_centerline(state, arcs, width/2, max_curvature=5.)
+        right = sample_centerline(state, arcs, -width/2, max_curvature=5.)
+        keep = lambda p: p[(p[:, 0] > .6) & (p[:, 0] < 3.)]
+        red, green = keep(left), keep(right)  # vermelho a esquerda (como na pista de 10/11)
+        # A mesma distancia a frente, o verde (fora) aparece "a esquerda" do vermelho.
+        self.assertGreater(side_evidence(green, red)[0], .3)
+        # Lado decidido antes (na reta) e corredor ja acompanhando a curva, como no ensaio.
+        estimator = CorridorEstimator(CorridorSettings(track_width_m=width))
+        for k in range(5):
+            estimator.step(.1*k, red, green, (0., 0., 0.) if k else None)
+        tracker = SideTracker()
+        tracker.green_left = False
+        for k in range(5, 20):
+            green_left, info, flipped = tracker.update(green, red, estimator, fallback=False)
+            self.assertFalse(green_left, info)
+            self.assertFalse(flipped, info)
+            left_pts, right_pts = (green, red) if green_left else (red, green)
+            estimator.step(.1*k, left_pts, right_pts, (0., 0., 0.))
+        self.assertEqual(info['source'], 'corredor')
+        self.assertLess(info['separation_m'], -.5)  # no corredor, verde bem a direita (verde - vermelho < 0)
+
+    def test_wrong_start_is_still_corrected_from_the_corridor(self):
+        from fva_car.cones import SIDE_FLIP_FRAMES_TRACKING, SideTracker
+        from fva_car.corridor import CorridorEstimator, CorridorSettings
+        green = np.array([[1., -.65], [1.5, -.65], [2., -.65], [2.5, -.65]])  # verde a direita, reta
+        red = np.array([[1., .65], [1.5, .65], [2., .65], [2.5, .65]])
+        estimator = CorridorEstimator(CorridorSettings(track_width_m=1.3))
+        estimator.step(0., green, red, None)  # comecou com as cores trocadas
+        tracker = SideTracker()
+        tracker.green_left = True
+        flips = [tracker.update(green, red, estimator, fallback=True)[2] for _ in range(SIDE_FLIP_FRAMES_TRACKING)]
+        self.assertEqual(flips, [False]*(SIDE_FLIP_FRAMES_TRACKING-1) + [True])
+        self.assertFalse(tracker.green_left)

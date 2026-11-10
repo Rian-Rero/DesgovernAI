@@ -72,7 +72,8 @@ class SightLimitTests(unittest.TestCase):
 
     def test_mission_turns_min_radius_into_sight_limit_only_with_estimator(self):
         config = dict(main.parameters)
-        self.assertAlmostEqual(main.follower_config(config, 'cones', {})['speed_sight_curvature'], 1/1.5)
+        self.assertAlmostEqual(main.follower_config(config, 'cones', {})['speed_sight_curvature'],
+                               1/config['min_curve_radius_m'])
         self.assertEqual(main.follower_config(dict(config, min_curve_radius_m=0), 'cones', {})
                          ['speed_sight_curvature'], 0.)
         self.assertEqual(main.follower_config(config, 'cones', None)['speed_sight_curvature'], 0.)

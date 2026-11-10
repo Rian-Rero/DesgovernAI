@@ -218,19 +218,27 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(self.car.u,0.)
         self.assertEqual(self.car.st,0.)
 
-    def test_obstacle_stop_remains_latched_after_distance_recovers(self):
+    def test_single_short_echo_does_not_stop(self):
         self.car.distances=iter([(.1,True),(10.,True)])
         follower=Mock()
         with patch.object(mission,'RealStanleyFollower',return_value=follower):self.run_fake()
-        self.assertEqual(len(follower.apply.call_args_list),2)
-        self.assertTrue(all(call.kwargs['obstacle_detected']
-                            for call in follower.apply.call_args_list))
+        self.assertFalse(any(call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list))
+
+    def test_obstacle_stop_remains_latched_after_distance_recovers(self):
+        self.car.steps_left=3
+        self.car.distances=iter([(.1,True),(.1,True),(10.,True)])
+        follower=Mock()
+        with patch.object(mission,'RealStanleyFollower',return_value=follower):self.run_fake()
+        self.assertEqual(len(follower.apply.call_args_list),3)
+        # 1a leitura curta: aguarda confirmacao; 2a confirma e trava; volta a 10 m e segue travado.
+        self.assertEqual([call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list],
+                         [False,True,True])
         logs=[call.kwargs for call in self.car.log.call_args_list if 'obstacle_stop' in call.kwargs]
-        self.assertEqual([log['obstacle_stop'] for log in logs],[1,1])
+        self.assertEqual([log['obstacle_stop'] for log in logs],[0,1,1])
 
     def test_full_rc_bypasses_stanley_while_obstacle_keeps_priority(self):
         self.car.sel_direcao = self.car.sel_tracao = 0
-        self.car.distances = iter([(10., True), (.1, True)])
+        self.car.distances = iter([(.1, True), (.1, True)])
         follower = Mock()
         with patch.object(mission, 'RealStanleyFollower', return_value=follower):
             self.run_fake()

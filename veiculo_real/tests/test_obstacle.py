@@ -90,8 +90,10 @@ class MissionWiringTests(unittest.TestCase):
 
     def test_unexplained_echo_still_latches(self):
         follower, logs, _ = self.run_cones(False)
-        self.assertTrue(all(call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list))
-        self.assertEqual([log['obstacle_stop'] for log in logs], [1, 1])
+        # Confirmado na 2a leitura seguida (obstacle_confirm_s).
+        self.assertEqual([call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list],
+                         [False, True])
+        self.assertEqual([log['obstacle_stop'] for log in logs], [0, 1])
 
 
 if __name__ == '__main__':

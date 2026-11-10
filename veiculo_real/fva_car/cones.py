@@ -34,6 +34,70 @@ SIDE_PAIR_DX_M = .8
 SIDE_MAX_RANGE_M = 4.
 SIDE_MIN_SEPARATION_M = .3
 SIDE_FLIP_FRAMES = 2
+# Com o corredor ja estimado, o lado sai das coordenadas do proprio corredor (de
+# que lado da linha central cada cor esta), que valem em qualquer curva. Comparar
+# cones a mesma distancia a frente falha em curva fechada: a borda de fora da a
+# volta pela frente do carro (ensaios de 10/11: 4 trocas erradas em grampos, e o
+# carro saiu da pista em todas). Trocar com o corredor estimado exige evidencia
+# forte (separacao >= meia largura) por SIDE_FLIP_FRAMES_TRACKING quadros seguidos.
+SIDE_FLIP_FRAMES_TRACKING = 6
+
+
+def path_separation(green, red, state, max_curvature=2.):
+    """Distancia a linha central (esquerda +) mediana do verde - a do vermelho, no corredor `state`."""
+    from .corridor import offsets
+    medians = []
+    for points in (green, red):
+        points = np.asarray(points, float).reshape(-1, 2)
+        points = points[(points[:, 0] > .2) & (points[:, 0] <= SIDE_MAX_RANGE_M)] if len(points) else points
+        if not len(points):
+            return None
+        d, along, _, _ = offsets(points, state, max_curvature=max_curvature)
+        keep = (along > -.6) & (along < 4.)
+        if not np.any(keep):
+            return None
+        medians.append(float(np.median(d[keep])))
+    return medians[0] - medians[1]
+
+
+class SideTracker:
+    """Qual cor e a borda esquerda, para o estimador, com histerese.
+
+    Sem corredor estimado: cones das duas cores a mesma distancia a frente
+    (side_evidence). Com corredor: lado de cada cor em relacao a linha central.
+    """
+    def __init__(self):
+        self.green_left = None
+        self.contrary = 0
+
+    def update(self, green, red, estimator, fallback):
+        """(verde a esquerda?, debug, trocou?)."""
+        state = None if estimator is None else estimator.x
+        if state is not None:
+            separation = path_separation(green, red, state, estimator.settings.max_curvature)
+            paired, source = True, 'corredor'
+            threshold = max(SIDE_MIN_SEPARATION_M, .5*float(state[4]))
+            needed = SIDE_FLIP_FRAMES_TRACKING
+        else:
+            separation, paired = side_evidence(green, red)
+            source, threshold, needed = 'pares', SIDE_MIN_SEPARATION_M, SIDE_FLIP_FRAMES
+        vote = None if separation is None or abs(separation) < threshold else separation > 0
+        flipped = False
+        if self.green_left is None:
+            if vote is not None:
+                self.green_left = vote
+                flipped = vote != fallback  # o estado anterior usou o lado do detector
+        elif vote is not None and vote != self.green_left:
+            self.contrary += 1
+            if self.contrary >= needed:
+                self.green_left, flipped = vote, True
+        if vote is None or vote == self.green_left or flipped:
+            self.contrary = 0
+        green_left = fallback if self.green_left is None else self.green_left
+        return green_left, {'green_left': bool(green_left), 'separation_m': None if separation is None
+                            else round(separation, 3), 'paired': bool(paired), 'flipped': bool(flipped),
+                            'source': 'detector' if self.green_left is None else source,
+                            'contrary': self.contrary}, flipped
 
 
 def side_evidence(green, red, max_range=SIDE_MAX_RANGE_M):
@@ -127,8 +191,7 @@ class RealConeDetector:
         self.odometry = odometry
         self.last_timestamp = None
         self.corridor = None
-        self.corridor_green_left = None  # lado decidido pelos proprios cones (estimador)
-        self.side_contrary = 0
+        self.sides = SideTracker()  # lado decidido pelos proprios cones (estimador)
         if corridor not in (None, False):
             corridor_settings = CorridorSettings.from_value(
                 corridor, track_width_m=self.settings.track_width_cm/100,
@@ -232,28 +295,12 @@ class RealConeDetector:
 
     def _corridor_sides(self, green, red, fallback):
         """Verde a esquerda? Pela geometria dos cones deste quadro, com histerese."""
-        separation, paired = side_evidence(green, red)
-        vote = None if separation is None or abs(separation) < SIDE_MIN_SEPARATION_M else separation > 0
-        flipped = False
-        if self.corridor_green_left is None:
-            if vote is not None:
-                self.corridor_green_left = vote
-                flipped = vote != fallback  # o estado anterior usou o lado do detector
-        elif vote is not None and vote != self.corridor_green_left:
-            self.side_contrary += 1
-            if self.side_contrary >= SIDE_FLIP_FRAMES:
-                self.corridor_green_left, flipped = vote, True
-        if vote is None or vote == self.corridor_green_left:
-            self.side_contrary = 0
+        green_left, info, flipped = self.sides.update(green, red, self.corridor, fallback)
         if flipped:
             # Estado montado com as cores trocadas nao serve: recomeca, sem a largura.
-            self.side_contrary = 0
             self.corridor.reset()
             self.corridor.learned_width = None
-        green_left = fallback if self.corridor_green_left is None else self.corridor_green_left
-        return green_left, {'green_left': bool(green_left), 'separation_m': None if separation is None
-                            else round(separation, 3), 'paired': bool(paired), 'flipped': bool(flipped),
-                            'source': 'detector' if self.corridor_green_left is None else 'cones'}
+        return green_left, info
 
     def _corridor_step(self, result, timestamp, motion):
         """Cones deste quadro (ja confirmados pelo classificador) -> estimador."""

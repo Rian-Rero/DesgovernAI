@@ -64,7 +64,7 @@ MISSION_DEFAULTS = {
     "classifier_path": "modelos/cones.onnx",
     "vision_width": "0",
     "steering_filter": "3",
-    "min_radius": "1.5",          # --min-radius (so cones; 1.5 e o padrao do main.py)
+    "min_radius": "1.2",          # --min-radius (so cones; 1.2 e o padrao do main.py)
     "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
 }
 VISION_WIDTHS = ("0", "320", "480")
@@ -211,24 +211,82 @@ def command_label(command: str) -> str:
 
 
 # ---------------------------------------------------------------- envio incremental
-# Nunca enviados: lixo do Python/sistema e as pastas de DADOS (o que o carro
-# grava; a copia local nao pode sobrescrever o que esta la).
-SYNC_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".idea", ".vscode"}
-SYNC_SKIP_TOP_DIRS = {"logs", "experimentos", "ajuste_camera"}
-SYNC_SKIP_SUFFIXES = (".pyc", ".pyo", ".swp")
+# Envia so CODIGO. Fica de fora (em qualquer nivel da pasta):
+#  - lixo do Python/sistema;
+#  - pastas de DADOS: logs, experimentos (Coletar Dados), ensaios copiados, fotos,
+#    conjuntos de treino... pelo nome, por terem nome de data (20261023_091339,
+#    2026-11-10) ou por conterem arquivos de ensaio (car.csv, cones_debug.jsonl);
+#  - arquivos de dados (.csv, .jsonl, .npz, .zip, .jpg, videos, .log).
+# Codigo, calibracao (.json), modelos (.onnx/.pt), firmware (.ino) e scripts vao.
+SYNC_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".idea", ".vscode", "venv", ".venv",
+                  "node_modules", "__MACOSX"}
+SYNC_DATA_DIR_WORDS = ("log", "experimento", "ajuste_camera", "frames", "recorte", "dataset", "coleta",
+                       "ensaio", "download", "captura", "gravac")
+SYNC_DATA_DIR_DATE = re.compile(r"^\d{8}_\d{4,6}|^\d{4}-\d{2}-\d{2}")
+SYNC_RUN_FILES = {"car.csv", "cones_debug.jsonl", "cones_summary.json", "vision_status.json"}
+SYNC_SKIP_SUFFIXES = (".pyc", ".pyo", ".swp", ".csv", ".jsonl", ".npz", ".npy", ".zip", ".tar", ".gz", ".7z",
+                      ".rar", ".jpg", ".jpeg", ".bmp", ".mp4", ".avi", ".mov", ".mkv", ".log", ".bag", ".h264")
 SYNC_SKIP_FILES = {".DS_Store", "Thumbs.db"}
+# Compatibilidade: pastas de dados do carro que nunca sao apagadas nem enviadas.
+SYNC_SKIP_TOP_DIRS = {"logs", "experimentos", "ajuste_camera"}
 
 
-def local_tree(local_dir: str) -> dict:
-    """{caminho relativo posix: (tamanho, mtime inteiro, caminho local)} do que deve ir ao carro."""
+def is_data_dir(name: str, path: str = None) -> bool:
+    """Pasta de dados (nao vai para o carro)? Pelo nome ou pelo conteudo."""
+    lower = name.lower()
+    if any(word in lower for word in SYNC_DATA_DIR_WORDS) or SYNC_DATA_DIR_DATE.match(name):
+        return True
+    if path is not None:
+        try:
+            return any(entry in SYNC_RUN_FILES for entry in os.listdir(path))
+        except OSError:
+            return False
+    return False
+
+
+def local_tree(local_dir: str, skipped: dict = None) -> dict:
+    """{caminho relativo posix: (tamanho, mtime inteiro, caminho local)} do que deve ir ao carro.
+
+    skipped (opcional) recebe {'pastas': [...], 'arquivos': n, 'bytes': n} do que ficou de fora.
+    """
     files = {}
+    if skipped is not None:
+        skipped.update(pastas=[], arquivos=0, bytes=0)
+
+    def skip_tree(path):
+        if skipped is None:
+            return
+        for root, _, names in os.walk(path):
+            for name in names:
+                try:
+                    skipped["bytes"] += os.path.getsize(os.path.join(root, name))
+                    skipped["arquivos"] += 1
+                except OSError:
+                    pass
+
     for root, dirs, names in os.walk(local_dir):
         rel_root = os.path.relpath(root, local_dir)
         top = rel_root == "."
-        dirs[:] = sorted(d for d in dirs if d not in SYNC_SKIP_DIRS
-                         and not (top and d in SYNC_SKIP_TOP_DIRS))
+        keep = []
+        for d in sorted(dirs):
+            if d in SYNC_SKIP_DIRS:
+                continue
+            path = os.path.join(root, d)
+            if is_data_dir(d, path):
+                if skipped is not None:
+                    skipped["pastas"].append(d if top else posixpath.join(*rel_root.split(os.sep), d))
+                skip_tree(path)
+                continue
+            keep.append(d)
+        dirs[:] = keep
         for name in names:
-            if name in SYNC_SKIP_FILES or name.endswith(SYNC_SKIP_SUFFIXES):
+            if name in SYNC_SKIP_FILES or name.lower().endswith(SYNC_SKIP_SUFFIXES):
+                if skipped is not None and not name.endswith((".pyc", ".pyo")) and name not in SYNC_SKIP_FILES:
+                    skipped["arquivos"] += 1
+                    try:
+                        skipped["bytes"] += os.path.getsize(os.path.join(root, name))
+                    except OSError:
+                        pass
                 continue
             path = os.path.join(root, name)
             if not os.path.isfile(path):
@@ -258,6 +316,44 @@ def remote_tree(client, remote_dir: str) -> dict:
             except ValueError:
                 continue
     return files
+
+
+CLEAN_KEEP = ("logs",)  # dados das missoes no carro: ficam ate serem coletados
+
+
+def clean_target_is_safe(remote_dir: str) -> bool:
+    """So limpa uma pasta de projeto: nunca /, /home, a home do usuario, Desktop..."""
+    path = posixpath.normpath(remote_dir or "")
+    parts = [p for p in path.split("/") if p]
+    if not path.startswith("/") or len(parts) < 3:
+        return False
+    if parts[0] in ("etc", "usr", "var", "bin", "boot", "lib", "proc", "sys", "dev", "root", "tmp", "opt"):
+        return False
+    return not (parts[0] == "home" and len(parts) == 3 and parts[2] in ("Desktop", "Documents", "Downloads",
+                                                                       "Área de Trabalho", "Documentos"))
+
+
+def clean_remote(client, remote_dir: str, keep=CLEAN_KEEP, check=True):
+    """Apaga tudo em remote_dir no carro, menos `keep`. Devolve [(nome, kB)] apagados.
+
+    check=False so nos testes (pasta temporaria); a GUI sempre confere a pasta.
+    """
+    if check and not clean_target_is_safe(remote_dir):
+        raise RuntimeError(f"Pasta remota {remote_dir!r} nao parece pasta de projeto; limpeza recusada.")
+    quoted = shlex.quote(remote_dir)
+    _, out, _ = client.exec_command(
+        f"cd {quoted} 2>/dev/null && find . -mindepth 1 -maxdepth 1 -printf '%P\\n' | "
+        "while IFS= read -r f; do printf '%s\\t' \"$f\"; du -sk -- \"$f\" | cut -f1; done", timeout=120)
+    entries = []
+    for line in _output_text(out).splitlines():
+        name, _, size = line.rpartition("\t")
+        if name and name not in keep:
+            entries.append((name, int(size) if size.isdigit() else 0))
+    if entries:
+        names = " ".join(shlex.quote(name) for name, _ in entries)
+        _, out, err = client.exec_command(f"cd {quoted} && rm -rf -- {names}", timeout=300)
+        _output_text(out)
+    return entries
 
 
 def remote_md5(client, remote_dir: str, paths, chunk=150) -> dict:
@@ -301,7 +397,12 @@ def sync_plan(local: dict, remote: dict, force=False):
 def sync_directory(client, sftp, local_dir, remote_dir, log, force=False, delete_py=False):
     """Envia so o que mudou de local_dir para remote_dir. Devolve um resumo (dict)."""
     started = time.monotonic()
-    local = local_tree(local_dir)
+    skipped = {}
+    local = local_tree(local_dir, skipped)
+    if skipped["pastas"] or skipped["arquivos"]:
+        names = ", ".join(skipped["pastas"][:8]) + (" ..." if len(skipped["pastas"]) > 8 else "")
+        log(f"   ⏭ fora do envio (dados): {skipped['arquivos']} arquivo(s), {skipped['bytes']/1e6:.1f} MB"
+            + (f" — pastas: {names}" if names else ""))
     remote = remote_tree(client, remote_dir)
     send, check, same = sync_plan(local, remote, force)
     touched = []
@@ -340,8 +441,9 @@ def sync_directory(client, sftp, local_dir, remote_dir, log, force=False, delete
         # So .py que sumiram daqui (arquivo renomeado/apagado, testes de outra
         # branch); nunca dentro das pastas de dados.
         for rel in sorted(set(remote) - set(local)):
-            if (rel.endswith(".py") and rel.split("/")[0] not in SYNC_SKIP_TOP_DIRS
-                    and not any(part in SYNC_SKIP_DIRS for part in rel.split("/"))):
+            parts = rel.split("/")
+            if (rel.endswith(".py") and parts[0] not in SYNC_SKIP_TOP_DIRS
+                    and not any(part in SYNC_SKIP_DIRS or is_data_dir(part) for part in parts[:-1])):
                 sftp.remove(posixpath.join(remote_dir, rel))
                 removed.append(rel)
                 log(f"   ✗ {rel} (não existe mais aqui)")
@@ -695,9 +797,11 @@ class RsyncGUI(tk.Tk):
             side="left", padx=4
         )
         # Envio incremental: so o que mudou desde o ultimo envio vai pelo Wi-Fi.
-        self.sync_force_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(send, text="Enviar tudo (ignorar o que já está no carro)",
-                        variable=self.sync_force_var).pack(side="left", padx=(12, 4))
+        # 1a vez (ou carro "pesado"): apaga a pasta do codigo no carro, menos logs/,
+        # e envia so o codigo. Desmarca sozinho depois: os proximos sao incrementais.
+        self.sync_clean_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(send, text="Limpar a pasta no carro e enviar só o código (1ª vez)",
+                        variable=self.sync_clean_var).pack(side="left", padx=(12, 4))
         self.sync_delete_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(send, text="Apagar no carro .py que não existem mais aqui",
                         variable=self.sync_delete_var).pack(side="left", padx=(12, 4))
@@ -1712,7 +1816,8 @@ class RsyncGUI(tk.Tk):
         ttk.Label(local_frame, text="Destino no computador:").pack(side="left")
 
         self.data_dest_entry = ttk.Entry(local_frame)
-        self.data_dest_entry.insert(0, os.path.join(os.getcwd(), "experimentos"))
+        # Fora da pasta do codigo: dados coletados nunca se misturam ao que vai para o carro.
+        self.data_dest_entry.insert(0, os.path.join(os.path.expanduser("~"), "fva_experimentos"))
         self.data_dest_entry.pack(side="left", fill="x", expand=True, padx=8)
 
         ttk.Button(
@@ -2215,6 +2320,18 @@ class RsyncGUI(tk.Tk):
                 "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.",
             )
             return
+        if getattr(self, "sync_clean_var", None) and self.sync_clean_var.get():
+            dest = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+            if not clean_target_is_safe(dest):
+                messagebox.showerror("Limpeza recusada",
+                                     f"A pasta remota {dest} não parece a pasta do projeto no carro.")
+                return
+            if not messagebox.askyesno(
+                    "Limpar a pasta no carro",
+                    f"Isto APAGA tudo em {dest} no carro {targets[0][0].upper()}, menos a pasta "
+                    f"logs/ (missões ainda não coletadas), e envia só o código de novo.\n\n"
+                    "Não dá para desfazer. Continuar?"):
+                return
         threading.Thread(
             target=self._run_sftp_for_targets, args=(targets,), daemon=True
         ).start()
@@ -2290,21 +2407,37 @@ class RsyncGUI(tk.Tk):
                 self.ui(self.log_write, "   - " + item)
             return
 
-        force = bool(getattr(self, "sync_force_var", None) and self.sync_force_var.get())
+        clean = bool(getattr(self, "sync_clean_var", None) and self.sync_clean_var.get())
+        force = clean
         delete_py = bool(getattr(self, "sync_delete_var", None) and self.sync_delete_var.get())
         log = lambda text: self.ui(self.log_write, text)
+        all_ok = True
         for name, ip in targets:
             self.ui(self.log_write, "=" * 60)
             self.ui(self.log_write, f"🚀 Enviando via SFTP para {name.upper()} ({ip})"
-                    + (" — tudo" if force else " — só o que mudou"))
+                    + (" — limpando a pasta e enviando todo o código" if clean else " — só o que mudou"))
             client = None
             sftp = None
             try:
                 client = self._connect_ssh(ip)
                 sftp = client.open_sftp()
+                if clean:
+                    removed = clean_remote(client, dest)
+                    freed = sum(size for _, size in removed)
+                    log(f"🧹 Apagado no carro: {len(removed)} item(ns), {freed/1024:.1f} MB"
+                        + (f" — {', '.join(n for n, _ in sorted(removed, key=lambda e: -e[1])[:6])}" if removed else "")
+                        + "; mantido: logs/")
                 self._sftp_mkdir_p(sftp, dest)
 
                 for path in self.selected_files:
+                    base = os.path.basename(os.path.normpath(path))
+                    if os.path.isdir(path) and is_data_dir(base, path):
+                        log(f"⏭ {path}: pasta de dados, não vai para o carro")
+                        continue
+                    if os.path.isfile(path) and (base.lower().endswith(SYNC_SKIP_SUFFIXES)
+                                                 or is_data_dir(Path(path).resolve().parent.name)):
+                        log(f"⏭ {path}: arquivo de dados, não vai para o carro")
+                        continue
                     if os.path.isdir(path):
                         # Mesmo comportamento do antigo rsync com barra final:
                         # envia o CONTEÚDO da pasta para o destino.
@@ -2322,6 +2455,7 @@ class RsyncGUI(tk.Tk):
 
                 self.ui(self.log_write, f"✅ Sucesso: {name.upper()} ({ip})")
             except Exception as e:
+                all_ok = False
                 self.ui(self.log_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
             finally:
                 if sftp:
@@ -2329,6 +2463,10 @@ class RsyncGUI(tk.Tk):
                 if client:
                     client.close()
 
+        if clean and all_ok:
+            # Limpeza feita: os proximos envios voltam a ser so o que mudou.
+            self.ui(self.sync_clean_var.set, False)
+            self.ui(self.log_write, "ℹ️ Limpeza concluída; os próximos envios mandam só o que mudar.")
         self.ui(self.log_write, "🏁 Todas as transferências finalizadas.")
 
     ########################################

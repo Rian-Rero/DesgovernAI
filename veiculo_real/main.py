@@ -136,7 +136,8 @@ parameters = {
     # RETAS: o carro acelera ate o que ainda deixa rolar ate essa curva (~1,6 m/s
     # com R = 1,5 m) e reduz antes das curvas vistas. Pista virtual, vref 2,0:
     # volta 26-46% mais rapida que a 0,7 m/s, sem toques (tools/pista_virtual.py).
-    "min_curve_radius_m": 1.5,
+    # Pista dos ensaios de 10/11: curvas de raio ~1,2 m (kappa 0,8 no estimador).
+    "min_curve_radius_m": 1.2,
     # Curva vista por uma cor so (a borda de dentro saiu da imagem): esterco x1,15
     # e volante 1,5x mais rapido. Pista virtual: 1,1-1,2 neutro a melhor, 1,3/2,0
     # ja passava do ponto. 1 desliga.
@@ -146,6 +147,10 @@ parameters = {
     # o cone da borda e o carro ja esta virando para longe dele (fva_car/obstacle.py).
     # Obstaculo no meio da faixa, reta ou sem corredor: para como antes.
     "ultrasonic_curve_filter": True,
+    # Eco curto precisa durar isto (s; ultrassom le a cada ~0,12 s) para travar a
+    # parada: 9 das 13 rodadas de 10/11 pararam por uma leitura isolada falsa.
+    # Entra tambem na distancia de parada. 0 volta a parar na primeira leitura.
+    "obstacle_confirm_s": 0.15,
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
@@ -207,11 +212,12 @@ def now_print_ok(last, now, period=1.0):
     return False
 
 
-def stopping_distance(velocity):
+def stopping_distance(velocity, confirm_s=0.0):
+    """Distancia minima do obstaculo para parar a tempo, contando a espera da confirmacao."""
     speed = abs(velocity)
     return (
         OBSTACLE_DISTANCE
-        + speed * STOP_REACTION_TIME
+        + speed * (STOP_REACTION_TIME + confirm_s)
         + speed**2 / (2.0 * STOP_DECELERATION)
     )
 
@@ -537,6 +543,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         t_telemetry = t_plot - TELEMETRY_PERIOD
         obstacle_detected = False
         echo_prints = [-math.inf]
+        echo_since = None  # inicio do eco curto ainda nao confirmado (tempo da missao)
         next_stop_beep = 0.0
         last_encoder_valid = None
         t_diagnostic = t_plot - 1.0
@@ -561,15 +568,14 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 )
                 last_encoder_valid = encoder_valid
             dist, valid = car.get_distance()
-            stop_distance = stopping_distance(car.v)
+            confirm_s = float(config.get("obstacle_confirm_s", 0.0) or 0.0)
+            stop_distance = stopping_distance(car.v, confirm_s)
             observation = vision_data["observation"]
             echo_ignored = False
-            if (
-                not obstacle_detected
-                and valid
-                and np.isfinite(dist)
-                and dist <= stop_distance
-            ):
+            close = valid and np.isfinite(dist) and dist <= stop_distance
+            if not close:
+                echo_since = None
+            if not obstacle_detected and close:
                 reason = ""
                 if mode == "cones" and config.get("ultrasonic_curve_filter", True):
                     # Em curva, ja virando, o eco pode ser o cone da borda de fora:
@@ -579,9 +585,15 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                         float(config["steering_sign"]) * float(getattr(car, "st", 0.0)),
                         float(car.v), clock())
                 if echo_ignored:
+                    echo_since = None
                     if now_print_ok(echo_prints, clock()):
                         print(f"Ultrassom a {dist:.2f} m ignorado: {reason}.", flush=True)
-                else:
+                elif echo_since is None and confirm_s > 0:
+                    # Leitura isolada curta e ruido do sensor (ensaios de 10/11: 0,1-0,2 m
+                    # do nada, com o carro parado oscilando 0,16/0,78/4,0): so para se
+                    # o eco continuar por confirm_s (~2 leituras).
+                    echo_since = float(car.t)
+                if not echo_ignored and (confirm_s <= 0 or float(car.t) - echo_since >= confirm_s):
                     obstacle_detected = True
                     print(
                         f"Obstaculo a {dist:.2f} m: parada travada ate o fim do ensaio"
@@ -797,7 +809,7 @@ def main():
                         help="Para por qualquer eco do ultrassom, inclusive o cone da borda na curva")
     parser.add_argument("--min-radius", type=float, metavar="R",
                         help="Cones: raio (m) da curva mais fechada da pista; limita a velocidade nas retas"
-                             " (padrao 1.5; 0 desliga)")
+                             " (padrao 1.2; 0 desliga)")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()

@@ -51,11 +51,11 @@ class MissionOptionsTests(unittest.TestCase):
 
     def test_values_and_line_mode(self):
         settings = parsed(gui.build_main_command({"speed": "2.0", "vision_width": "320", "steering_filter": "1",
-                                                  "record_hz": "5", "record_frames": True, "min_radius": "1.2"}))
+                                                  "record_hz": "5", "record_frames": True, "min_radius": "2.0"}))
         self.assertEqual((settings["velocity_reference"], settings["vision_width"],
                           settings["steering_filter_size"], settings["record_frames_hz"],
-                          settings["min_curve_radius_m"]), (2., 320, 1, 5., 1.2))
-        self.assertNotIn("min_curve_radius_m", parsed(gui.build_main_command({})))  # 1.5: padrao do main.py
+                          settings["min_curve_radius_m"]), (2., 320, 1, 5., 2.0))
+        self.assertNotIn("min_curve_radius_m", parsed(gui.build_main_command({})))  # 1.2: padrao do main.py
         line = gui.build_main_command({"navigation": "line", "pure_pursuit": False, "record_frames": True,
                                        "classifier": True, "estimator": False})
         settings = parsed(line)
@@ -210,6 +210,55 @@ class IncrementalSendTests(unittest.TestCase):
         self.assertEqual(int(os.stat(self.car / "main.py").st_mtime), int(1e9))
         summary, _, puts = self.sync(force=True)
         self.assertEqual(puts, 4)
+
+    def test_data_folders_and_files_never_go_to_the_car(self):
+        data = {
+            "experimentos/vermelho/20261023_091339/car.csv": "t,v",            # Coletar Dados dentro da pasta
+            "experimentos/vermelho/20261023_091339/cone_frames/f1.jpg": "jpg",
+            "logs_terminal/2026-11-10/19h05m12_testes.log": "saida",
+            "Logs Antigos/x.txt": "pasta de log com outro nome",
+            "teste_curva_lara/cones_debug.jsonl": "{}",                          # ensaio com nome qualquer
+            "teste_curva_lara/notas.py": "print('script de analise do ensaio')",
+            "tools/2026-10-23_08h45m36/auto.png": "foto do ajuste",             # pasta com nome de data
+            "Archive.zip": "zip", "cones_ds.npz": "npz", "tools/video.mp4": "mp4",
+        }
+        for rel, text in data.items():
+            path = self.local / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        skipped = {}
+        sent = set(gui.local_tree(str(self.local), skipped))
+        self.assertEqual(sent, {"main.py", "fva_car/corridor.py", "tools/tests/test_a.py", "calibracao/camera.json"})
+        self.assertEqual(set(skipped["pastas"]), {"experimentos", "logs", "logs_terminal", "Logs Antigos",
+                                                  "teste_curva_lara", "tools/2026-10-23_08h45m36"})
+        self.assertGreaterEqual(skipped["arquivos"], len(data))
+        summary, lines, puts = self.sync()
+        self.assertEqual(puts, 4)
+        self.assertTrue(any("fora do envio" in line for line in lines), lines)
+
+    def test_first_time_cleanup_wipes_the_car_folder_but_keeps_logs(self):
+        # Carro "pesado": experimentos e lixo enviados antes, mais os logs das missoes.
+        for rel in ("experimentos/vermelho/20261023/car.csv", "tools/experimentos/x.jpg", "velho.py",
+                    "logs/20261110_093000/car.csv", "main.py"):
+            path = self.car / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("antigo", encoding="utf-8")
+        car = LocalCar()
+        removed = dict(gui.clean_remote(car, str(self.car), check=False))
+        self.assertEqual(set(removed), {"experimentos", "tools", "velho.py", "main.py"})
+        self.assertEqual(sorted(p.name for p in self.car.iterdir()), ["logs"])
+        self.assertTrue((self.car / "logs" / "20261110_093000" / "car.csv").exists())
+        summary, _, puts = self.sync(force=True)
+        self.assertEqual(puts, 4)  # so o codigo volta
+        self.assertFalse((self.car / "experimentos").exists())
+
+    def test_cleanup_refuses_folders_that_are_not_a_project(self):
+        for path in ("/", "/home", "/home/alunos", "/home/alunos/Desktop", "/tmp/x/y", "/etc/fva/x", "fva"):
+            with self.subTest(path=path):
+                self.assertFalse(gui.clean_target_is_safe(path))
+        self.assertTrue(gui.clean_target_is_safe("/home/alunos/Desktop/fva"))
+        with self.assertRaises(RuntimeError):
+            gui.clean_remote(LocalCar(), "/home/alunos")
 
     def test_optional_cleanup_removes_only_stale_python_files(self):
         self.sync()

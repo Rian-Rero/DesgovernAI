@@ -303,3 +303,19 @@ python3 main.py --no-preview           # sem previa de curva
 e olhar `cones_summary.json` (`vref_step_median_m_s`, `steer_step_median_rad`,
 `corridor_states`, `learned_width_m`, `light_gain_*`).
 
+
+## 9. Ensaios de 10/11 (13 rodadas, antes da velocidade alta nas retas)
+
+| Problema | Rodadas | Causa | Correção |
+|---|---|---|---|
+| Parada pelo ultrassom | 9 de 13 | Leitura isolada de 0,1–0,2 m surgindo do nada (de 1,9 m ou 4 m para 0,15 m em 0,1 s). Com o carro já parado, o sensor seguiu oscilando 0,16/0,78/4,0 | O eco precisa durar `obstacle_confirm_s` = 0,15 s (2 leituras). Nos logs, as 6 paradas falsas somem e a parada real continua |
+| Saída de pista em grampo | 4 (091452, 091845, 092027, 092118) | Troca errada do lado das cores: a comparação de cones à mesma distância à frente falha em curva fechada, porque a borda de fora dá a volta pela frente. O estimador recomeçava com as cores invertidas e virava para fora | Com o corredor estimado, o lado vem da distância de cada cor até a linha central (`SideTracker`), e a troca exige separação ≥ meia largura por 6 quadros. No replay, as trocas nos momentos críticos não acontecem mais |
+| Curvas mais fechadas que o previsto | todas | Raio ~1,2 m (κ ≈ 0,8), perto do mínimo do carro (~1,0 m com a roda no batente) | `min_curve_radius_m` = 1,2. Pista virtual `fechada`: aceleração lateral máxima 0,61 → 0,48 m/s² |
+
+Outras observações:
+- **Erro lateral nas rodadas boas:** 5–8 cm RMS. As rodadas com 0,44–0,47 m são as da troca de lado.
+- **Largura aprendida:** 1,26–1,34 m, igual à separação medida nos pares de cones. Nas últimas rodadas, 0,9–1,2 m, pelo jeito com a pista estreitada.
+- **Lei de direção:** 11 das 13 rodadas foram com Stanley. Na pista virtual com curvas de 1,25 m, o pure pursuit teve 3,6 cm de erro RMS (máximo 9) contra 10,3 cm (máximo 24) do Stanley.
+- **Visão:** 7–12 quadros/s, com detecção de 52–146 ms em 640×480. No benchmark, 320×240 leva 29 ms e os cones até 3 m saem iguais. Vale testar `--vision-width 320`.
+- **Replay de um ensaio com o lado recalculado pelo código atual:**
+  `python3 tools/replay_corredor.py logs/<ensaio> --recompute-sides`

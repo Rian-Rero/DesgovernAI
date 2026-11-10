@@ -28,6 +28,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from fva_car.cones import SideTracker  # noqa: E402
 from fva_car.corridor import CorridorEstimator, CorridorSettings, STATES  # noqa: E402
 from fva_car.lateral import GroundCalibration  # noqa: E402
 
@@ -40,12 +41,22 @@ def load_frames(folder):
         return [json.loads(line) for line in handle if line.strip()]
 
 
-def frame_inputs(record):
+def frame_inputs(record, sides=None, estimator=None):
+    """sides: SideTracker para recalcular o lado de cada cor (codigo atual);
+    None usa o lado registrado no log (o que o carro usou)."""
     vision = record.get('vision') or {}
     detection = vision.get('detection') or {}
     green = np.asarray(detection.get('green', {}).get('m') or [], float).reshape(-1, 2)
     red = np.asarray(detection.get('red', {}).get('m') or [], float).reshape(-1, 2)
-    green_left = (vision.get('sides') or {}).get('green_left', True)
+    logged = ((vision.get('corridor') or {}).get('sides') or {}).get('green_left')
+    if logged is None:
+        logged = (vision.get('sides') or {}).get('green_left', True)
+    green_left = logged
+    if sides is not None:
+        green_left, _, flipped = sides.update(green, red, estimator, (vision.get('sides') or {}).get('green_left', True))
+        if flipped and estimator is not None:
+            estimator.reset()
+            estimator.learned_width = None
     tracking = vision.get('tracking') or {}
     motion = tracking.get('motion_m')
     pose_frame = tracking.get('motion') == 'odometria'
@@ -77,12 +88,13 @@ def jumps(series, motions):
     return np.asarray(de), np.asarray(dpsi)
 
 
-def replay(folder, calibration, settings, writer=None):
+def replay(folder, calibration, settings, writer=None, recompute_sides=False):
     records = load_frames(folder)
     estimator = CorridorEstimator(settings, calibration.homography if calibration else None)
+    sides = SideTracker() if recompute_sides else None
     old, new, motions, states = [], [], [], []
     for record in records:
-        left, right, motion, pose_frame = frame_inputs(record)
+        left, right, motion, pose_frame = frame_inputs(record, sides, estimator)
         estimate = estimator.step(float(record['t_capture']), left, right, motion, pose_frame)
         logged = (record.get('vision') or {}).get('stanley_errors')
         old.append(tuple(logged) if logged else None)
@@ -142,6 +154,8 @@ def main(argv=None):
     parser.add_argument('--track-width', type=float, default=1.8, help='largura nominal do corredor, m')
     parser.add_argument('--set', action='append', metavar='AJUSTE=VALOR', help='ajuste de CorridorSettings')
     parser.add_argument('--csv', type=Path, help='serie por quadro (antes x estimador)')
+    parser.add_argument('--recompute-sides', action='store_true',
+                        help='decide o lado de cada cor com o codigo atual (padrao: o lado do log)')
     args = parser.parse_args(argv)
     calibration = GroundCalibration.from_file(args.calibration) if args.calibration else None
     settings = CorridorSettings.from_value({'track_width_m': args.track_width, **parse_set(args.set)})
@@ -154,7 +168,8 @@ def main(argv=None):
         writer.writeheader()
     try:
         for folder in args.ensaios:
-            print(summary(folder.name, *replay(folder, calibration, settings, writer)), flush=True)
+            print(summary(folder.name, *replay(folder, calibration, settings, writer, args.recompute_sides)),
+                  flush=True)
     finally:
         if handle:
             handle.close()
