@@ -67,3 +67,41 @@ class MissionOptionsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalLogTests(unittest.TestCase):
+    def test_file_names_say_what_ran(self):
+        cases = {
+            "python3 -u main.py --navigation cones --speed 0.7 --stream 8080": "missao_cones_0.7ms_purepursuit",
+            "python3 -u main.py --navigation cones --speed 1.5 --stanley --no-preview":
+                "missao_cones_1.5ms_stanley_sem-previa",
+            "python3 -u main.py --speed 1.0 --no-estimator --record-frames 3 --classifier modelos/cones.onnx":
+                "missao_cones_1.0ms_sem-estimador_gravando_rede",
+            "python3 -u main.py --navigation line --speed 0.7": "missao_linha_0.7ms",
+            "python3 -m unittest discover -s tests": "testes_unitarios",
+            "python3 tools/benchmark_visao.py --cones": "benchmark_visao",
+            "python3 tools/ajustar_camera.py": "ajustar_camera",
+            "ls -la": "ls",
+        }
+        for command, label in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(gui.command_label(command), label)
+
+    def test_log_keeps_text_and_sends_telemetry_to_csv(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            log = gui.RunLog("vermelho", "missao_cones_0.7ms_purepursuit", {"comando": "python3 main.py"}, folder)
+            log.write("\x1b[32mEncoder: leitura OK.\x1b[0m")
+            log.write("DATA,0.1,0,0,1,1,0,0,0,0")
+            log.write("DATA,0.2,0,0,1,1,0,0,0,0")
+            log.close("codigo de saida 0")
+            again = gui.RunLog("vermelho", "missao_cones_0.7ms_purepursuit", {}, folder)
+            again.close()
+            self.assertRegex(log.path.name, r"^\d\dh\d\dm\d\d_vermelho_missao_cones_0\.7ms_purepursuit\.txt$")
+            self.assertNotEqual(log.path, again.path)  # mesmo segundo: nao sobrescreve
+            text = log.path.read_text(encoding="utf-8")
+            self.assertIn("# comando: python3 main.py", text)
+            self.assertIn("Encoder: leitura OK.\n", text)  # sem codigos de cor
+            self.assertNotIn("DATA,", text)
+            self.assertIn("codigo de saida 0", text)
+            self.assertEqual(log.telemetry_path.read_text().count("DATA,"), 2)

@@ -27,6 +27,7 @@ import base64
 import webbrowser
 import urllib.request
 from collections import deque
+from pathlib import Path
 
 import paramiko
 import tkinter as tk
@@ -137,6 +138,122 @@ COLORS = {"verde": "#00cc00", "vermelho": "#cc0000", "roxo": "#8000cc"}
 CAR_ICON = "🚗 "
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+# Saida de cada comando/teste remoto, salva no notebook para enviar depois:
+# logs_terminal/<AAAA-MM-DD>/<HHhMMmSS>_<carro>_<o-que-rodou>.txt
+TERMINAL_LOG_DIR = Path(__file__).resolve().parents[2] / "logs_terminal"
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z._]+", "-", text).strip("-._").lower() or "comando"
+
+
+def command_label(command: str) -> str:
+    """Nome curto e legivel do que o comando roda (para o nome do arquivo de log)."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = command.split()
+    if not argv:
+        return "comando"
+    joined = " ".join(argv)
+    script = next((Path(a).stem for a in argv if a.endswith(".py")), None)
+    if script == "main":
+        options = {}
+        for index, arg in enumerate(argv):
+            if arg.startswith("--"):
+                following = argv[index + 1] if index + 1 < len(argv) else ""
+                options[arg] = "" if following.startswith("--") else following
+        navigation = {"line": "linha"}.get(options.get("--navigation"), "cones")
+        parts = ["missao", navigation]
+        if "--fast" in options:
+            parts.append("1.5ms")
+        elif options.get("--speed"):
+            parts.append(f"{options['--speed']}ms")
+        if navigation == "cones":
+            if "--no-estimator" in options:
+                parts.append("sem-estimador")
+            else:
+                parts.append("stanley" if "--stanley" in options else "purepursuit")
+                if "--no-preview" in options:
+                    parts.append("sem-previa")
+            if "--record-frames" in options:
+                parts.append("gravando")
+            if "--classifier" in options and options["--classifier"].lower() != "none":
+                parts.append("rede")
+        return "_".join(parts)
+    if "unittest" in argv:
+        return "testes_unitarios"
+    if script:
+        return _slug(script)
+    return _slug(Path(argv[0]).name if argv[0] not in ("sudo", "nohup") or len(argv) < 2 else argv[1])
+
+
+class RunLog:
+    """Grava a saida de um comando remoto num .txt (e a telemetria DATA num .csv ao lado).
+
+    Escreve linha a linha com flush: se a GUI ou a conexao cair, o que chegou
+    fica salvo.
+    """
+    def __init__(self, car: str, label: str, header: dict, folder: Path = None):
+        now = time.localtime()
+        folder = Path(folder or TERMINAL_LOG_DIR) / time.strftime("%Y-%m-%d", now)
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = f"{time.strftime('%Hh%Mm%S', now)}_{_slug(car)}_{label}"
+        path = folder / f"{stem}.txt"
+        counter = 2
+        while path.exists():
+            path = folder / f"{stem}_{counter}.txt"
+            counter += 1
+        self.path = path
+        self.telemetry_path = path.with_name(path.stem + "_telemetria.csv")
+        self.lock = threading.Lock()
+        self.file = open(path, "w", encoding="utf-8")
+        self.telemetry = None
+        self.data_lines = 0
+        self.file.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S', now)}\n")
+        for key, value in header.items():
+            self.file.write(f"# {key}: {value}\n")
+        self.file.write("\n")
+        self.file.flush()
+
+    def write(self, text: str):
+        text = ANSI_ESCAPE_RE.sub("", str(text)).rstrip("\r\n")
+        with self.lock:
+            if self.file.closed:
+                return
+            if text.lstrip().startswith("DATA,"):
+                if self.telemetry is None:
+                    self.telemetry = open(self.telemetry_path, "w", encoding="utf-8")
+                self.telemetry.write(text.lstrip() + "\n")
+                self.data_lines += 1
+                return
+            self.file.write(text + "\n")
+            self.file.flush()
+
+    def close(self, status: str = ""):
+        with self.lock:
+            if self.file.closed:
+                return
+            if self.data_lines:
+                self.file.write(f"\n# {self.data_lines} linhas de telemetria em {self.telemetry_path.name}\n")
+            if status:
+                self.file.write(f"# {status}\n")
+            self.file.close()
+            if self.telemetry is not None:
+                self.telemetry.close()
+
+
+def open_folder(path: Path):
+    """Abre a pasta no gerenciador de arquivos do sistema."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Windows":
+        os.startfile(str(path))  # noqa: S606
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 def parse_telemetry_line(line: str):
@@ -537,6 +654,10 @@ class RsyncGUI(tk.Tk):
 
         ttk.Button(
             cmd_buttons, text="Limpar terminal", command=self.clear_cmd_log
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            cmd_buttons, text="📂 Logs salvos", command=lambda: open_folder(TERMINAL_LOG_DIR)
         ).pack(side="left")
 
         # area inferior: grafico e terminal lado a lado
@@ -947,6 +1068,9 @@ class RsyncGUI(tk.Tk):
         ttk.Button(controls, text="Limpar", command=self.clear_test_log).pack(
             side="left", padx=4
         )
+        ttk.Button(controls, text="📂 Logs salvos", command=lambda: open_folder(TERMINAL_LOG_DIR)).pack(
+            side="left", padx=4
+        )
 
         ttk.Label(parent, text="Saída do teste:").pack(
             anchor="w", padx=10, pady=(10, 2)
@@ -1302,10 +1426,22 @@ class RsyncGUI(tk.Tk):
         pid = None
         finished = False
         connection_errors = 0
+        run_log = None
+        try:
+            run_log = RunLog(name, "teste_" + _slug(Path(module_path).stem),
+                             {"carro": f"{name} ({ip})", "pasta": remote_workdir, "modulo": module_path})
+        except OSError as exc:
+            self._queue_test_output(f"Não foi possível criar o log local: {exc}")
+
+        def emit(text):
+            self._queue_test_output(text)
+            if run_log:
+                run_log.write(text)
+
         try:
             command = f"cd {shlex.quote(remote_workdir)} && python3 -u {shlex.quote(module_path)}"
-            self._queue_test_output(f"$ {command}")
-            self._queue_test_output("")
+            emit(f"$ {command}")
+            emit("")
             # setsid cria grupo próprio, permitindo que Parar encerre o módulo e filhos.
             inner = (
                 f"{command}; rc=$?; printf '%s\\n' \"$rc\" > {shlex.quote(exit_path)}"
@@ -1323,7 +1459,7 @@ class RsyncGUI(tk.Tk):
                 )
             pid = int(response.split(":", 1)[1])
             self.test_remote_pid = pid
-            self._queue_test_output(f"Log remoto: {log_path}")
+            emit(f"Log remoto: {log_path}")
             # Se Parar foi pressionado enquanto a conexão inicial era estabelecida.
             if not self.test_running:
                 self._stop_remote_test_process(ip, pid)
@@ -1356,7 +1492,7 @@ class RsyncGUI(tk.Tk):
                                 buffer[match.end() :],
                             )
                             if line:
-                                self._queue_test_output(
+                                emit(
                                     line.decode("utf-8", errors="replace")
                                 )
                     try:
@@ -1381,7 +1517,7 @@ class RsyncGUI(tk.Tk):
                             pass
                     client = None
                     if connection_errors == 1:
-                        self._queue_test_output(
+                        emit(
                             f"Comunicação interrompida; recuperando log: {exc}"
                         )
                     if connection_errors >= 15:
@@ -1390,17 +1526,20 @@ class RsyncGUI(tk.Tk):
                         ) from exc
                 time.sleep(0.3 if finished else 0.4)
             if buffer:
-                self._queue_test_output(buffer.decode("utf-8", errors="replace"))
+                emit(buffer.decode("utf-8", errors="replace"))
             if finished and self.test_running:
-                self._queue_test_output(f"\nTeste finalizado (código {rc}).")
+                emit(f"\nTeste finalizado (código {rc}).")
             else:
-                self._queue_test_output("\nTeste interrompido.")
+                emit("\nTeste interrompido.")
         except Exception as exc:
             if self.test_running:
-                self._queue_test_output(
+                emit(
                     f"Erro no teste de {name.upper()} ({ip}): {exc}"
                 )
         finally:
+            if run_log:
+                run_log.close()
+                self._queue_test_output(f"Log salvo: {run_log.path}")
             if sftp:
                 try:
                     sftp.close()
@@ -2239,6 +2378,8 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             for raw_cmd in cmds:
                 client = None
                 sftp = None
+                run_log = None
+                final_status = "interrompido"
                 try:
                     # Nome exclusivo evita misturar execuções antigas e novas.
                     run_id = uuid.uuid4().hex
@@ -2267,6 +2408,13 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                         )
                     if not arduino_flash:
                         report(f"📄 Saída persistente: {log_path}")
+                        try:
+                            run_log = RunLog(name, command_label(raw_cmd), {
+                                "carro": f"{name} ({ip})", "pasta": remote_workdir,
+                                "comando": raw_cmd, "log no carro": log_path})
+                            report(f"💾 Log local: {run_log.path}")
+                        except OSError as exc:
+                            report(f"⚠️ Não foi possível criar o log local: {exc}")
                     flash_lines = []
                     # Reabre SFTP se necessário; mantém offset para não duplicar dados.
                     offset = 0
@@ -2299,6 +2447,8 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                                         flash_lines.append(decoded)
                                     else:
                                         self._handle_remote_log_line(name, decoded)
+                                        if run_log:
+                                            run_log.write(decoded)
                             try:
                                 with sftp.open(exit_path, "r") as status_file:
                                     rc = int(status_file.read().strip())
@@ -2337,6 +2487,8 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                             self._handle_remote_log_line(
                                 name, buffer.decode("utf-8", errors="replace")
                             )
+                            if run_log:
+                                run_log.write(buffer.decode("utf-8", errors="replace"))
                     if arduino_flash:
                         if rc == 0 and any(
                             "SUCESSO: firmware gravado" in line for line in flash_lines
@@ -2361,10 +2513,15 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                         report(f"⚠️ Retorno {rc} para comando: {raw_cmd}")
                     else:
                         report(f"✅ Comando finalizado (código 0)")
+                    final_status = f"codigo de saida {rc}"
                 except Exception as exc:
                     report(f"❌ Erro em {name.upper()} ({ip}): {exc}")
+                    final_status = f"erro: {exc}"
                     break
                 finally:
+                    if run_log:
+                        run_log.close(final_status)
+                        report(f"💾 Log salvo: {run_log.path}")
                     if sftp:
                         try:
                             sftp.close()
