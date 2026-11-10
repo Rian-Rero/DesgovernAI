@@ -264,3 +264,41 @@ class ConeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CorridorSideTests(unittest.TestCase):
+    """Lado de cada cor para o estimador, pelos proprios cones (ensaio de 10/11:
+    vermelho a esquerda, detector sem cadeias ficou no padrao verde a esquerda)."""
+
+    def detector(self):
+        from fva_car.lateral import GroundCalibration
+        from fva_car.cones import RealConeDetector
+        calibration = GroundCalibration.from_file(Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+        return RealConeDetector(calibration, corridor=True)
+
+    def test_side_evidence_pairs_cones_at_the_same_distance(self):
+        from fva_car.cones import side_evidence
+        green = np.array([[.9, -.48], [1.7, -.5], [3.7, -.54]])
+        red = np.array([[1.8, .86], [2.7, .92]])
+        separation, paired = side_evidence(green, red)
+        self.assertTrue(paired)
+        self.assertLess(separation, -1.)  # verde a direita
+        # Curva a esquerda: o vermelho distante fica "a direita" do verde proximo,
+        # mas a mesma distancia o verde continua a esquerda.
+        green = np.array([[1., .7], [2., 1.4]])
+        red = np.array([[1.1, -.6], [2.1, .2], [2.6, .9]])
+        self.assertGreater(side_evidence(green, red)[0], .3)
+        self.assertEqual(side_evidence(green, np.empty((0, 2))), (None, False))
+
+    def test_estimator_uses_the_side_seen_in_the_cones_and_flips_with_hysteresis(self):
+        detector = self.detector()
+        green, red = np.array([[.9, -.48], [1.7, -.5]]), np.array([[1.8, .86], [2.7, .92]])
+        side, info = detector._corridor_sides(green, red, fallback=True)
+        self.assertFalse(side)  # o detector dizia verde a esquerda; os cones dizem o contrario
+        self.assertTrue(info['flipped'])
+        self.assertEqual(info['source'], 'cones')
+        # Um quadro contrario isolado (reflexo) nao troca; dois seguidos trocam.
+        self.assertFalse(detector._corridor_sides(red, green, fallback=True)[0])
+        self.assertTrue(detector._corridor_sides(red, green, fallback=True)[0])
+        # Uma cor so: mantem o lado decidido.
+        self.assertTrue(detector._corridor_sides(red, np.empty((0, 2)), fallback=False)[0])

@@ -141,20 +141,44 @@ class CorridorEstimate:
                 'reason': self.reason}
 
 
+STEP = ARC[1] - ARC[0]
+PROBE = 1e-4  # passo das derivadas numericas
+# Estado base e um passo em cada componente da linha (e, psi, kappa, dkappa):
+# as 5 linhas centrais saem de uma vez (no Pi, 5 chamadas separadas custavam
+# ~5x mais pelo overhead do numpy em vetores pequenos).
+PROBES = np.vstack([np.zeros(5), PROBE*np.eye(5)[:4]])
+
+
+def centerlines(states, max_curvature=2.):
+    """Linhas centrais de varios estados (S, 5): (pontos (S, M, 2), rumo (S, M))."""
+    states = np.atleast_2d(np.asarray(states, float))
+    e, psi, kappa, dkappa = (states[:, k:k+1] for k in range(4))
+    curvature = np.clip(kappa + dkappa*ARC, -max_curvature, max_curvature)
+    # Integral trapezoidal a partir de s = 0 (ancora: ponto mais proximo do eixo).
+    theta = np.concatenate((np.zeros((len(states), 1)),
+                            np.cumsum((curvature[:, 1:] + curvature[:, :-1])*STEP/2, axis=1)), axis=1)
+    theta = psi + theta - theta[:, ARC_ZERO:ARC_ZERO+1]
+    c, s = np.cos(theta), np.sin(theta)
+    zero = np.zeros((len(states), 1))
+    x = np.concatenate((zero, np.cumsum((c[:, 1:] + c[:, :-1])*STEP/2, axis=1)), axis=1)
+    y = np.concatenate((zero, np.cumsum((s[:, 1:] + s[:, :-1])*STEP/2, axis=1)), axis=1)
+    x = x - x[:, ARC_ZERO:ARC_ZERO+1] - e*np.sin(psi)
+    y = y - y[:, ARC_ZERO:ARC_ZERO+1] + e*np.cos(psi)
+    return np.stack((x, y), axis=-1), theta
+
+
 def centerline(state, max_curvature=2.):
     """(pontos Nx2, rumo N) da linha central amostrada em ARC, referencial do carro."""
-    e, psi, kappa, dkappa = (float(v) for v in state[:4])
-    curvature = np.clip(kappa + dkappa*ARC, -max_curvature, max_curvature)
-    step = ARC[1] - ARC[0]
-    # Integral trapezoidal a partir de s = 0 (ancora: ponto mais proximo do eixo).
-    theta = np.concatenate(([0.], np.cumsum((curvature[1:] + curvature[:-1])*step/2)))
-    theta = psi + theta - theta[ARC_ZERO]
-    c, s = np.cos(theta), np.sin(theta)
-    x = np.concatenate(([0.], np.cumsum((c[1:] + c[:-1])*step/2)))
-    y = np.concatenate(([0.], np.cumsum((s[1:] + s[:-1])*step/2)))
-    x = x - x[ARC_ZERO] - e*math.sin(psi)
-    y = y - y[ARC_ZERO] + e*math.cos(psi)
-    return np.c_[x, y], theta
+    line, theta = centerlines(np.asarray(state, float)[None, :], max_curvature)
+    return line[0], theta[0]
+
+
+def offsets_many(points, states, index, max_curvature=2.):
+    """Distancias (S, N) dos pontos a cada linha central, com a amostra `index` fixa."""
+    line, theta = centerlines(states, max_curvature)
+    delta = points[None, :, :] - line[:, index]
+    angle = theta[:, index]
+    return delta[..., 1]*np.cos(angle) - delta[..., 0]*np.sin(angle)
 
 
 def offsets(points, state, index=None, max_curvature=2.):
@@ -228,13 +252,25 @@ class CorridorEstimator:
     # ------------------------------------------------------------------ previsao
     def _move(self, state, dx, dy, dth):
         """Estado visto do eixo dianteiro deslocado (dx, dy) e girado dth."""
-        d, along, _, _ = offsets([[dx, dy]], state, max_curvature=self.settings.max_curvature)
-        s = float(along[0])
-        kappa, dkappa = state[KAPPA], state[DKAPPA]
-        moved = np.array(state, float)
-        moved[E] = -float(d[0])
-        moved[PSI] = _wrap(state[PSI] + kappa*s + dkappa*s*s/2 - dth)
-        moved[KAPPA] = float(np.clip(kappa + dkappa*s, -self.settings.max_curvature, self.settings.max_curvature))
+        return self._move_many(np.asarray(state, float)[None, :], dx, dy, dth)[0]
+
+    def _move_many(self, states, dx, dy, dth):
+        """_move de varios estados (S, 5) de uma vez (estado e passos do jacobiano)."""
+        limit = self.settings.max_curvature
+        line, theta = centerlines(states, limit)
+        diff = np.array([dx, dy]) - line
+        index = np.argmin(np.einsum('smk,smk->sm', diff, diff), axis=1)
+        rows = np.arange(len(states))
+        delta, angle = diff[rows, index], theta[rows, index]
+        c, s_ = np.cos(angle), np.sin(angle)
+        d = delta[:, 1]*c - delta[:, 0]*s_
+        s = ARC[index] + delta[:, 0]*c + delta[:, 1]*s_
+        kappa, dkappa = states[:, KAPPA], states[:, DKAPPA]
+        moved = np.array(states, float)
+        moved[:, E] = -d
+        psi = states[:, PSI] + kappa*s + dkappa*s*s/2 - dth
+        moved[:, PSI] = np.arctan2(np.sin(psi), np.cos(psi))
+        moved[:, KAPPA] = np.clip(kappa + dkappa*s, -limit, limit)
         return moved
 
     def predict(self, motion, pose_frame=True, dt=0.):
@@ -257,14 +293,12 @@ class CorridorEstimator:
             dx += cfg.pose_offset_m*(math.cos(dth) - 1)
             dy += cfg.pose_offset_m*math.sin(dth)
         x0 = self.x
-        x1 = self._move(x0, dx, dy, dth)
+        moved = self._move_many(x0 + PROBES, dx, dy, dth)
+        x1 = moved[0]
         jacobian = np.eye(5)
-        for k in (E, PSI, KAPPA, DKAPPA):
-            probe = x0.copy()
-            probe[k] += 1e-4
-            delta = self._move(probe, dx, dy, dth) - x1
-            delta[PSI] = _wrap(delta[PSI])
-            jacobian[:, k] = delta/1e-4
+        delta = moved[1:] - x1
+        delta[:, PSI] = np.arctan2(np.sin(delta[:, PSI]), np.cos(delta[:, PSI]))
+        jacobian[:, :4] = (delta/PROBE).T
         ds = math.hypot(dx, dy)
         noise = np.diag([(.005 + .03*ds)**2, (.005 + .15*abs(dth) + .02*ds)**2,
                          cfg.kappa_noise*ds + 1e-5, cfg.dkappa_noise*ds + 1e-4,
@@ -300,10 +334,8 @@ class CorridorEstimator:
         d, along, index, normal = offsets(points, state, max_curvature=cfg.max_curvature)
         h = d - sides*state[WIDTH]/2
         H = np.zeros((len(points), 5))
-        for k, step in ((E, 1e-4), (PSI, 1e-4), (KAPPA, 1e-4), (DKAPPA, 1e-4)):
-            probe = np.array(state, float)
-            probe[k] += step
-            H[:, k] = (offsets(points, probe, index, cfg.max_curvature)[0] - d)/step
+        probes = offsets_many(points, np.asarray(state, float) + PROBES[1:], index, cfg.max_curvature)
+        H[:, :4] = ((probes - d)/PROBE).T
         H[:, WIDTH] = -sides/2
         # Derivada da distancia em relacao ao ponto: a normal da linha central.
         R = np.einsum('ni,nij,nj->n', normal, covariance, normal)
@@ -481,12 +513,10 @@ class CorridorEstimator:
         P = self.P
         if given_width and P[WIDTH, WIDTH] > 1e-12:
             P = P - np.outer(P[:, WIDTH], P[WIDTH, :])/P[WIDTH, WIDTH]
-        base = sample_centerline(self.x, [distance], 0., self.settings.max_curvature)[0, 1]
+        line, _ = centerlines(self.x + PROBES, self.settings.max_curvature)
+        lateral = np.array([np.interp(distance, ARC, row) for row in line[:, :, 1]])
         gradient = np.zeros(5)
-        for k in (E, PSI, KAPPA, DKAPPA):
-            probe = self.x.copy()
-            probe[k] += 1e-4
-            gradient[k] = (sample_centerline(probe, [distance], 0., self.settings.max_curvature)[0, 1] - base)/1e-4
+        gradient[:4] = (lateral[1:] - lateral[0])/PROBE
         return float(math.sqrt(max(gradient @ P @ gradient, 0.)))
 
     def sample(self, arc_lengths, offset=0.):

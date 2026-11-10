@@ -25,6 +25,33 @@ CONE_RECOVERY_SPEED = .35  # m/s
 # em curva a reta secante inventa erro lateral (quadro 101 de 20261023_080437).
 CONE_FAR_START_M = 2.6
 CONE_FAR_MAX_CURVATURE = .25  # 1/m, raio de 4 m (mesmo limiar de reta/curva)
+# Lado de cada cor para o estimador: verde e vermelho a mesma distancia a frente
+# (pares com |dx| < SIDE_PAIR_DX_M, ate SIDE_MAX_RANGE_M) separados de pelo menos
+# SIDE_MIN_SEPARATION_M; troca so apos SIDE_FLIP_FRAMES quadros contrarios.
+# No ensaio de 10/11 o vermelho estava a esquerda e o detector, sem cadeias,
+# ficou no padrao (verde a esquerda): largura "negativa" e erros sem sentido.
+SIDE_PAIR_DX_M = .8
+SIDE_MAX_RANGE_M = 4.
+SIDE_MIN_SEPARATION_M = .3
+SIDE_FLIP_FRAMES = 2
+
+
+def side_evidence(green, red, max_range=SIDE_MAX_RANGE_M):
+    """Separacao lateral verde - vermelho (m, + = verde a esquerda) e se veio de pares.
+
+    Compara cones das duas cores a mesma distancia a frente (vale em curva);
+    sem pares, compara as medianas. None sem as duas cores.
+    """
+    keep = lambda p: p[(p[:, 0] > .2) & (p[:, 0] <= max_range)] if len(p) else p
+    green, red = keep(np.asarray(green, float).reshape(-1, 2)), keep(np.asarray(red, float).reshape(-1, 2))
+    if not len(green) or not len(red):
+        return None, False
+    dx = np.abs(green[:, None, 0] - red[None, :, 0])
+    pairs = dx < SIDE_PAIR_DX_M
+    if np.any(pairs):
+        dy = green[:, None, 1] - red[None, :, 1]
+        return float(np.median(dy[pairs])), True
+    return float(np.median(green[:, 1]) - np.median(red[:, 1])), False
 
 
 @dataclass(frozen=True)
@@ -100,6 +127,8 @@ class RealConeDetector:
         self.odometry = odometry
         self.last_timestamp = None
         self.corridor = None
+        self.corridor_green_left = None  # lado decidido pelos proprios cones (estimador)
+        self.side_contrary = 0
         if corridor not in (None, False):
             corridor_settings = CorridorSettings.from_value(
                 corridor, track_width_m=self.settings.track_width_cm/100,
@@ -177,7 +206,7 @@ class RealConeDetector:
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
         if estimate is not None:
-            debug.update(corridor=estimate.debug(), legacy_errors=legacy)
+            debug.update(corridor=dict(estimate.debug(), sides=self.corridor_sides), legacy_errors=legacy)
         debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
                      recovery=bool(valid and recovery),
                      confidence=round(float(result.confidence), 3), branch=bool(result.branch),
@@ -195,14 +224,40 @@ class RealConeDetector:
             corridor_width_m=width, **metadata)
         return self.with_preview(observation) if self.render_preview else observation
 
+    def _corridor_sides(self, green, red, fallback):
+        """Verde a esquerda? Pela geometria dos cones deste quadro, com histerese."""
+        separation, paired = side_evidence(green, red)
+        vote = None if separation is None or abs(separation) < SIDE_MIN_SEPARATION_M else separation > 0
+        flipped = False
+        if self.corridor_green_left is None:
+            if vote is not None:
+                self.corridor_green_left = vote
+                flipped = vote != fallback  # o estado anterior usou o lado do detector
+        elif vote is not None and vote != self.corridor_green_left:
+            self.side_contrary += 1
+            if self.side_contrary >= SIDE_FLIP_FRAMES:
+                self.corridor_green_left, flipped = vote, True
+        if vote is None or vote == self.corridor_green_left:
+            self.side_contrary = 0
+        if flipped:
+            # Estado montado com as cores trocadas nao serve: recomeca, sem a largura.
+            self.side_contrary = 0
+            self.corridor.reset()
+            self.corridor.learned_width = None
+        green_left = fallback if self.corridor_green_left is None else self.corridor_green_left
+        return green_left, {'green_left': bool(green_left), 'separation_m': None if separation is None
+                            else round(separation, 3), 'paired': bool(paired), 'flipped': bool(flipped),
+                            'source': 'detector' if self.corridor_green_left is None else 'cones'}
+
     def _corridor_step(self, result, timestamp, motion):
         """Cones deste quadro (ja confirmados pelo classificador) -> estimador."""
         homography = self.corridor.homography
-        green_left = self.green_left if result.green_left is None else bool(result.green_left)
+        detector_side = self.green_left if result.green_left is None else bool(result.green_left)
         ground = {}
         for color, points in (('green', result.green_points), ('red', result.red_points)):
             mapped = transform_points(points, homography) if len(points) else np.empty((0, 2))
             ground[color] = mapped[np.all(np.isfinite(mapped), axis=1)]
+        green_left, self.corridor_sides = self._corridor_sides(ground['green'], ground['red'], detector_side)
         left, right = (ground['green'], ground['red']) if green_left else (ground['red'], ground['green'])
         pose_frame = motion is not None
         if motion is None:
