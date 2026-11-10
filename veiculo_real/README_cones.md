@@ -414,10 +414,17 @@ A ferramenta testa várias exposições e mostra fps, brilho, área estourada e
 saturação dos cones. Ela salva uma foto por ajuste em `logs/ajuste_camera/<data_hora>/` (vem no Coletar Dados da GUI) e imprime
 a linha para colar em `main.py`, por exemplo
 `"camera_settings": {"fourcc": "MJPG", "exposure": 150, "auto_wb": False}`.
-Com `camera_settings` vazio, a câmera fica no modo automático, como antes.
+Com `camera_settings` vazio, a câmera é **posta** no modo automático (exposição
+e balanço de branco) ao abrir. A webcam guarda o último ajuste até ser
+desconectada; antes, a missão herdava a exposição manual deixada pelo
+`ajustar_camera.py`. A ferramenta também volta a câmera ao automático no fim,
+mede a linha "auto" com o automático ligado de verdade, testa exposições até
+120 ms (salas escuras) e aceita a partir de 15 fps (a visão processa 8–15
+quadros/s no Pi). Se o piso não passa de V = 25/255 nem no automático, ela
+avisa que está escuro demais para detectar cones.
 
 Para separar o custo do detector da disputa com as demais threads, rode no Pi
-`python3 veiculo_real/tools/benchmark_visao.py --cones --image logs/<ensaio>/vision_camera.jpg`
+`python3 veiculo_real/tools/benchmark_visao.py --cones` (sem `--image` usa a `vision_camera.jpg` mais recente em `logs/`)
 e compare com o `detection_s` do log.
 
 Os logs acrescentam `cone_red_count`, `cone_green_count`, `corridor_width_m`,

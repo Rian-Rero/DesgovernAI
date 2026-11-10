@@ -15,11 +15,16 @@ linha pronta para colar em main.py:
 
     "camera_settings": {"fourcc": "MJPG", "exposure": 120, "auto_wb": False},
 
-Criterio da sugestao: fps >= 90% do pedido, menos de 2% estourado e, entre os
-que passam, o de cones mais saturados. Exposicao alta demais derruba o fps e
-borra em movimento; baixa demais escurece e apaga a cor dos cones na sombra.
-A unidade de "exposure" depende da webcam (UVC comum: 100 us; 333 = 33 ms,
-limite para 30 fps). Os controles disponiveis aparecem no inicio (v4l2-ctl).
+Criterio da sugestao: fps >= --min-fps (15: a visao processa 8-15 quadros/s
+no Pi), piso com brilho util, menos de 2% estourado e, entre os que passam, o
+de cones mais saturados. Exposicao alta demais derruba o fps e borra em
+movimento; baixa demais escurece e apaga a cor dos cones na sombra. A unidade
+de "exposure" depende da webcam (UVC comum: 100 us; 333 = 33 ms, limite para
+30 fps; 666 = 66 ms, ~15 fps). Os controles aparecem no inicio (v4l2-ctl).
+
+A linha "auto" e medida com a exposicao e o balanco de branco automaticos
+LIGADOS, e no fim a camera volta ao automatico: a webcam guarda o ultimo
+ajuste ate ser desconectada, e a missao herdava a exposicao manual daqui.
 
 Iluminacao: o detector leva o piso a cor de referencia (cone_settings
 floor_b/g/r, auto_light). As colunas "piso BGR" e "corr. luz" mostram o piso
@@ -72,7 +77,9 @@ def measure(cam, frames, warmup):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--index', type=int, default=None, help='indice da camera (padrao: primeira encontrada)')
-    parser.add_argument('--exposures', type=float, nargs='+', default=[30, 60, 100, 150, 200, 300])
+    parser.add_argument('--exposures', type=float, nargs='+', default=[50, 100, 200, 333, 500, 800, 1200],
+                        help='exposicoes manuais a testar (UVC: 100 us; 333 = 33 ms)')
+    parser.add_argument('--min-fps', type=float, default=15., help='fps minimo aceito na sugestao')
     parser.add_argument('--fourcc', default='MJPG', help='codec pedido (MJPG, YUYV); "" mantem o padrao')
     parser.add_argument('--wb', type=float, default=None,
                         help='temperatura de cor fixa (K), ex. 4500; sem ela so desliga o WB automatico')
@@ -92,6 +99,7 @@ def main(argv=None):
     cam = Camera(cam_index=args.index, fourcc=args.fourcc or None)
     rows = []
     try:
+        cam._configure_image(None, True, None)  # automatico de verdade, mesmo se estava em manual
         auto = measure(cam, args.frames, warmup=30)  # exposicao automatica estabiliza
         if auto:
             cv2.imwrite(str(args.out / 'auto.jpg'), auto['image'])
@@ -103,17 +111,28 @@ def main(argv=None):
                 cv2.imwrite(str(args.out / f'exp_{exposure:g}.jpg'), result['image'])
                 rows.append((exposure, result))
     finally:
-        cam.close()
+        try:
+            cam._configure_image(None, True, None)  # a missao com camera_settings vazio fica no automatico
+            print('Camera de volta ao automatico (exposicao e balanco de branco).', flush=True)
+        finally:
+            cam.close()
 
     print(f'\n{"exposicao":>10} {"fps":>6} {"piso V":>7} {"estouro%":>9} {"S cones":>8} {"piso BGR":>15} {"corr. luz":>9}')
     for exposure, r in rows:
         print(f'{str(exposure):>10} {r["fps"]:6.1f} {r["floor_v"]:7.0f} {r["blown_pct"]:9.2f} {r["color_s"]:8.0f}'
               f' {str(r["floor_bgr"]):>15} {r["light"]:9.2f}')
     manual = [(e, r) for e, r in rows if e != 'auto'
-              and r['fps'] >= .9*FRAME_RATE and r['blown_pct'] < 2. and r['floor_v'] > 60]
+              and r['fps'] >= min(args.min_fps, .9*FRAME_RATE) and r['blown_pct'] < 2. and r['floor_v'] > 60]
     print(f'\nImagens em {args.out.resolve()}/ (compare os cones na sombra).')
+    brightest = max((r['floor_v'] for _, r in rows), default=0.)
+    if brightest < 25:
+        print(f'IMAGEM ESCURA DEMAIS: o piso nao passa de V={brightest:.0f}/255 em nenhum ajuste, nem no automatico.'
+              ' Acendam as luzes da pista, confiram se a lente nao esta coberta/suja ou testem'
+              ' exposicoes maiores (--exposures 1500 2500); assim a deteccao de cones nao funciona.')
+        return 1
     if not manual:
-        print('Nenhum ajuste manual manteve fps e brilho: teste exposicoes menores/maiores ou mais luz.')
+        print('Nenhum ajuste manual manteve fps e brilho: deixe camera_settings vazio (automatico),'
+              ' ou teste outras exposicoes/mais luz.')
         return 1
     exposure, best = max(manual, key=lambda item: item[1]['color_s'])
     exposure = int(exposure) if float(exposure).is_integer() else exposure

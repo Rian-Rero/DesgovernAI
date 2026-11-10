@@ -44,7 +44,9 @@ class Camera:
 					exposure: float = None,
 					auto_wb: bool = None,
 					wb_temperature: float = None):
-		"""fourcc/exposure/auto_wb/wb_temperature: None mantem o padrao da webcam.
+		"""fourcc None mantem o codec da webcam; exposure/auto_wb/wb_temperature
+		None voltam ao automatico (padrao da webcam), mesmo que outro programa
+		tenha deixado a camera em manual.
 
 		Exposicao automatica em ambiente interno escuro derruba o fps e muda o
 		matiz entre quadros (limiares HSV mais largos, mais falsos positivos).
@@ -108,21 +110,31 @@ class Camera:
 	########################################
 	# exposicao e balanco de branco fixos (opcional)
 	def _configure_image(self, exposure, auto_wb, wb_temperature):
-		if exposure is not None:
+		"""exposure None ou "auto": exposicao automatica; auto_wb e wb_temperature
+		None: balanco de branco automatico. Os ajustes da webcam ficam no driver
+		ate ela ser desconectada: sem restaurar, a missao herdava a exposicao
+		manual deixada pelo ajustar_camera.py (ensaio de 10/11)."""
+		if exposure is None or exposure == "auto":
+			# V4L2: 3 = automatica (prioridade de abertura); OpenCV antigo usa 0.75.
+			self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+			if self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) not in (3, 3.0):
+				self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+		else:
 			# V4L2: 1 = manual; versoes antigas do OpenCV usam 0.25 para manual.
 			self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 			if self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) not in (1, 1.0):
 				self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
 			self.cap.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
+		if auto_wb is None and wb_temperature is None:
+			auto_wb = True
 		if auto_wb is not None:
 			self.cap.set(cv2.CAP_PROP_AUTO_WB, 1 if auto_wb else 0)
 		if wb_temperature is not None:
 			self.cap.set(cv2.CAP_PROP_WB_TEMPERATURE, float(wb_temperature))
-		if exposure is not None or auto_wb is not None or wb_temperature is not None:
-			print("Camera: exposicao={} auto_exp={} auto_wb={} wb={} fps={}".format(
-				self.cap.get(cv2.CAP_PROP_EXPOSURE), self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE),
-				self.cap.get(cv2.CAP_PROP_AUTO_WB), self.cap.get(cv2.CAP_PROP_WB_TEMPERATURE),
-				self.cap.get(cv2.CAP_PROP_FPS)), flush=True)
+		print("Camera: exposicao={} auto_exp={} auto_wb={} wb={} fps={}".format(
+			"auto" if exposure in (None, "auto") else self.cap.get(cv2.CAP_PROP_EXPOSURE),
+			self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE), self.cap.get(cv2.CAP_PROP_AUTO_WB),
+			self.cap.get(cv2.CAP_PROP_WB_TEMPERATURE), self.cap.get(cv2.CAP_PROP_FPS)), flush=True)
 
 	########################################
 	# procura uma camera disponivel
