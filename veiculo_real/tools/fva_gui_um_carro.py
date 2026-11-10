@@ -65,11 +65,13 @@ MISSION_DEFAULTS = {
     "vision_width": "0",
     "steering_filter": "3",
     "min_radius": "1.5",          # --min-radius (so cones; 1.5 e o padrao do main.py)
+    "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
-CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier")
+CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
+                     "curve_echo")
 
 
 def build_main_command(options: dict) -> str:
@@ -94,6 +96,8 @@ def build_main_command(options: dict) -> str:
                 parts.append("--no-preview")
         if not o["cone_debug"]:
             parts.append("--no-cone-debug")
+        if not o["curve_echo"]:
+            parts.append("--strict-ultrasonic")
         if o["record_frames"]:
             parts.append(f"--record-frames {o['record_hz']}")
         if str(o["min_radius"]) != MISSION_DEFAULTS["min_radius"]:
@@ -887,6 +891,7 @@ class RsyncGUI(tk.Tk):
             ("pure_pursuit", "Pure pursuit (desmarcado: Stanley)"),
             ("preview", "Reduzir antes da curva"),
             ("cone_debug", "Debug de cones (jsonl + quadros)"),
+            ("curve_echo", "Ultrassom ignora cone da borda na curva"),
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])

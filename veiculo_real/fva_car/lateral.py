@@ -39,6 +39,9 @@ class LineObservation:
     # 1/m^2; com errors, descreve o caminho ate ~3 m para o pure pursuit e para
     # a previa de curva. nan: so a curvatura local (linha amarela).
     path_dkappa: float = math.nan
+    # Curva vista por uma cor so (estimador em SO_EXTERNA/SO_INTERNA): a outra
+    # borda saiu da imagem; o seguidor vira mais e mais rapido (one_border_curve_*).
+    one_border_curve: bool = False
 
     @property
     def valid(self):
@@ -275,6 +278,7 @@ class StanleyController:
         self.gain, self.softening = gain, softening
         self.max_steer, self.max_rate = max_steer, max_rate
         self.wheelbase, self.curvature_gain = wheelbase, curvature_gain
+        self.gain_scale = self.rate_scale = 1.  # reforco temporario (curva por uma cor)
         self.reset()
 
     def reset(self):
@@ -304,14 +308,17 @@ class StanleyController:
         self.feedforward_term = math.atan(self.curvature_gain * self.wheelbase * curvature)
         self.search_term = search
         return self.steer_to(self.heading_term + self.cross_track_term + self.feedforward_term
-                             + self.search_term, dt)
+                             + self.search_term, dt, self.gain_scale, self.rate_scale)
 
-    def steer_to(self, raw_steer, dt):
-        """Satura no batente e limita a taxa (comum ao Stanley e ao pure pursuit)."""
-        self.raw_steer = float(raw_steer)
+    def steer_to(self, raw_steer, dt, gain=1., rate=1.):
+        """Satura no batente e limita a taxa (comum ao Stanley e ao pure pursuit).
+
+        gain multiplica o esterco pedido; rate, a taxa maxima do volante.
+        """
+        self.raw_steer = float(raw_steer)*gain
         self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
-        self.steer += float(np.clip(self.target_steer - self.steer,
-                                    -self.max_rate * dt, self.max_rate * dt))
+        limit = self.max_rate*rate*dt
+        self.steer += float(np.clip(self.target_steer - self.steer, -limit, limit))
         return self.steer
 
 
@@ -583,6 +590,11 @@ class RealStanleyFollower:
         # Curva mais fechada que pode aparecer logo depois do trecho visto (1/m);
         # 0 desliga o limite de visibilidade (so curvas ja vistas reduzem).
         self.sight_curvature = nonnegative('speed_sight_curvature', 0.)
+        # Curva vista por uma cor so: multiplica o esterco pedido e a taxa do
+        # volante (1 = sem reforco). A borda interna saiu da imagem e o carro
+        # tendia a virar tarde/pouco.
+        self.one_border_steer_gain = positive('one_border_curve_steer_gain', 1.)
+        self.one_border_rate_gain = positive('one_border_curve_rate_gain', 1.)
         # Rampa assimetrica da vref: sobe no maximo speed_rise_m_s2 (m/s^2) e
         # desce na hora. 0 mantem o passa-baixas simetrico speed_filter_s.
         self.speed_rise = nonnegative('speed_rise_m_s2', 0.)
@@ -596,6 +608,7 @@ class RealStanleyFollower:
         self.line_speed_limit = math.inf
         self.line_speed_factor = 1.
         self.path_dkappa = math.nan
+        self.one_border_curve = False
         self.pursuit_target = None
         self.preview = None
         self.curvature = None
@@ -738,6 +751,7 @@ class RealStanleyFollower:
             factor = getattr(observation, 'speed_factor', 1.)
             self.line_speed_factor = (float(np.clip(factor, 0., 1.))
                                       if isinstance(factor, (int, float, np.number)) and math.isfinite(factor) else 1.)
+            self.one_border_curve = bool(getattr(observation, 'one_border_curve', False))
             dkappa = getattr(observation, 'path_dkappa', math.nan)
             self.path_dkappa = (float(dkappa) if isinstance(dkappa, (int, float, np.number))
                                 and math.isfinite(dkappa) else math.nan)
@@ -808,6 +822,10 @@ class RealStanleyFollower:
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
                                and math.isfinite(stanley_speed))
             active = active and reference_valid
+            boost = self.one_border_curve and not search
+            gain = self.one_border_steer_gain if boost else 1.
+            rate = self.one_border_rate_gain if boost else 1.
+            self.controller.gain_scale, self.controller.rate_scale = gain, rate
             pursuit = (active and self.steering_law == 'pure_pursuit'
                        and math.isfinite(self.path_dkappa) and not search)
             self.pursuit_target = None
@@ -816,7 +834,7 @@ class RealStanleyFollower:
                                           self.pursuit_min, self.pursuit_max))
                 raw, x, y = pure_pursuit_steer(errors, self.path_dkappa, lookahead,
                                                self.controller.wheelbase, self.max_curvature)
-                steer = self.controller.steer_to(raw, car.dt)
+                steer = self.controller.steer_to(raw, car.dt, gain, rate)
                 self.pursuit_target = (lookahead, x, y)
                 car.set_steer(self.steering_sign * steer)
                 active = bool(getattr(car, 'encoder_valid', True))
@@ -901,6 +919,7 @@ class RealStanleyFollower:
                 pursuit_lookahead_m=self.pursuit_target[0] if active and self.pursuit_target else invalid,
                 pursuit_target_y_m=self.pursuit_target[2] if active and self.pursuit_target else invalid,
                 path_dkappa=self.path_dkappa,
+                one_border_curve=int(self.one_border_curve),
                 preview_speed_m_s=self.preview[0] if active and self.preview else invalid,
                 preview_curvature_m_inv=self.preview[1] if active and self.preview else invalid,
                 vref=float(car.vref), u=float(car.u))

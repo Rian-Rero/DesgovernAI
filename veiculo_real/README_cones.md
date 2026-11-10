@@ -214,6 +214,36 @@ curva. Se ele chegar rápido demais, aumentem a margem: menor raio
 (`--min-radius 1.2`) ou `coast_deceleration` menor (o carro rola menos do que se
 supôs).
 
+### Curva vista por uma cor só
+
+Em curva, a borda de dentro sai da imagem e o estimador fica em `SO_EXTERNA` ou
+`SO_INTERNA` (40–64% do tempo nas pistas com curva da pista virtual). Nesses
+estados, a direção pede 15% mais esterço (`one_border_curve_steer_gain`) e o
+volante gira 1,5× mais rápido (`one_border_curve_rate_gain`; 120 → 180°/s). Na
+pista virtual, 1,1–1,2 foi de neutro a um pouco melhor, inclusive com servo
+lento; 1,3/2,0 já passava do ponto. Com 1 o reforço fica desligado.
+
+### Ultrassom em curva
+
+Em curva, com a roda já esterçada, o ultrassom (que aponta para a frente) vê o
+cone da borda de fora muito perto. Antes, isso travava o carro até o fim do
+ensaio, embora ele fosse passar ao lado. Agora (`fva_car/obstacle.py`) o eco é
+**ignorado** só se tudo isto vale:
+
+1. a visão vê o corredor agora (estimador com uma ou duas bordas, imagem com
+   menos de 0,5 s);
+2. há curva no próximo 1 m (R ≤ 4 m), e a direção já está pelo menos 6° virada
+   para o lado dela;
+3. o carro está dentro do corredor com folga (|e| ≤ W/2 − 0,23 m);
+4. há uma borda do corredor exatamente onde está o eco: dentro do feixe (±20°)
+   e a ±15 cm da distância medida, descontado o quanto o carro andou desde a foto.
+
+Um obstáculo no meio da faixa não coincide com nenhuma borda e **para como
+antes**, assim como em reta, sem corredor válido ou sem esterço. O terminal
+mostra `Ultrassom a 0.45 m ignorado: cone da borda direita na curva` (no
+máximo 1 vez por segundo), e o `car.csv` traz `obstacle_ignored`. Para parar
+por qualquer eco: `--strict-ultrasonic`, ou desmarcar a caixa na GUI.
+
 ### Pista virtual (sem o carro)
 
 `tools/pista_virtual.py` roda o **mesmo código do carro** em malha fechada:
