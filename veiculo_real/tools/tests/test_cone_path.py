@@ -168,6 +168,35 @@ class ConePathTests(unittest.TestCase):
         self.assertLess(abs(result.lateral_error_px), 2)
         self.assertEqual(result.debug['sides']['source'], 'duas cores')
 
+    def test_light_normalization_keeps_reference_and_restores_dim_or_tinted_floor(self):
+        from cone_path import floor_color, normalize_light
+        settings = ConeSettings()
+        reference = np.array([settings.floor_b, settings.floor_g, settings.floor_r], float)
+        frame = np.empty((480, 640, 3), np.uint8)
+        frame[:] = reference.astype(np.uint8)
+        cv2.circle(frame, (320, 360), 20, (0, 200, 0), -1)
+        same, _ = normalize_light(frame, settings)
+        self.assertIs(same, frame)  # dentro da zona morta: imagem intacta
+        for gains in ((.4, .4, .4), (.7, 1., 1.3)):  # escuro; luz quente
+            with self.subTest(gains=gains):
+                changed = np.clip(frame*np.array(gains), 0, 255).astype(np.uint8)
+                fixed, scale = normalize_light(changed, settings)
+                # Zona morta: so o excesso alem de 15% (brilho) e 2% (cor) e corrigido.
+                ratio = floor_color(fixed)/reference
+                self.assertTrue(np.all(ratio > 1/1.2) and np.all(ratio < 1.05), ratio)
+                self.assertLess(np.ptp(ratio), .05)
+        off, scale = normalize_light(frame, ConeSettings(auto_light=False))
+        self.assertIs(off, frame)
+        self.assertIsNone(scale)
+
+    def test_light_gain_never_saturates_colored_pixels(self):
+        from cone_path import normalize_light
+        frame = np.full((480, 640, 3), 35, np.uint8)  # piso escuro: pede ganho ~4x
+        frame[300:420, 100:540] = (0, 0, 230)          # cone vermelho claro
+        fixed, scale = normalize_light(frame, ConeSettings())
+        self.assertLessEqual(float(np.max(scale)), 250/230 + 1e-6)
+        self.assertLess(int(fixed[350, 300, 2]), 255)
+
     def test_red_detects_both_ends_of_hue_circle(self):
         for hue in (0, 5, 174, 179):
             with self.subTest(hue=hue):

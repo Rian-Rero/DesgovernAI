@@ -19,6 +19,12 @@ que passam, o de cones mais saturados. Exposicao alta demais derruba o fps e
 borra em movimento; baixa demais escurece e apaga a cor dos cones na sombra.
 A unidade de "exposure" depende da webcam (UVC comum: 100 us; 333 = 33 ms,
 limite para 30 fps). Os controles disponiveis aparecem no inicio (v4l2-ctl).
+
+Iluminacao: o detector leva o piso a cor de referencia (cone_settings
+floor_b/g/r, auto_light). As colunas "piso BGR" e "corr. luz" mostram o piso
+medido e a correcao que o detector aplicaria (1.00 = nenhuma; ganho no limite
+3.5 = escuro demais, aumente a exposicao). So troque floor_* se reajustar os
+limiares de cor (S/V/croma) sob esta luz: ai use o "piso BGR" daqui.
 """
 import argparse
 from pathlib import Path
@@ -32,6 +38,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fva_car.camera import Camera, FRAME_RATE  # noqa: E402
+from tools.cone_path import ConeSettings, floor_color, normalize_light  # noqa: E402
 
 
 def measure(cam, frames, warmup):
@@ -49,7 +56,10 @@ def measure(cam, frames, warmup):
     hsv = cv2.cvtColor(last, cv2.COLOR_BGR2HSV)
     floor = hsv[last.shape[0]*2//3:, :, 2]
     colored = hsv[..., 1][(hsv[..., 1] > 60) & (hsv[..., 2] > 40)]
+    _, light = normalize_light(last, ConeSettings())
     return {
+        'floor_bgr': [int(round(v)) for v in floor_color(last)],
+        'light': 1. if light is None else float(np.exp(np.mean(np.log(light)))),
         'fps': len(images)/elapsed if elapsed > 0 else 0.,
         'floor_v': float(np.mean(floor)),
         'blown_pct': 100.*float(np.mean(hsv[..., 2] >= 250)),
@@ -93,9 +103,10 @@ def main(argv=None):
     finally:
         cam.close()
 
-    print(f'\n{"exposicao":>10} {"fps":>6} {"piso V":>7} {"estouro%":>9} {"S cones":>8}')
+    print(f'\n{"exposicao":>10} {"fps":>6} {"piso V":>7} {"estouro%":>9} {"S cones":>8} {"piso BGR":>15} {"corr. luz":>9}')
     for exposure, r in rows:
-        print(f'{str(exposure):>10} {r["fps"]:6.1f} {r["floor_v"]:7.0f} {r["blown_pct"]:9.2f} {r["color_s"]:8.0f}')
+        print(f'{str(exposure):>10} {r["fps"]:6.1f} {r["floor_v"]:7.0f} {r["blown_pct"]:9.2f} {r["color_s"]:8.0f}'
+              f' {str(r["floor_bgr"]):>15} {r["light"]:9.2f}')
     manual = [(e, r) for e, r in rows if e != 'auto'
               and r['fps'] >= .9*FRAME_RATE and r['blown_pct'] < 2. and r['floor_v'] > 60]
     print(f'\nImagens em {args.out.resolve()}/ (compare os cones na sombra).')

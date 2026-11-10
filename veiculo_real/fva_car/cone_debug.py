@@ -72,6 +72,11 @@ class ConeDebugRecorder:
         self.longest_invalid = 0
         self.first_t = self.last_t = None
         self.timing = {"detection": [0., 0], "processing": [0., 0]}  # soma, quadros
+        # Indicadores da corrida (resumo): estado do estimador, largura, oscilacao
+        # da vref e do esterco, correcao de luz e cones por quadro.
+        self.corridor_states = Counter()
+        self.series = {"sigma_e": [], "learned_width": [], "vref": [], "steer": [], "light": [],
+                       "cones": [], "preview_cut": [], "pursuit": []}
         self.closed = False
         self.notes = {}  # Informacoes da corrida copiadas para o resumo (ex.: avisos).
         self.thread = threading.Thread(target=self._writer, daemon=True, name="cones-debug")
@@ -96,6 +101,7 @@ class ConeDebugRecorder:
         }
         events = self._events(state, debug, control)
         self._update_stats(observation, state, debug, events)
+        self._indicators(debug, control)
         self.previous = state
         record = {
             "frame": sequence,
@@ -220,6 +226,56 @@ class ConeDebugRecorder:
                 self.write_errors += 1
         self.file.flush()
 
+    def _indicators(self, debug, control):
+        finite = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        corridor = debug.get("corridor") or {}
+        if corridor.get("state"):
+            self.corridor_states[corridor["state"]] += 1
+            sigma = corridor.get("sigma") or [None]
+            if finite(sigma[0]):
+                self.series["sigma_e"].append(sigma[0])
+            if finite(corridor.get("learned_width_m")):
+                self.series["learned_width"].append(corridor["learned_width_m"])
+        detection = debug.get("detection") or {}
+        light = detection.get("light")
+        if light and all(finite(v) for v in light):
+            self.series["light"].append(math.exp(sum(math.log(max(v, 1e-6)) for v in light)/len(light)))
+        cones = sum(int((detection.get(c) or {}).get("bases", 0) or 0) for c in ("green", "red"))
+        self.series["cones"].append(cones)
+        if control.get("active"):
+            for key, name in (("vref", "vref"), ("steer", "steer_cmd_rad")):
+                if finite(control.get(name)):
+                    self.series[key].append(control[name])
+            preview = control.get("preview")
+            target = control.get("speed_target")
+            if preview and finite(target):
+                self.series["preview_cut"].append(preview[0] <= target + 1e-6 and preview[0] < control.get("vref", 0) + 1e-6)
+            self.series["pursuit"].append(control.get("steering_law") == "pure_pursuit")
+
+    def _indicator_summary(self):
+        import numpy as np
+
+        series = self.series
+        stat = lambda values, f: None if not values else float(f(np.asarray(values, float)))
+        diff = lambda values: None if len(values) < 3 else float(np.median(np.abs(np.diff(values))))
+        total = sum(self.corridor_states.values())
+        return {
+            "corridor_states": None if not total else {k: round(v/total, 3) for k, v in self.corridor_states.items()},
+            "corridor_sigma_e_median_m": stat(series["sigma_e"], np.median),
+            "learned_width_m": series["learned_width"][-1] if series["learned_width"] else None,
+            # Variacao mediana quadro a quadro: vref aos trancos / direcao serrilhando.
+            "vref_mean_m_s": stat(series["vref"], np.mean),
+            "vref_step_median_m_s": diff(series["vref"]),
+            "steer_step_median_rad": diff(series["steer"]),
+            "steer_abs_p90_rad": stat(series["steer"], lambda v: np.percentile(np.abs(v), 90)),
+            "preview_limited_fraction": stat(series["preview_cut"], np.mean),
+            "pure_pursuit_fraction": stat(series["pursuit"], np.mean),
+            # Ganho da normalizacao de luz (1 = nenhum); perto de 3,5: luz fraca demais.
+            "light_gain_median": stat(series["light"], np.median),
+            "light_gain_max": stat(series["light"], np.max),
+            "cones_per_frame_median": stat(series["cones"], np.median),
+        }
+
     def summary(self):
         duration = None if self.first_t is None else self.last_t - self.first_t
         frames = self.stats["frames"]
@@ -242,6 +298,7 @@ class ConeDebugRecorder:
             "raw_frames_saved": self.raw_saved,
             "dropped_records": self.dropped,
             "write_errors": self.write_errors,
+            **self._indicator_summary(),
             **self.notes,
         })
 

@@ -269,3 +269,37 @@ O que os logs mostraram:
 - Falta validar no carro: custo no Pi (~1,7 ms no notebook) e ajuste de
   `row_sigma`, `memory_m` e `kappa_noise` com logs novos.
 
+## 8. Sem depender da pista (09/11)
+
+O que a equipe informou: a câmera é fixa (não dá para girar nem inclinar), a
+largura da pista muda a cada dia, a luz varia e a IMU está queimada. Tudo abaixo
+foi validado só em replay e na pista virtual (`tools/pista_virtual.py`). Falta
+o ensaio no carro.
+
+| Item | O que mudou | Evidência |
+|---|---|---|
+| Largura variável | `W` aprendido com as duas bordas; palpite com σ = 0,6 m; checagem da calibração em 0,4–2,5× | pistas de 1,0–2,4 m com o mesmo palpite: 2–8 cm RMS |
+| F5: pure pursuit | alvo a 0,4 m + 0,2 s·v no centro estimado, corrigido para o eixo traseiro | RMS 2,6–4,9 cm, contra 4,4–8,3 cm do Stanley; melhor também com erro de calibração, visão lenta e servo lento |
+| F6: velocidade | prévia de curva de 2,5 m (o carro só rola, a ~0,5 m/s²) + rampa assimétrica | a 1,5 m/s, aceleração lateral máx. de 0,57–0,65 → 0,30–0,46 m/s² (limite 0,4), volta 2–6% mais lenta |
+| Iluminação | piso normalizado para a cor de referência, com zona morta | escuro/claro/quente/frio: 5–89% → 88–95% dos cones |
+| F7: indicadores | `cones_summary.json`: estados do estimador, largura aprendida, oscilação de vref e esterço, prévia, ganho de luz, cones por quadro | — |
+
+Limitações conhecidas:
+- **Pista que alarga no meio da volta**: a borda esquerda sai da imagem e `W`
+  deixa de ser medido; o carro fica até ~35 cm fora do centro.
+- **Calibração**: o erro da extrapolação (E1: 12–15 cm de deslocamento numa reta)
+  continua. O pure pursuit só o tolera melhor.
+- **Sem IMU**: a odometria usa encoder e esterço. O modelo da pista virtual
+  supõe 2% de erro de escala e 0,5° de viés.
+
+No primeiro ensaio, para comparar:
+
+```bash
+python3 main.py                        # pure pursuit + previa (padrao)
+python3 main.py --stanley              # mesma pista, Stanley
+python3 main.py --no-preview           # sem previa de curva
+```
+
+e olhar `cones_summary.json` (`vref_step_median_m_s`, `steer_step_median_rad`,
+`corridor_states`, `learned_width_m`, `light_gain_*`).
+

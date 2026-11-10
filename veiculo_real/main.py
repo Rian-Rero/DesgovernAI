@@ -35,10 +35,10 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 parameters = {
     "ts": 30.0,
     "navigation_mode": "cones",  # somente cones; linha requer selecao explicita
-    # Largura/espacamento da pista do ensaio (medidos nos logs 20261023_0803*/0804*
-    # com a calibracao atual: corredor 1,7-1,9 m, cones a ~0,5 m). Os padroes
-    # 90/70 cm marcavam a calibracao como suspeita, o que desligava o filtro de
-    # tamanho e deixava passar falsos positivos. CONFIRMAR COM TRENA na pista.
+    # Largura/espacamento da pista: so PALPITE inicial (a pista muda a cada dia).
+    # O estimador do corredor mede a largura com as duas bordas e passa a usar a
+    # aprendida; a checagem da calibracao so acusa erro grosseiro (0,4-2,5x).
+    # Valores dos logs 20261023_0803*/0804*: corredor 1,7-1,9 m, cones a ~0,5 m.
     "cone_settings": {"roi_top": 0, "single_border_recovery": True,
                       "track_width_cm": 180, "cone_spacing_cm": 50},
     "save": True,
@@ -111,6 +111,23 @@ parameters = {
     # liga com os ajustes padrao; dicionario muda ajustes de CorridorSettings
     # (ex.: {"memory_m": 0.6}); False volta ao ajuste quadro a quadro.
     "cone_estimator": True,
+    # Com o estimador: direcao por pure pursuit no centro estimado (alvo a
+    # pursuit_min_lookahead_m + pursuit_lookahead_s*v do eixo dianteiro). Na pista
+    # virtual (tools/pista_virtual.py) teve metade do erro do Stanley, inclusive
+    # com erro de calibracao, visao lenta e servo lento. "stanley" volta ao antigo
+    # (tambem pela linha de comando: --stanley). Linha amarela: sempre Stanley.
+    "steering_law": "pure_pursuit",
+    "pursuit_min_lookahead_m": 0.4,
+    "pursuit_lookahead_s": 0.2,
+    "pursuit_max_lookahead_m": 1.5,
+    # Previa de curva: o carro nao freia (rola a ~0,5-0,7 m/s^2, logs de 20/10),
+    # entao reduz a vref ANTES da curva vista a ate speed_preview_m. A vref sobe
+    # no maximo speed_rise_m_s2 e desce na hora (substitui speed_filter_s nos
+    # cones). Pista virtual a 1,5 m/s: aceleracao lateral max 0,7 -> 0,4 m/s^2,
+    # volta 3-7% mais lenta. 0 desliga cada um.
+    "speed_preview_m": 2.5,
+    "speed_rise_m_s2": 1.0,
+    "coast_deceleration": 0.5,
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
@@ -280,6 +297,36 @@ def render_stream_frame(detector, observation, lines):
     return image
 
 
+def follower_config(config, mode, corridor):
+    """Ajustes do RealStanleyFollower para o modo (os de cones sobrepoem os da linha)."""
+    config = dict(config)
+    if mode != "cones":
+        config["steering_law"] = "stanley"
+        config["speed_preview_m"] = 0.0
+        config["speed_rise_m_s2"] = 0.0
+        return config
+    # Sem chaveamento para linha nem esterco de busca: durante a tolerancia
+    # apenas continua a trajetoria ja identificada, com a vref em rampa.
+    config["line_loss_frames"] = config.get("cone_loss_frames", 6)
+    config["line_loss_tolerance"] = config.get("cone_loss_tolerance", 0.6)
+    if corridor is not None:
+        # O estimador ja segue a memoria por ate memory_m; a tolerancia do
+        # Stanley so cobre quadros sem visao, sem somar outro trecho as cegas.
+        config["line_loss_frames"] = min(config["line_loss_frames"], 2)
+        config["line_loss_tolerance"] = min(config["line_loss_tolerance"], 0.3)
+    else:
+        # Pure pursuit e previa de curva precisam do caminho do estimador; o
+        # ajuste quadro a quadro continua com Stanley e o filtro de vref antigo.
+        config["steering_law"] = "stanley"
+        config["speed_preview_m"] = 0.0
+        config["speed_rise_m_s2"] = 0.0
+    config["line_search_rate_deg_s"] = 0.
+    config["loss_speed_ramp"] = True
+    config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
+    config["max_heading_jump_rad"] = config.get("cone_max_heading_jump_rad", 0.35)
+    return config
+
+
 def run_mission(settings=None, display=False, car_factory=None, clock=time.monotonic):
     config = dict(parameters)
     if settings is not None:
@@ -311,19 +358,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         calibration_warnings = cone_calibration_warnings(calibration, detector)
         for warning in calibration_warnings:
             print(f"AVISO calibracao: {warning}", flush=True)
-        # Sem chaveamento para linha nem esterco de busca: durante a tolerancia
-        # apenas continua a trajetoria ja identificada, com a vref em rampa.
-        config["line_loss_frames"] = config.get("cone_loss_frames", 6)
-        config["line_loss_tolerance"] = config.get("cone_loss_tolerance", 0.6)
-        if corridor is not None:
-            # O estimador ja segue a memoria por ate memory_m; a tolerancia do
-            # Stanley so cobre quadros sem visao, sem somar outro trecho as cegas.
-            config["line_loss_frames"] = min(config["line_loss_frames"], 2)
-            config["line_loss_tolerance"] = min(config["line_loss_tolerance"], 0.3)
-        config["line_search_rate_deg_s"] = 0.
-        config["loss_speed_ramp"] = True
-        config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
-        config["max_heading_jump_rad"] = config.get("cone_max_heading_jump_rad", 0.35)
+        config = follower_config(config, mode, corridor)
     elif mode == "line":
         detector = RealLineDetector(
             calibration,
@@ -411,7 +446,10 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     try:
         car.start_mission()
         print(
-            f"Stanley {mode} | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s",
+            f"{'Pure pursuit' if config.get('steering_law') == 'pure_pursuit' else 'Stanley'} {mode}"
+            f" | {config['ts']:.0f} s | teto {config['velocity_reference']:.2f} m/s"
+            + (f" | previa de curva {float(config['speed_preview_m']):.1f} m"
+               if config.get("speed_preview_m") else ""),
             flush=True,
         )
         print(f"Encoder: protocolo {config['encoder_protocol']}", flush=True)
@@ -695,6 +733,10 @@ def main():
                         help="Rede que confirma os cones (com o .json ao lado); 'none' desliga")
     parser.add_argument("--no-estimator", action="store_true",
                         help="Cones: erros pelo ajuste quadro a quadro, sem o estimador do corredor")
+    parser.add_argument("--stanley", action="store_true",
+                        help="Cones: Stanley no eixo em vez do pure pursuit no centro estimado")
+    parser.add_argument("--no-preview", action="store_true",
+                        help="Cones: sem previa de curva (vref so pela curvatura no eixo)")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
@@ -724,6 +766,11 @@ def main():
         settings["cone_classifier"] = None if args.classifier.lower() == "none" else args.classifier
     if args.no_estimator:
         settings["cone_estimator"] = False
+    if args.stanley:
+        settings["steering_law"] = "stanley"
+    if args.no_preview:
+        settings["speed_preview_m"] = 0.0
+        settings["speed_rise_m_s2"] = 0.0
 
     def interrupt_mission(_signum, _frame):
         # A GUI remota encerra com SIGTERM. Usa o mesmo finally do Ctrl+C.

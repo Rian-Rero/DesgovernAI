@@ -35,6 +35,10 @@ class LineObservation:
     reference_source: str = "line"
     speed_limit: float = math.inf  # Teto opcional da referencia visual, em m/s.
     speed_factor: float = 1.  # Fracao da vref pela confianca da referencia (estimador de cones).
+    # Variacao da curvatura por metro a frente (clotoide do estimador de cones),
+    # 1/m^2; com errors, descreve o caminho ate ~3 m para o pure pursuit e para
+    # a previa de curva. nan: so a curvatura local (linha amarela).
+    path_dkappa: float = math.nan
 
     @property
     def valid(self):
@@ -295,8 +299,12 @@ class StanleyController:
         # depois de acumular erro, tarde demais em velocidade alta.
         self.feedforward_term = math.atan(self.curvature_gain * self.wheelbase * curvature)
         self.search_term = search
-        self.raw_steer = (self.heading_term + self.cross_track_term + self.feedforward_term
-                          + self.search_term)
+        return self.steer_to(self.heading_term + self.cross_track_term + self.feedforward_term
+                             + self.search_term, dt)
+
+    def steer_to(self, raw_steer, dt):
+        """Satura no batente e limita a taxa (comum ao Stanley e ao pure pursuit)."""
+        self.raw_steer = float(raw_steer)
         self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
         self.steer += float(np.clip(self.target_steer - self.steer,
                                     -self.max_rate * dt, self.max_rate * dt))
@@ -392,6 +400,74 @@ def curve_speed(reference, curvature, lateral, min_speed=.5,
     return min(reference, max(min_speed, min(bend_limit, recovery_limit)))
 
 
+def path_points(errors, dkappa, arcs, max_curvature=math.inf, with_heading=False):
+    """Pontos (Nx2, eixo dianteiro) do caminho descrito por (e, psi, kappa) e dkappa.
+
+    Clotoide a partir do ponto mais proximo do eixo, como no estimador de
+    cones: integra rumo e posicao com passo de 5 cm. with_heading: devolve
+    tambem (rumo, curvatura) em cada ponto.
+    """
+    lateral, heading, curvature = errors
+    dkappa = dkappa if math.isfinite(dkappa) else 0.
+    arcs = np.asarray(arcs, float)
+    end = max(float(np.max(arcs)), 0.)
+    s = np.linspace(0., end, max(2, int(math.ceil(end/.05)) + 1))
+    kappa = np.clip(curvature + dkappa*s, -max_curvature, max_curvature)
+    step = s[1] - s[0]
+    theta = heading + np.concatenate(([0.], np.cumsum((kappa[1:] + kappa[:-1])*step/2)))
+    x = -lateral*math.sin(heading) + np.concatenate(([0.], np.cumsum((np.cos(theta[1:]) + np.cos(theta[:-1]))*step/2)))
+    y = lateral*math.cos(heading) + np.concatenate(([0.], np.cumsum((np.sin(theta[1:]) + np.sin(theta[:-1]))*step/2)))
+    points = np.c_[np.interp(arcs, s, x), np.interp(arcs, s, y)]
+    if with_heading:
+        return points, np.interp(arcs, s, theta), np.interp(arcs, s, kappa)
+    return points
+
+
+def pure_pursuit_steer(errors, dkappa, lookahead, wheelbase, max_curvature=math.inf):
+    """Esterco (rad, esquerda +) que leva o eixo traseiro ao ponto do caminho
+    `lookahead` m a frente do eixo dianteiro; devolve (esterco, ponto x, y).
+
+    O caminho e o do eixo DIANTEIRO (centro do corredor); o pure pursuit guia
+    o traseiro, que numa curva de raio R anda sqrt(R^2 - L^2), por dentro. Sem
+    deslocar o alvo para esse caminho o esterco de regime saia 7-23% curto e o
+    carro abria a curva.
+    """
+    points, heading, curvature = path_points(errors, dkappa, [lookahead], max_curvature, with_heading=True)
+    target = points[0]
+    kappa = float(curvature[0])
+    if abs(kappa) > 1e-6:
+        radius = 1./abs(kappa)
+        inward = radius - math.sqrt(max(radius*radius - wheelbase*wheelbase, 0.))
+        normal = np.array([-math.sin(heading[0]), math.cos(heading[0])])
+        target = target + math.copysign(inward, kappa)*normal
+    x, y = target[0] + wheelbase, target[1]  # referencial do eixo traseiro
+    distance2 = x*x + y*y
+    if distance2 < 1e-6:
+        return 0., float(target[0]), float(target[1])
+    return math.atan(2.*wheelbase*y/distance2), float(target[0]), float(target[1])
+
+
+def preview_speed(errors, dkappa, reference, distance, lateral_accel=.6, deceleration=.5,
+                  reaction=.3, speed=0., min_speed=.15, max_curvature=math.inf):
+    """Maior velocidade agora que ainda permite fazer as curvas dos proximos `distance` m.
+
+    O carro nao freia: so perde velocidade rolando (~deceleration m/s^2). Uma
+    curva a s metros, com limite v_c = sqrt(a_lat/|kappa|), aceita hoje
+    sqrt(v_c^2 + 2*desacel*(s - v*reacao)). Devolve (velocidade, curvatura
+    maxima a frente, distancia dela).
+    """
+    lateral, heading, curvature = errors
+    dkappa = dkappa if math.isfinite(dkappa) else 0.
+    s = np.linspace(0., max(distance, 0.), 26)
+    kappa = np.abs(np.clip(curvature + dkappa*s, -max_curvature, max_curvature))
+    bend = np.sqrt(lateral_accel/np.maximum(kappa, 1e-6))
+    margin = np.maximum(s - abs(speed)*reaction, 0.)
+    allowed = np.sqrt(bend*bend + 2.*deceleration*margin)
+    worst = int(np.argmax(kappa))
+    limit = float(min(reference, max(min_speed, float(np.min(allowed)))))
+    return limit, float(kappa[worst]), float(s[worst])
+
+
 MAX_LATENCY_COMPENSATION = .25  # s; idade tipica da imagem: 0,12 a 0,19 s
 # Entre quadros (~60 ms) o carro gira < 0,2 rad mesmo a 1,5 m/s no batente.
 # Saltos maiores sao deteccao errada (reflexo, outra faixa) e sao descartados,
@@ -476,6 +552,26 @@ class RealStanleyFollower:
         self.compensate_latency = self.settings.get('vision_latency_compensation', True)
         if not isinstance(self.compensate_latency, (bool, np.bool_)):
             raise ValueError('vision_latency_compensation deve ser True ou False.')
+        # Lei de direcao: 'stanley' (erros no eixo) ou 'pure_pursuit' (ponto do
+        # caminho a frente; so com path_dkappa, i.e. estimador de cones).
+        self.steering_law = self.settings.get('steering_law', 'stanley')
+        if self.steering_law not in ('stanley', 'pure_pursuit'):
+            raise ValueError("steering_law deve ser 'stanley' ou 'pure_pursuit'.")
+        # Distancia do alvo (do eixo dianteiro, no caminho): minimo + tempo*vref, com teto.
+        # Pista virtual (tools/pista_virtual.py): 0,4 m + 0,2 s deu metade do erro
+        # do Stanley; alvos de 1-2 m cortavam as curvas (o caminho do estimador
+        # ja preenche o trecho cego junto ao carro).
+        self.pursuit_min = positive('pursuit_min_lookahead_m', .4)
+        self.pursuit_time = nonnegative('pursuit_lookahead_s', .2)
+        self.pursuit_max = max(self.pursuit_min, positive('pursuit_max_lookahead_m', 1.5))
+        # Previa de curva (s m a frente, com o caminho do estimador): o carro nao
+        # freia, entao reduz a vref antes da curva. 0 desliga.
+        self.preview_distance = nonnegative('speed_preview_m', 0.)
+        self.coast_deceleration = positive('coast_deceleration', .5)
+        self.preview_reaction = nonnegative('speed_preview_reaction_s', .3)
+        # Rampa assimetrica da vref: sobe no maximo speed_rise_m_s2 (m/s^2) e
+        # desce na hora. 0 mantem o passa-baixas simetrico speed_filter_s.
+        self.speed_rise = nonnegative('speed_rise_m_s2', 0.)
         self.reset()
 
     def reset(self):
@@ -485,6 +581,9 @@ class RealStanleyFollower:
         self.line_seen_at = None
         self.line_speed_limit = math.inf
         self.line_speed_factor = 1.
+        self.path_dkappa = math.nan
+        self.pursuit_target = None
+        self.preview = None
         self.curvature = None
         self.curvature_at = None
         self.speed_target = None
@@ -517,8 +616,12 @@ class RealStanleyFollower:
         return math.copysign(1., ahead) if abs(ahead) > SEARCH_MIN_OFFSET else 0.
 
     def _filter_speed(self, target, dt):
-        if self.speed_target is None or self.speed_filter <= 0:
+        if self.speed_target is None or self.speed_filter <= 0 and self.speed_rise <= 0:
             self.speed_target = target
+        elif self.speed_rise > 0:
+            # Desce na hora (curva a frente, menos certeza); sobe em rampa: a
+            # vref nao oscila com o ruido e o acelerador nao da trancos.
+            self.speed_target = min(target, self.speed_target + self.speed_rise*dt)
         else:
             self.speed_target += (1. - math.exp(-dt / self.speed_filter)) * (target - self.speed_target)
         return self.speed_target
@@ -621,6 +724,9 @@ class RealStanleyFollower:
             factor = getattr(observation, 'speed_factor', 1.)
             self.line_speed_factor = (float(np.clip(factor, 0., 1.))
                                       if isinstance(factor, (int, float, np.number)) and math.isfinite(factor) else 1.)
+            dkappa = getattr(observation, 'path_dkappa', math.nan)
+            self.path_dkappa = (float(dkappa) if isinstance(dkappa, (int, float, np.number))
+                                and math.isfinite(dkappa) else math.nan)
             self.search_direction = None
         elif (self.line_memory is not None and finite_sample
                 and isinstance(now, (int, float, np.number)) and math.isfinite(now)):
@@ -658,6 +764,15 @@ class RealStanleyFollower:
                                                 search)
             speed_raw = curve_speed(self.reference, speed_curvature, lateral,
                                     min_speed=self.min_speed, lateral_accel=self.lateral_accel)
+            self.preview = None
+            if self.preview_distance > 0 and math.isfinite(self.path_dkappa):
+                # Curva vista a frente: reduz agora, enquanto ainda da para rolar ate ela.
+                self.preview = preview_speed(
+                    errors, self.path_dkappa, self.reference, self.preview_distance,
+                    lateral_accel=self.lateral_accel, deceleration=self.coast_deceleration,
+                    reaction=self.preview_reaction, speed=car.v, min_speed=self.min_speed,
+                    max_curvature=self.max_curvature)
+                speed_raw = min(speed_raw, self.preview[0])
             self.hold_speed_factor = 1.
             if holding and self.loss_speed_ramp:
                 # Fracao consumida da tolerancia (quadros ou tempo, o que vier antes).
@@ -679,7 +794,19 @@ class RealStanleyFollower:
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
                                and math.isfinite(stanley_speed))
             active = active and reference_valid
-            if active:
+            pursuit = (active and self.steering_law == 'pure_pursuit'
+                       and math.isfinite(self.path_dkappa) and not search)
+            self.pursuit_target = None
+            if pursuit:
+                lookahead = float(np.clip(self.pursuit_min + self.pursuit_time*abs(stanley_speed),
+                                          self.pursuit_min, self.pursuit_max))
+                raw, x, y = pure_pursuit_steer(errors, self.path_dkappa, lookahead,
+                                               self.controller.wheelbase, self.max_curvature)
+                steer = self.controller.steer_to(raw, car.dt)
+                self.pursuit_target = (lookahead, x, y)
+                car.set_steer(self.steering_sign * steer)
+                active = bool(getattr(car, 'encoder_valid', True))
+            elif active:
                 steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature, search)
                 car.set_steer(self.steering_sign * steer)
                 # O setter revalida a serial antes de enviar a direcao.
@@ -757,6 +884,11 @@ class RealStanleyFollower:
                 stanley_use_vref=int(self.use_vref),
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,
                 stanley_target_rad=self.controller.target_steer if active else invalid,
+                pursuit_lookahead_m=self.pursuit_target[0] if active and self.pursuit_target else invalid,
+                pursuit_target_y_m=self.pursuit_target[2] if active and self.pursuit_target else invalid,
+                path_dkappa=self.path_dkappa,
+                preview_speed_m_s=self.preview[0] if active and self.preview else invalid,
+                preview_curvature_m_inv=self.preview[1] if active and self.preview else invalid,
                 vref=float(car.vref), u=float(car.u))
         self.last_state = dict(
             active=bool(active), hold=bool(holding and active), outlier=bool(outlier),
@@ -764,6 +896,9 @@ class RealStanleyFollower:
             hold_speed_factor=self.hold_speed_factor if active else invalid,
             reference_speed_factor=self.line_speed_factor if active else invalid,
             speed_target=speed_raw, vref=float(car.vref), steer_rad=steer,
+            steering_law='pure_pursuit' if active and self.pursuit_target else 'stanley',
+            pursuit=None if not (active and self.pursuit_target) else [round(v, 3) for v in self.pursuit_target],
+            preview=None if not (active and self.preview) else [round(v, 3) for v in self.preview],
             cross_track_m=lateral, heading_rad=heading, curvature_m_inv=curvature,
             compensated_s=compensated, status=self.status)
         return bool(active)

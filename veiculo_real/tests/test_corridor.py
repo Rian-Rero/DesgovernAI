@@ -178,6 +178,43 @@ class EstimatorTests(unittest.TestCase):
         self.assertLess(abs(estimate.errors[0]), .2)
         self.assertLess(abs(estimate.errors[2]), .2)
 
+    def test_width_is_learned_from_a_wrong_guess_and_survives_a_reset(self):
+        # Palpite 0,9 m numa pista de 1,8 m (a largura muda a cada dia).
+        est = CorridorEstimator(CorridorSettings(track_width_m=.9))
+        estimate, truth = self.drive(est, [0., 0., 0., 0., WIDTH], frames=15)
+        self.assertEqual(estimate.state, 'AMBAS')
+        self.assertAlmostEqual(estimate.width_m, WIDTH, delta=.05)
+        self.assertAlmostEqual(est.learned_width, WIDTH, delta=.05)
+        est.reset()  # perdeu os cones
+        self.assertAlmostEqual(est.learned_width, WIDTH, delta=.05)
+        # Volta vendo so a borda direita: o centro fica a meia largura APRENDIDA.
+        left, right = cones(np.array([.2, 0., 0., 0., WIDTH]))
+        for k in range(6):
+            estimate = est.step(10. + .1*k, [], right, (0., 0., 0.) if k else None)
+        self.assertTrue(estimate.valid, estimate.reason)
+        self.assertAlmostEqual(estimate.errors[0], .2, delta=.05)
+        self.assertAlmostEqual(estimate.width_m, WIDTH, delta=.08)
+
+    def test_wide_and_narrow_tracks_from_the_same_guess(self):
+        for width in (1.0, 2.4):
+            with self.subTest(width=width):
+                est = CorridorEstimator(CorridorSettings(track_width_m=1.8))
+                state = np.array([0., 0., 0., 0., width])
+                for k in range(10):
+                    left, right = cones(state)
+                    estimate = est.step(.1*k, left, right, (0., 0., 0.) if k else None)
+                self.assertAlmostEqual(estimate.width_m, width, delta=.06)
+
+    def test_single_border_start_with_unknown_width_is_valid_but_slow(self):
+        est = estimator()
+        state = np.array([0., 0., 0., 0., WIDTH])
+        _, right = cones(state)
+        for k in range(8):
+            estimate = est.step(.1*k, [], right, (0., 0., 0.) if k else None)
+        self.assertIsNone(est.learned_width)
+        self.assertTrue(estimate.valid, estimate.reason)
+        self.assertTrue(estimate.slow)  # largura so pelo palpite: devagar
+
     def test_needs_three_cones_or_both_sides_to_start(self):
         est = estimator()
         estimate = est.step(0., [[1.5, .9]], [], None)

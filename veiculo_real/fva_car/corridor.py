@@ -51,9 +51,17 @@ ARC_ZERO = int(np.argmin(np.abs(ARC)))
 
 @dataclass(frozen=True)
 class CorridorSettings:
-    track_width_m: float = .9      # largura nominal (cone_settings.track_width_cm)
-    width_tolerance: float = .25   # W limitado a nominal*(1 +- tolerancia)
-    width_prior_sigma: float = .2  # atracao fraca para a nominal, m (por quadro)
+    # A largura da pista muda de um dia para outro: track_width_m e so o palpite
+    # inicial (cone_settings.track_width_cm). Com as duas bordas, W e medido; a
+    # largura aprendida (media dos quadros AMBAS) vale dai em diante, inclusive
+    # depois de uma perda, e segura W quando so uma borda aparece.
+    track_width_m: float = .9      # palpite inicial, m
+    min_width_m: float = .5        # limites fisicos de W
+    max_width_m: float = 3.
+    init_width_sigma: float = .6   # incerteza do palpite ainda nao confirmado, m (pista de 1 a 2,5 m)
+    width_prior_sigma: float = .2  # atracao fraca para a largura aprendida, m (por quadro)
+    width_noise: float = .05       # m/sqrt(m): a largura pode mudar ao longo da pista
+    width_learn_rate: float = .2   # peso de cada quadro AMBAS confiavel na largura aprendida
     max_range_m: float = 3.        # cones mais distantes nao entram
     pixel_sigma: float = 2.        # erro da base do cone, px (na resolucao calibrada)
     row_sigma: float = 4.          # px extras na vertical: arfagem do carro (~0,4 grau)
@@ -114,6 +122,7 @@ class CorridorEstimate:
     reason: str = ''
     state_vector: tuple | None = None  # (e, psi, kappa, dkappa, W) para desenhar
     slow: bool = False             # incerteza alta: limitar a velocidade
+    learned_width_m: float = math.nan  # largura aprendida nesta corrida (nan: ainda nao medida)
 
     @property
     def speed_factor(self):
@@ -126,6 +135,7 @@ class CorridorEstimate:
                 'errors': None if self.errors is None else [r(v, 4) for v in self.errors],
                 'dkappa': None if vector is None else r(vector[DKAPPA]),
                 'width_m': r(self.width_m), 'sigma': [r(v, 4) for v in self.sigma],
+                'learned_width_m': r(self.learned_width_m),
                 'used': list(self.used), 'rejected': int(self.rejected),
                 'blind_m': r(self.blind_m), 'speed_factor': self.speed_factor, 'slow': bool(self.slow),
                 'reason': self.reason}
@@ -186,7 +196,22 @@ class CorridorEstimator:
         self.settings = settings or CorridorSettings()
         self.homography = None if ground_from_pixel is None else np.asarray(ground_from_pixel, float)
         self.pixel_scale = float(pixel_scale)
+        self.learned_width = None  # sobrevive a reset(): a pista nao muda ao perder os cones
         self.reset()
+
+    @property
+    def nominal_width(self):
+        return self.settings.track_width_m if self.learned_width is None else self.learned_width
+
+    def _learn_width(self, sigma_width):
+        """Quadro com as duas bordas e W bem medido: atualiza a largura aprendida."""
+        if sigma_width > .1:
+            return
+        width = float(self.x[WIDTH])
+        if self.learned_width is None:
+            self.learned_width = width
+        else:
+            self.learned_width += self.settings.width_learn_rate*(width - self.learned_width)
 
     def reset(self):
         self.x = None
@@ -242,7 +267,8 @@ class CorridorEstimator:
             jacobian[:, k] = delta/1e-4
         ds = math.hypot(dx, dy)
         noise = np.diag([(.005 + .03*ds)**2, (.005 + .15*abs(dth) + .02*ds)**2,
-                         cfg.kappa_noise*ds + 1e-5, cfg.dkappa_noise*ds + 1e-4, (.02*ds)**2 + 1e-6]) + np.diag(timed)
+                         cfg.kappa_noise*ds + 1e-5, cfg.dkappa_noise*ds + 1e-4,
+                         cfg.width_noise**2*ds + 1e-6]) + np.diag(timed)
         self.x = x1
         self.P = jacobian @ self.P @ jacobian.T + noise
         self.blind_m += ds
@@ -309,23 +335,22 @@ class CorridorEstimator:
 
     def _constrain(self, x, P):
         cfg = self.settings
-        nominal = cfg.track_width_m
-        if cfg.width_prior_sigma > 0:
-            # Atracao fraca para a largura nominal: com uma cor so por muito
-            # tempo, W nao deriva.
+        if cfg.width_prior_sigma > 0 and self.learned_width is not None:
+            # Atracao fraca para a largura aprendida: com uma cor so por muito
+            # tempo, W nao deriva. Antes de medir a pista, o palpite nao puxa.
             gain = P[:, WIDTH]/(P[WIDTH, WIDTH] + cfg.width_prior_sigma**2)
-            x = x + gain*(nominal - x[WIDTH])
+            x = x + gain*(self.learned_width - x[WIDTH])
             P = P - np.outer(gain, P[WIDTH, :])
-        x[WIDTH] = float(np.clip(x[WIDTH], nominal*(1 - cfg.width_tolerance), nominal*(1 + cfg.width_tolerance)))
+        x[WIDTH] = float(np.clip(x[WIDTH], cfg.min_width_m, max(cfg.min_width_m, cfg.max_width_m)))
         x[KAPPA] = float(np.clip(x[KAPPA], -cfg.max_curvature, cfg.max_curvature))
         x[DKAPPA] = float(np.clip(x[DKAPPA], -cfg.max_dkappa, cfg.max_dkappa))
         return x, (P + P.T)/2
 
     def _initialize(self, points, sides, covariance):
         cfg = self.settings
-        x0 = np.array([0., 0., 0., 0., cfg.track_width_m])
-        P0 = np.diag([.6**2, .6**2, cfg.init_kappa_sigma**2, cfg.init_dkappa_sigma**2,
-                      (cfg.width_prior_sigma or .2)**2])
+        x0 = np.array([0., 0., 0., 0., self.nominal_width])
+        width_sigma = cfg.init_width_sigma if self.learned_width is None else (cfg.width_prior_sigma or .2)
+        P0 = np.diag([.6**2, .6**2, cfg.init_kappa_sigma**2, cfg.init_dkappa_sigma**2, width_sigma**2])
         keep = np.ones(len(points), bool)
         x, P = x0, P0
         for _ in range(3):
@@ -406,6 +431,7 @@ class CorridorEstimator:
             state = 'PERDIDO'
         elif used_left and used_right:
             state = 'AMBAS'
+            self._learn_width(sigma[WIDTH])
         elif used_left or used_right:
             kappa = self.x[KAPPA]
             if abs(kappa) < cfg.straight_curvature:
@@ -416,7 +442,10 @@ class CorridorEstimator:
                 state = 'SO_EXTERNA' if outer else 'SO_INTERNA'
         else:
             state = 'MEMORIA'
-        lateral_sigma = self.lateral_sigma(cfg.check_distance_m)
+        # Incerteza a frente DADA a largura: com uma borda so e a largura ainda
+        # nao medida, segue a borda a meia largura do palpite (como a recuperacao
+        # por uma borda do detector), devagar (slow, pelo sigma do eixo).
+        lateral_sigma = self.lateral_sigma(cfg.check_distance_m, given_width=True)
         # Em MEMORIA o carro segue o trecho ja visto; o criterio a frente vale
         # para liberar a partida e com cones, e o limite e memory_m.
         uncertain = ((state != 'MEMORIA' and lateral_sigma > cfg.max_sigma_lateral)
@@ -436,22 +465,29 @@ class CorridorEstimator:
         errors = (float(self.x[E]), float(self.x[PSI]), float(self.x[KAPPA])) if valid else None
         estimate = CorridorEstimate(valid, state, errors, float(self.x[WIDTH]), sigma, (used_left, used_right),
                                     rejected, self.blind_m, reason, tuple(float(v) for v in self.x),
-                                    slow=valid and (state == 'MEMORIA' or sigma[E] > cfg.slow_sigma_e))
+                                    slow=valid and (state == 'MEMORIA' or sigma[E] > cfg.slow_sigma_e),
+                                    learned_width_m=math.nan if self.learned_width is None else self.learned_width)
         if state == 'PERDIDO':
             self.reset()
         return estimate
 
-    def lateral_sigma(self, distance):
-        """Desvio da posicao lateral da linha central `distance` m a frente (caminho)."""
+    def lateral_sigma(self, distance, given_width=False):
+        """Desvio da posicao lateral da linha central `distance` m a frente (caminho).
+
+        given_width: como se a largura fosse conhecida (covariancia condicionada a W).
+        """
         if self.x is None:
             return math.inf
+        P = self.P
+        if given_width and P[WIDTH, WIDTH] > 1e-12:
+            P = P - np.outer(P[:, WIDTH], P[WIDTH, :])/P[WIDTH, WIDTH]
         base = sample_centerline(self.x, [distance], 0., self.settings.max_curvature)[0, 1]
         gradient = np.zeros(5)
         for k in (E, PSI, KAPPA, DKAPPA):
             probe = self.x.copy()
             probe[k] += 1e-4
             gradient[k] = (sample_centerline(probe, [distance], 0., self.settings.max_curvature)[0, 1] - base)/1e-4
-        return float(math.sqrt(max(gradient @ self.P @ gradient, 0.)))
+        return float(math.sqrt(max(gradient @ P @ gradient, 0.)))
 
     def sample(self, arc_lengths, offset=0.):
         if self.x is None:

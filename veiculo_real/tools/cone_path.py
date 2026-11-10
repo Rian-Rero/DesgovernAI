@@ -34,6 +34,46 @@ def _points():
     return np.empty((0, 2), np.int32)
 
 
+def floor_color(frame):
+    """Mediana BGR da metade de baixo (quase so piso; os cones sao poucos pixels)."""
+    sample = frame[frame.shape[0]//2::4, ::4].reshape(-1, 3)
+    return np.median(sample, axis=0).astype(np.float32)
+
+
+def normalize_light(frame, settings):
+    """(imagem, ganhos BGR) com o piso levado a cor de referencia de settings.
+
+    Ganho comum (brilho) e razao entre canais (cor da luz) separados, cada um
+    com zona morta: so o excesso alem de light_band / tint_band % e corrigido,
+    e a imagem de referencia passa intacta. Ganho limitado a 0,5-3,5x e cor a
+    +-50%, para um piso de outra cor nao virar outra coisa; e o ganho nunca
+    estoura os pixels mais claros (percentil 99): canal saturado muda o matiz
+    (vermelho estourado vira laranja).
+    """
+    if not settings.auto_light:
+        return frame, None
+    reference = np.array([settings.floor_b, settings.floor_g, settings.floor_r], np.float32)
+    ratio = np.log(np.maximum(reference, 1.)/np.maximum(floor_color(frame), 1.))
+    gain = float(np.mean(ratio))
+    tint = ratio - gain
+    soft = lambda value, band: np.sign(value)*np.maximum(np.abs(value) - np.log1p(band/100), 0.)
+    gain = float(np.clip(soft(gain, settings.light_band), math.log(.5), math.log(3.5)))
+    tint = np.clip(soft(tint, settings.tint_band), -math.log(1.5), math.log(1.5))
+    scale = np.exp(gain + tint)
+    if np.max(scale) > 1.:
+        # So pixels coloridos: janela ou reflexo branco estourado nao mudam matiz.
+        sample = frame[::4, ::4].reshape(-1, 3).astype(np.int16)
+        top, bottom = sample.max(axis=1), sample.min(axis=1)
+        colored = top[(top - bottom > .3*top) & (top > 30)]
+        if len(colored) >= 20:
+            bright = float(np.percentile(colored, 99))
+            scale = scale*min(1., max(250./bright, 1.)/float(np.max(scale)))
+    if np.all(np.abs(scale - 1.) < 1e-3):
+        return frame, scale
+    table = np.clip(np.arange(256, dtype=np.float32)[:, None]*scale[None, :], 0, 255)
+    return cv2.LUT(frame, table.astype(np.uint8).reshape(1, 256, 3)), scale
+
+
 @dataclass
 class ConeSettings:
     roi_top: int = 0         # Camera baixa: os cones ficam perto do horizonte.
@@ -92,6 +132,17 @@ class ConeSettings:
     path_smoothing: int = 40  # % do caminho anterior fundido ao novo (0 desliga).
     min_gap_cm: int = 20      # Espacamento admissivel entre cones da mesma borda.
     max_gap_cm: int = 160
+    # Iluminacao: leva o piso (mediana da metade de baixo) a cor de referencia
+    # antes da segmentacao, com zona morta. Nos quadros dos ensaios de 23/10,
+    # escurecidos/clareados/esquentados/esfriados, recupera 93-95% dos cones
+    # (sem: 5-89%); dentro da zona morta a imagem nao muda. floor_* e o piso
+    # dos ensaios de 23/10 (BGR); outra pista: tools/ajustar_camera.py --piso.
+    auto_light: bool = True
+    floor_b: int = 148
+    floor_g: int = 154
+    floor_r: int = 157
+    light_band: int = 15      # % de brilho sem correcao (+-)
+    tint_band: int = 2        # % de cor sem correcao (+-)
 
 
 @dataclass
@@ -750,8 +801,10 @@ class ConePathDetector:
 
         Usado por process() e pela extracao do conjunto de treino
         (extrair_recortes_cones.py): o modelo aprende com os mesmos candidatos
-        que vai julgar no carro.
+        que vai julgar no carro. 'frame' devolve a imagem com a luz normalizada,
+        de onde saem os recortes do classificador.
         """
+        frame, light = normalize_light(frame, settings)
         roi = self.roi_row(frame.shape[:2], settings)
         green, red = self.segment(frame, settings, roi)
         rejected = {'green': {}, 'red': {}}
@@ -763,7 +816,7 @@ class ConePathDetector:
             'red': self._bases(red, settings, stats=rejected['red'], roi=roi, scale=scale,
                                size_check=size_check),
             'masks': (green, red), 'rejected': rejected, 'roi': roi, 'scale': scale,
-            'size_check': size_check}
+            'size_check': size_check, 'frame': frame, 'light': light}
 
     def process(self, frame, settings=None, timestamp=None, *, motion=None):
         """motion opcional: delta (frente m, esquerda m, yaw rad), desde o frame anterior.
@@ -780,6 +833,9 @@ class ConePathDetector:
         result = ConePathResult(cv2.bitwise_or(green, red), green, red)
         result.green_left = settings.green_left
         detection = {'roi_row': found['roi'], 'size_check': bool(found['size_check'])}
+        if found['light'] is not None:
+            detection['light'] = [_r(v, 2) for v in found['light']]
+        frame = found['frame']
         if self.classifier is not None and found['scale'] is not None:
             # A CNN confirma cada candidato pelo recorte em volta da base.
             started = time.perf_counter()
@@ -1052,8 +1108,10 @@ class ConePathDetector:
                        if width_values and settings.track_width_cm else None)
         report.update(spacing_ratio=_r(spacing_ratio), width_ratio=_r(width_ratio))
         self.calibration_suspect = False
+        # A pista muda de largura de um dia para outro (0,9-2,5 m): so um erro
+        # grosseiro (homografia de outra camera: fator ~10) marca a calibracao.
         if ((spacing_ratio is not None and not .35 <= spacing_ratio <= 2.5)
-                or (width_ratio is not None and not .6 <= width_ratio <= 1.4)):
+                or (width_ratio is not None and not .4 <= width_ratio <= 2.5)):
             report['suspect'] = True
             self.calibration_suspect = True
             return (f"Calibracao incompativel com a camera? espaco {np.median(spacing_values or [math.nan]):.2f} m"

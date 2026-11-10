@@ -137,6 +137,115 @@ para 215 de 246 (os 31 restantes não têm cones). O salto entre quadros caiu de
 33 cm / 30° para 0,9 cm / 0,6° (p90 do E2). O custo é de ~1,7 ms por quadro no
 notebook; meça no Pi com `tools/benchmark_visao.py --cones`.
 
+### Largura da pista (aprendida em corrida)
+
+A pista muda de largura a cada dia, então `cone_settings.track_width_cm` é só
+o **palpite inicial**. Com cones dos dois lados, `W` é medido. A média dos
+quadros `AMBAS` vira a **largura aprendida**, que segura `W` quando só uma borda
+aparece e sobrevive a uma perda do corredor. Antes de medir, o palpite tem
+incerteza de 0,6 m e não puxa `W`. Partindo só de uma borda, o carro segue a
+meia largura do palpite, devagar (teto de 0,35 m/s), até ver a outra.
+
+Na pista virtual, com o mesmo palpite de 1,8 m, pistas de 1,0, 1,3, 1,8 e 2,4 m
+deram 2–8 cm de erro RMS. A pista que estreita durante a volta também funciona.
+A que **alarga** durante a volta (1,1 → 2,2 m) não: a borda esquerda sai da
+imagem (câmera 8° à direita), `W` deixa de ser medido e o carro anda até ~35 cm
+fora do centro, mas sem tocar cones. A checagem de calibração do detector só
+acusa largura fora de 0,4–2,5× o palpite. `cones_summary.json` traz
+`learned_width_m`.
+
+## Direção e velocidade com o estimador
+
+- **Pure pursuit** (`steering_law: "pure_pursuit"`, padrão nos cones com o
+  estimador). Mira o ponto do centro estimado a `0,4 m + 0,2 s·v` (teto 1,5 m)
+  do eixo dianteiro, já deslocado para o caminho do eixo traseiro (em curva, ele
+  anda por dentro: R − √(R² − L²)). O caminho junto ao carro vem da clotoide do
+  estimador (`path_dkappa` na observação). `--stanley` volta ao Stanley; a
+  linha amarela usa sempre Stanley.
+- **Prévia de curva** (`speed_preview_m: 2.5`). O carro não freia: em neutro,
+  perde 0,55–0,7 m/s² a partir de 1,5 m/s (logs de 20/10). Então a vref cai
+  **antes** da curva, para a maior velocidade que ainda permite rolar até cada
+  ponto dos próximos 2,5 m com `v² ≤ curve_lateral_accel/|κ|`
+  (`coast_deceleration: 0.5`, reação de 0,3 s).
+- **Rampa assimétrica** (`speed_rise_m_s2: 1.0`): a vref desce na hora e sobe
+  no máximo 1 m/s². Substitui `speed_filter_s` nos cones. `--no-preview`
+  desliga a prévia e a rampa.
+
+Na pista virtual (abaixo), com as 4 pistas e 3 sementes, a 0,7 e 1,5 m/s:
+
+| | erro RMS | erro máx. | acel. lateral máx. a 1,5 m/s |
+|---|---|---|---|
+| Stanley (antes) | 4,4–8,3 cm | 9,6–23 cm | — |
+| Pure pursuit | 2,6–4,9 cm | 7–19 cm | 0,30–0,46 m/s² (volta 2–6% mais lenta) |
+| Pure pursuit sem prévia | 2,8–4,7 cm | 7,5–18 cm | 0,57–0,65 m/s² (limite 0,4) |
+
+Com erro de calibração (±8 px de linha, 6 px de coluna), visão a 8–10 quadros/s
+com 0,2–0,35 s de atraso e servo lento, o pure pursuit continuou com 2,6–6 cm de
+RMS, contra 7,5–9,4 cm do Stanley. O maior erro isolado é no grampo de R = 1,8 m
+(~18 cm, folga de 58 cm até os cones). O `car.csv` ganha `pursuit_lookahead_m`,
+`pursuit_target_y_m`, `path_dkappa`, `preview_speed_m_s` e
+`preview_curvature_m_inv`.
+
+### Pista virtual (sem o carro)
+
+`tools/pista_virtual.py` roda o **mesmo código do carro** em malha fechada:
+`CorridorEstimator`, `RealStanleyFollower`, `PoseHistory` e a configuração do
+`main.py`. Simula:
+- um carro cinemático: direção com média de 3 amostras e servo; acelera até
+  1 m/s² e só rola para desacelerar;
+- a odometria do `Car`, com erro de escala e viés de esterço;
+- a câmera, pela homografia real: cone visível se a base cai na imagem 640×480
+  e a até 3 m; ruído por cone e de arfagem; cones perdidos e falsos; ~15
+  quadros/s com 0,12–0,18 s de atraso;
+- pistas de retas e arcos (`oval`, `grampo`, `s`, `chicane`), com largura fixa
+  ou variando.
+
+```bash
+python3 tools/pista_virtual.py                                  # tudo, Stanley x pure pursuit
+python3 tools/pista_virtual.py --pista grampo --set velocity_reference=1.5
+python3 tools/pista_virtual.py --width 1.0 --width-end 1.6 --row-bias 8   # pista e calibracao piores
+python3 tools/pista_virtual.py --pista s --plot s.png                     # trajetorias
+```
+
+`--set` muda qualquer chave de `main.parameters`. `--latency`, `--fps`,
+`--servo-tau`, `--coast`, `--row-bias` e `--column-bias` pioram o carro, a
+câmera ou a calibração. Ela não substitui o ensaio: não modela escorregamento,
+reflexos nem a detecção de cor. Serve para comparar ajustes antes de levar ao
+carro.
+
+## Iluminação
+
+A pista muda de luz (sombra, janela, lâmpada quente ou fria). O detector
+(`tools/cone_path.py`, `auto_light`) leva a cor do piso, a mediana da metade de
+baixo da imagem, à cor de referência (`floor_b/g/r`: o piso dos ensaios de
+23/10, em que os limiares foram ajustados). Isso é feito com um ganho comum
+(brilho) e um ganho por canal (cor da luz), antes da segmentação:
+- **Zona morta**: só o excesso além de ±15% de brilho e ±2% de cor é corrigido.
+  Na luz de referência a imagem passa intacta.
+- **Limites**: ganho de 0,5–3,5× e cor de ±50%. O ganho nunca estoura os
+  pixels coloridos mais claros: canal saturado muda o matiz, e o vermelho vira
+  laranja.
+- Custo de ~0,4 ms por quadro no notebook. Os recortes do classificador saem da
+  imagem já normalizada, também na extração do conjunto de treino.
+
+Nos 152 quadros de evento de 23/10, alterados artificialmente:
+
+| Condição | Sem normalizar | Normalizando |
+|---|---|---|
+| original | 100% | 100% (idêntico) |
+| 55% mais escuro | 53% | 93% |
+| 70% mais escuro | 5% | 95% |
+| 80% mais claro | 89% | 93% |
+| luz quente / fria (±25%) | 72% / 58% | 90% / 89% |
+| escuro + quente | 78% | 88% |
+| contraste (gama 0,6) | 73% | 73% |
+
+(Percentual dos cones detectados no original que continuam detectados.)
+`cones_summary.json` traz `light_gain_median` e `light_gain_max`. Ganho perto de
+3,5 significa luz fraca demais: aumente a exposição. `tools/ajustar_camera.py`
+mostra o piso medido e a correção que seria aplicada. Só troque `floor_*` se
+reajustar os limiares de cor sob outra luz.
+
 ## Debug por quadro (leve para o Raspberry Pi 4)
 
 Com `cone_debug` (padrão; `--no-cone-debug` desliga), cada ensaio em

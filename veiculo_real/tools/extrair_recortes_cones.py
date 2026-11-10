@@ -60,6 +60,7 @@ def extract_folder(folder, calibration, *, candidate_settings=None, crop=None, m
             raise ValueError(f'{path}: resolucao {frame.shape[1::-1]} difere da calibracao '
                              f'{tuple(calibration.image_size)}')
         found = detector.candidates(frame, settings)
+        frame = found['frame']  # luz normalizada, como no carro
         scale = found['scale']
         if scale is None:
             raise ValueError('A extracao requer calibracao (escala do cone por linha).')

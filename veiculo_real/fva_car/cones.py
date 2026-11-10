@@ -79,7 +79,8 @@ class RealConeDetector:
                 raise ValueError('cone_settings.'+name+' fora do intervalo percentual.')
         if not 0 <= values['green_h_min'] <= values['green_h_max'] <= 179 or values['red_hue'] > 89:
             raise ValueError('Limites H dos cones invalidos.')
-        if max(values['s_min'], values['v_min'], values['red_s_min'], values['red_v_min']) > 255:
+        if max(values['s_min'], values['v_min'], values['red_s_min'], values['red_v_min'],
+               values['floor_b'], values['floor_g'], values['floor_r']) > 255:
             raise ValueError('S e V devem estar entre 0 e 255.')
         if not 0 < values['min_width_cm'] < values['max_width_cm'] or values['min_radius_cm'] <= 0:
             raise ValueError('Limites metricos dos cones invalidos.')
@@ -162,6 +163,7 @@ class RealConeDetector:
         legacy = [round(float(e), 4) for e in errors] if valid else None
         estimate = None
         speed_factor = 1.
+        path_dkappa = math.nan
         if self.corridor is not None:
             estimate = self._corridor_step(result, timestamp, motion)
             valid = estimate.valid
@@ -169,6 +171,8 @@ class RealConeDetector:
             recovery = estimate.slow
             reason = estimate.reason
             speed_factor = estimate.speed_factor if valid else 1.
+            if valid:
+                path_dkappa = float(estimate.state_vector[3])
             metadata['corridor'] = estimate
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
@@ -187,7 +191,7 @@ class RealConeDetector:
         observation = ConeObservation(timestamp,
             errors=tuple(float(e) for e in errors) if valid else None,
             speed_limit=CONE_RECOVERY_SPEED if valid and recovery else math.inf,
-            speed_factor=speed_factor, reason=reason, debug=debug,
+            speed_factor=speed_factor, path_dkappa=path_dkappa, reason=reason, debug=debug,
             corridor_width_m=width, **metadata)
         return self.with_preview(observation) if self.render_preview else observation
 
