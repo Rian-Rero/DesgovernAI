@@ -167,6 +167,17 @@ parameters = {
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
     "path_anchor": 0.5,  # preferencia horizontal da faixa, entre 0 e 1
+    # Linha amarela com a camera ALTA (a dos cones): a faixa e detectada na vista
+    # de cima do chao (fva_car/lateral.py BirdsEyeView, 0,5-3 m, 1 cm/px), onde
+    # fica como na camera inclinada para baixo, e seguida pelo estimador do
+    # corredor como linha central (clotoide + odometria), com pure pursuit,
+    # previa de curva e limite de visibilidade como nos cones. Na curva fechada
+    # a esquerda a linha sai da imagem (camera 8 graus a direita): memoria maior
+    # e curvatura mais estavel que nos cones. Pista virtual (--linha): RMS de
+    # 1,4-3,8 cm com pure pursuit. False nos dois volta ao modo antigo (camera
+    # inclinada para baixo: --line-classic).
+    "line_birdseye": True,
+    "line_estimator": {"memory_m": 2.5, "memory_s": 5.0, "kappa_noise": 0.05, "dkappa_noise": 0.1},
     # Porta HTTP com a visao ao vivo (http://<ip-do-carro>:porta/); 0 desliga.
     "stream_port": 0,
 }
@@ -183,6 +194,18 @@ def corridor_log(corridor):
     return dict(corridor_state=float(STATES.index(corridor["state"])),
                 corridor_sigma_e=nan if sigma[0] is None else float(sigma[0]),
                 corridor_speed_factor=float(corridor.get("speed_factor", nan)))
+
+
+def line_estimator_settings(config):
+    """line_estimator do config -> argumento estimator do RealLineDetector (None desliga)."""
+    value = config.get("line_estimator", None)
+    if value in (None, False):
+        return None
+    if value is True:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("line_estimator deve ser True, False ou um dicionario de ajustes.")
+    return {"pose_offset_m": float(config.get("wheelbase", 0.36)), **value}
 
 
 def corridor_settings(config):
@@ -384,10 +407,19 @@ def render_stream_frame(detector, observation, lines):
 def follower_config(config, mode, corridor):
     """Ajustes do RealStanleyFollower para o modo (os de cones sobrepoem os da linha)."""
     config = dict(config)
-    if mode != "cones":
+    if mode != "cones" and corridor is None:
+        # Linha no modo antigo (ajuste quadro a quadro): Stanley e vref antiga.
         config["steering_law"] = "stanley"
         config["speed_preview_m"] = 0.0
         config["speed_rise_m_s2"] = 0.0
+        return config
+    if mode != "cones":
+        # Linha com o estimador: mesmo caminho dos cones (pure pursuit, previa,
+        # limite de visibilidade); a memoria do estimador cobre as perdas.
+        radius = float(config.get("min_curve_radius_m", 0) or 0)
+        config["speed_sight_curvature"] = 1.0 / radius if radius > 0 else 0.0
+        config["line_loss_frames"] = min(config.get("line_loss_frames", 8), 2)
+        config["line_loss_tolerance"] = min(config.get("line_loss_tolerance", 1.0), 0.3)
         return config
     # Sem chaveamento para linha nem esterco de busca: durante a tolerancia
     # apenas continua a trajetoria ja identificada, com a vref em rampa.
@@ -452,8 +484,10 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             anchor=config.get("path_anchor", 0.5),
             render_preview=False,
             processing_width=config.get("vision_width", 0),
+            birdseye=bool(config.get("line_birdseye", False)),
+            estimator=line_estimator_settings(config),
         )
-        config = follower_config(config, mode, None)
+        config = follower_config(config, mode, line_estimator_settings(config))
     else:
         raise ValueError("navigation_mode deve ser line ou cones")
     if car_factory is None:  # carro real: comeca com o trim aprendido nas corridas anteriores
@@ -478,8 +512,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     # imagens por get_image(), entao a visao continua em threads.
     use_process = bool(config.get("vision_process", True)) and car_factory is None
     poses = None
-    if mode == "cones":
-        # A visao leva o mapa de cones pela odometria registrada pelo controle.
+    if mode == "cones" or line_estimator_settings(config) is not None:
+        # A visao leva o mapa de cones (ou a linha) pela odometria registrada pelo controle.
         poses = SharedPoseHistory() if use_process else PoseHistory()
         if not use_process:
             detector.odometry = poses
@@ -493,7 +527,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
-                                   processing_width=config.get("vision_width", 0))
+                                   processing_width=config.get("vision_width", 0),
+                                   birdseye=bool(config.get("line_birdseye", False)),
+                                   estimator=line_estimator_settings(config))
         vision = VisionProcess(vision_data, mode, config["camera_calibration_file"], detector_kwargs,
                                camera_settings=config.get("camera_settings") or {}, poses=poses)
         try:
@@ -863,6 +899,8 @@ def main():
                         help="Cones: Stanley no eixo em vez do pure pursuit no centro estimado")
     parser.add_argument("--no-preview", action="store_true",
                         help="Cones: sem previa de curva (vref so pela curvatura no eixo)")
+    parser.add_argument("--line-classic", action="store_true",
+                        help="Linha amarela no modo antigo (camera inclinada para baixo): sem vista de cima nem estimador")
     parser.add_argument("--no-trim-learning", action="store_true",
                         help="Direcao: nao aprende nem usa o trim salvo (usa steering_trim_deg)")
     parser.add_argument("--strict-ultrasonic", action="store_true",
@@ -901,6 +939,9 @@ def main():
         settings["cone_estimator"] = False
     if args.stanley:
         settings["steering_law"] = "stanley"
+    if args.line_classic:
+        settings["line_birdseye"] = False
+        settings["line_estimator"] = False
     if args.no_trim_learning:
         settings["steering_trim_learning"] = False
     if args.strict_ultrasonic:

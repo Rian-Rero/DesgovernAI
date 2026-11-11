@@ -40,8 +40,9 @@ import math
 import numpy as np
 
 
-STATES = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA', 'PERDIDO')
-SPEED_FACTOR = {'AMBAS': 1., 'SO_EXTERNA': .8, 'SO_INTERNA': .8, 'UMA_BORDA_RETA': .85,
+# LINHA: pontos da linha central (linha amarela), no fim para nao mudar os indices do car.csv.
+STATES = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA', 'PERDIDO', 'LINHA')
+SPEED_FACTOR = {'LINHA': 1., 'AMBAS': 1., 'SO_EXTERNA': .8, 'SO_INTERNA': .8, 'UMA_BORDA_RETA': .85,
                 'MEMORIA': .6, 'PERDIDO': 0.}
 E, PSI, KAPPA, DKAPPA, WIDTH = range(5)
 # Linha central amostrada de -1 a 4,5 m de caminho (a camera ve ate ~3 m).
@@ -247,6 +248,7 @@ class CorridorEstimator:
         self.last_update_time = None
         self.blind_m = 0.
         self.bad_frames = 0
+        self.used_center = 0
 
     def set_homography(self, ground_from_pixel, pixel_scale=1.):
         self.homography = np.asarray(ground_from_pixel, float)
@@ -398,21 +400,29 @@ class CorridorEstimator:
                 break
             keep = new_keep
         left, right = int(np.sum(keep & (sides > 0))), int(np.sum(keep & (sides < 0)))
-        if left + right < 3 or (min(left, right) == 0 and max(left, right) < 3):
+        center = int(np.sum(keep & (sides == 0)))
+        if center:
+            if center < 3:
+                return None
+        elif left + right < 3 or (min(left, right) == 0 and max(left, right) < 3):
             return None
         x, P = self._constrain(x, P)
         return x, P, keep
 
-    def update(self, left, right):
+    def update(self, left, right, center=None):
         """Corrige com os cones deste quadro (Nx2 no chao, referencial do eixo dianteiro).
 
-        Devolve (cones aceitos esquerda, direita, descartados).
+        center: pontos da propria linha central (linha amarela): distancia 0.
+        Devolve (cones aceitos esquerda, direita, descartados); os da linha
+        aceitos ficam em self.used_center.
         """
         cfg = self.settings
         left = np.asarray(left, float).reshape(-1, 2)
         right = np.asarray(right, float).reshape(-1, 2)
-        points = np.vstack([left, right])
-        sides = np.r_[np.ones(len(left)), -np.ones(len(right))]
+        center = np.empty((0, 2)) if center is None else np.asarray(center, float).reshape(-1, 2)
+        points = np.vstack([left, right, center])
+        sides = np.r_[np.ones(len(left)), -np.ones(len(right)), np.zeros(len(center))]
+        self.used_center = 0
         near = (points[:, 0] > 0) & (points[:, 0] <= cfg.max_range_m) & np.all(np.isfinite(points), axis=1)
         points, sides = points[near], sides[near]
         if not len(points):
@@ -441,19 +451,22 @@ class CorridorEstimator:
                 self.x, self.P = self._constrain(x, P)
         left_used = int(np.sum(keep & (sides > 0)))
         right_used = int(np.sum(keep & (sides < 0)))
-        return left_used, right_used, len(points) - left_used - right_used
+        self.used_center = int(np.sum(keep & (sides == 0)))
+        return left_used, right_used, len(points) - left_used - right_used - self.used_center
 
     # ------------------------------------------------------------------ passo
-    def step(self, timestamp, left, right, motion=None, pose_frame=True):
-        """Previsao pela odometria + correcao pelos cones; devolve CorridorEstimate."""
+    def step(self, timestamp, left, right, motion=None, pose_frame=True, center=None):
+        """Previsao pela odometria + correcao pelos cones (ou pela linha central,
+        center); devolve CorridorEstimate."""
         cfg = self.settings
         if self.last_time is not None and timestamp <= self.last_time:
             self.reset()
         if self.last_time is not None:
             self.predict(motion, pose_frame, timestamp - self.last_time)
         self.last_time = timestamp
-        used_left, used_right, rejected = self.update(left, right)
-        if used_left + used_right:
+        used_left, used_right, rejected = self.update(left, right, center)
+        used_center = self.used_center
+        if used_left + used_right + used_center:
             self.last_update_time = timestamp
             self.blind_m = 0.
         if self.x is None:
@@ -464,6 +477,8 @@ class CorridorEstimator:
                 or timestamp - self.last_update_time > cfg.memory_s)
         if lost:
             state = 'PERDIDO'
+        elif used_center and not (used_left or used_right):
+            state = 'LINHA'
         elif used_left and used_right:
             state = 'AMBAS'
             self._learn_width(sigma[WIDTH])
@@ -492,7 +507,7 @@ class CorridorEstimator:
             reason = (f'Corredor incerto (sigma lateral a {cfg.check_distance_m:.1f} m={lateral_sigma:.2f} m,'
                       f' eixo={sigma[E]:.2f} m, rumo={sigma[PSI]:.2f} rad)')
         else:
-            reason = {'AMBAS': 'Corredor pelas duas bordas',
+            reason = {'LINHA': 'Linha amarela (estimador)', 'AMBAS': 'Corredor pelas duas bordas',
                       'SO_EXTERNA': 'Corredor pela borda externa da curva',
                       'SO_INTERNA': 'Corredor pela borda interna da curva',
                       'UMA_BORDA_RETA': 'Corredor por uma borda (reta)',

@@ -67,12 +67,14 @@ MISSION_DEFAULTS = {
     "min_radius": "1.2",          # --min-radius (so cones; 1.2 e o padrao do main.py)
     "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
     "trim_learning": True,        # False: --no-trim-learning (trim da direcao fixo)
+    "line_highcam": True,         # linha amarela com a camera alta; False: --line-classic
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
                      "curve_echo")
+LINE_ONLY_OPTIONS = ("line_highcam",)
 
 
 def build_main_command(options: dict) -> str:
@@ -87,6 +89,8 @@ def build_main_command(options: dict) -> str:
              f"--speed {o['speed']}"]
     if o["stream"]:
         parts.append(f"--stream {STREAM_PORT}")
+    if o["navigation"] == "line" and not o["line_highcam"]:
+        parts.append("--line-classic")
     if o["navigation"] == "cones":
         if not o["estimator"]:
             parts.append("--no-estimator")
@@ -1000,6 +1004,7 @@ class RsyncGUI(tk.Tk):
             ("cone_debug", "Debug de cones (jsonl + quadros)"),
             ("curve_echo", "Ultrassom ignora cone da borda na curva"),
             ("trim_learning", "Aprender o centro da direção (trim)"),
+            ("line_highcam", "Linha: câmera alta (vista de cima)"),
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])
@@ -1032,7 +1037,7 @@ class RsyncGUI(tk.Tk):
         options = self.mission_options()
         cones = options.get("navigation") == "cones"
         for key, check in self.mission_checks.items():
-            enabled = cones or key not in CONE_ONLY_OPTIONS
+            enabled = (cones or key not in CONE_ONLY_OPTIONS) and (not cones or key not in LINE_ONLY_OPTIONS)
             if key in ("pure_pursuit", "preview"):
                 enabled = enabled and options.get("estimator", True)
             check.state(["!disabled"] if enabled else ["disabled"])

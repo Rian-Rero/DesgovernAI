@@ -15,6 +15,8 @@ import numpy as np
 
 from tools.yellow_path import PathResult, PathSettings, YellowPathDetector, render_path
 
+LINE_RECOVERY_SPEED = .35  # m/s: linha so pela memoria do estimador ou incerta
+
 
 @dataclass(frozen=True)
 class LineObservation:
@@ -162,9 +164,52 @@ def _path_settings(value):
     return settings
 
 
+class BirdsEyeView:
+    """Vista de cima do chao a partir da homografia: x de near a far m a frente
+    (para cima na imagem), y de +-half_width m (esquerda a esquerda), 1 px =
+    resolution m. Com a camera alta (para ver cones), a linha amarela aparece
+    deitada e comprimida perto do horizonte; vista de cima ela volta a ficar
+    como com a camera inclinada para baixo, onde o detector foi ajustado."""
+
+    def __init__(self, calibration, near=.5, far=3., half_width=1.4, resolution=.01):
+        homography = np.asarray(calibration.homography, float)
+        self.size = (int(round(2*half_width/resolution)), int(round((far-near)/resolution)))
+        self.ground_to_view = np.array([[0., -1/resolution, half_width/resolution],
+                                        [-1/resolution, 0., far/resolution],
+                                        [0., 0., 1.]])
+        self.matrix = self.ground_to_view @ homography  # pixel da camera -> pixel da vista
+        self.view_to_ground = np.linalg.inv(self.ground_to_view)
+
+    def warp(self, frame):
+        return cv2.warpPerspective(frame, self.matrix, self.size, flags=cv2.INTER_LINEAR)
+
+    def to_ground(self, pixels):
+        pixels = np.asarray(pixels, float).reshape(-1, 2)
+        return (np.c_[pixels, np.ones(len(pixels))] @ self.view_to_ground.T)[:, :2]
+
+
+def line_samples(points, spacing=.15, near=.3, far=3.):
+    """Pontos da linha (Nx2, chao) espacados ~spacing m ao longo dela, para o
+    estimador: dezenas de pixels vizinhos seriam a mesma medida repetida."""
+    points = np.asarray(points, float).reshape(-1, 2)
+    points = points[(points[:, 0] > near) & (points[:, 0] <= far)]
+    if len(points) < 2:
+        return points
+    points = points[np.argsort(points[:, 0])]
+    keep, last = [0], points[0]
+    for index in range(1, len(points)):
+        if np.hypot(*(points[index] - last)) >= spacing:
+            keep.append(index)
+            last = points[index]
+    return points[keep]
+
+
 class RealLineDetector:
     def __init__(self, calibration, path_settings=None, anchor=.5, render_preview=True,
-                 processing_width=0):
+                 processing_width=0, birdseye=False, estimator=None):
+        """birdseye: detecta a linha na vista de cima do chao (camera alta, a dos
+        cones). estimator: True/dict de CorridorSettings para seguir a linha com
+        o estimador do corredor (clotoide + odometria); None usa o ajuste antigo."""
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('RealLineDetector requer GroundCalibration em metros.')
         if not isinstance(anchor, (int, float)) or not math.isfinite(anchor) or not 0 <= anchor <= 1:
@@ -179,8 +224,23 @@ class RealLineDetector:
         width, height = calibration.image_size
         self.processing_size = ((width, height) if processing_width == 0 else
                                 (processing_width, max(1, round(height * processing_width / width))))
+        self.view = BirdsEyeView(calibration) if birdseye else None
+        self.detect_settings = self.settings
+        if self.view is not None:
+            self.processing_size = self.view.size
+            # Na vista de cima nao ha horizonte (roi 0) e a linha visivel e curta
+            # em curva fechada (a camera ve so ~0,5 m dela).
+            self.detect_settings = replace(self.settings, roi_top=0, min_span=min(self.settings.min_span, 15))
         self.detector = YellowPathDetector()
         self.detector.reset(anchor=self.anchor)
+        self.odometry = None  # PoseHistory do laco de controle (como nos cones)
+        self.last_timestamp = None
+        self.estimator = None
+        if estimator not in (None, False):
+            from .corridor import CorridorEstimator, CorridorSettings
+            self.estimator = CorridorEstimator(
+                CorridorSettings.from_value(estimator, track_width_m=1., max_range_m=3.),
+                calibration.homography, 1.)
 
     def observe_frame(self, frame, timestamp):
         if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
@@ -194,10 +254,16 @@ class RealLineDetector:
             return LineObservation(timestamp, reason='Resolucao diferente da calibracao da camera',
                                    source_frame=frame)
         detection_at = time.perf_counter()
+        motion = None
+        if self.odometry is not None and self.last_timestamp is not None:
+            motion = self.odometry.delta(self.last_timestamp, timestamp)
+        self.last_timestamp = timestamp
         processing_frame = frame
-        if self.processing_size != self.calibration.image_size:
+        if self.view is not None:
+            processing_frame = self.view.warp(frame)
+        elif self.processing_size != self.calibration.image_size:
             processing_frame = cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
-        result = self.detector.process(processing_frame, self.settings, timestamp=timestamp)
+        result = self.detector.process(processing_frame, self.detect_settings, timestamp=timestamp)
         metadata = {'source_frame': frame, 'path_result': result,
                     'processing_size': self.processing_size,
                     'detection_seconds': time.perf_counter() - detection_at}
@@ -206,8 +272,10 @@ class RealLineDetector:
             display = self._preview(frame, result)
         # A validacao de evidencia pertence ao detector compartilhado. O modo
         # pontilhado pode aceitar suporte < 50% apos validar as duas tangentes.
-        if (not result.valid or not math.isfinite(result.support)
-                or not 0 <= result.support <= 1):
+        detected = (result.valid and math.isfinite(result.support) and 0 <= result.support <= 1)
+        if self.estimator is not None:
+            return self._estimate(timestamp, result, detected, motion, display, metadata)
+        if not detected:
             return LineObservation(timestamp, frame=display, reason=result.status, **metadata)
         geometry_at = time.perf_counter()
         path_pixels = cv2.countNonZero(result.path_mask)
@@ -215,13 +283,9 @@ class RealLineDetector:
                          cv2.countNonZero(cv2.bitwise_and(result.dash_mask, result.path_mask)))
         metadata.update(color_support=float(result.support),
                         dash_fraction=bridge_pixels / max(1, path_pixels))
-        pixels = result.center
-        if self.processing_size != self.calibration.image_size:
-            # cv2.resize alinha centros de pixel. Retorna a grade original
-            # ANTES da homografia, sem reutilizar pixels pequenos como grandes.
-            scale = np.asarray(self.calibration.image_size) / self.processing_size
-            pixels = (pixels.astype(float) + .5) * scale - .5
-        points = self.calibration.project_pixels(pixels)
+        # cv2.resize alinha centros de pixel: volta a grade original ANTES da
+        # homografia; na vista de cima, a conversao e direta para o chao.
+        points = self._ground_points(result)
         try:
             errors = fit_line_errors(points, [0., 0.], [1., 0.], with_curvature=True)
         except (ValueError, np.linalg.LinAlgError, FloatingPointError):
@@ -234,6 +298,37 @@ class RealLineDetector:
         return LineObservation(timestamp, tuple(float(x) for x in errors), display, result.status,
                                **metadata)
 
+    def _ground_points(self, result):
+        pixels = result.center
+        if self.view is not None:
+            return self.view.to_ground(pixels)
+        if self.processing_size != self.calibration.image_size:
+            scale = np.asarray(self.calibration.image_size) / self.processing_size
+            pixels = (pixels.astype(float) + .5) * scale - .5
+        return self.calibration.project_pixels(pixels)
+
+    def _estimate(self, timestamp, result, detected, motion, display, metadata):
+        """Linha como linha central do estimador do corredor; segue pela memoria
+        (odometria) em quadros sem deteccao."""
+        geometry_at = time.perf_counter()
+        center = np.empty((0, 2))
+        if detected:
+            path_pixels = cv2.countNonZero(result.path_mask)
+            bridge_pixels = (0 if result.dash_mask is None else
+                             cv2.countNonZero(cv2.bitwise_and(result.dash_mask, result.path_mask)))
+            metadata.update(color_support=float(result.support),
+                            dash_fraction=bridge_pixels / max(1, path_pixels))
+            center = line_samples(self._ground_points(result))
+        estimate = self.estimator.step(float(timestamp), [], [], motion, motion is not None, center=center)
+        metadata['geometry_seconds'] = time.perf_counter() - geometry_at
+        if not estimate.valid:
+            reason = result.status if not detected else estimate.reason
+            return LineObservation(timestamp, frame=display, reason=reason, **metadata)
+        return LineObservation(
+            timestamp, tuple(float(x) for x in estimate.errors), display, estimate.reason,
+            path_dkappa=float(estimate.state_vector[3]), speed_factor=estimate.speed_factor,
+            speed_limit=LINE_RECOVERY_SPEED if estimate.slow else math.inf, **metadata)
+
     def with_preview(self, observation):
         """Desenha sob demanda, sem refazer deteccao nem alterar o horario."""
         if (observation is None or observation.frame is not None
@@ -243,20 +338,25 @@ class RealLineDetector:
 
     def roi_row(self):
         """Primeira linha usada pelo detector da linha (roi_top), na grade de processamento."""
-        return int(self.processing_size[1] * self.settings.roi_top / 100)
+        return int(self.processing_size[1] * self.detect_settings.roi_top / 100)
 
     def preview_bgr(self, observation):
         """Deteccao desenhada na grade de processamento, em BGR (transmissao)."""
         if observation is None or observation.source_frame is None:
             return None
         if observation.path_result is None:
+            if self.view is not None:
+                return self.view.warp(observation.source_frame)
             return cv2.resize(observation.source_frame, self.processing_size, interpolation=cv2.INTER_AREA)
         return self._render_small(observation.source_frame, observation.path_result)
 
     def _render_small(self, frame, result):
         size = result.path_mask.shape[1::-1]
-        source = frame if frame.shape[1::-1] == size else cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-        return render_path(source, result, self.settings, self.anchor)
+        if self.view is not None:
+            source = self.view.warp(frame)  # transmissao mostra a vista de cima
+        else:
+            source = frame if frame.shape[1::-1] == size else cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+        return render_path(source, result, self.detect_settings, self.anchor)
 
     def _preview(self, frame, result):
         display = self._render_small(frame, result)

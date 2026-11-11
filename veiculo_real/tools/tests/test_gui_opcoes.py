@@ -61,6 +61,10 @@ class MissionOptionsTests(unittest.TestCase):
                                        "classifier": True, "estimator": False})
         settings = parsed(line)
         self.assertEqual(settings["navigation_mode"], "line")
+        self.assertNotIn("line_birdseye", settings)  # padrao: camera alta
+        classic = parsed(gui.build_main_command({"navigation": "line", "line_highcam": False}))
+        self.assertEqual((classic["line_birdseye"], classic["line_estimator"]), (False, False))
+        self.assertNotIn("--line-classic", gui.build_main_command({"line_highcam": False}))  # so na linha
         self.assertFalse({"steering_law", "record_frames_hz", "cone_classifier", "cone_estimator"} & set(settings))
 
     def test_only_main_lines_are_rewritten(self):

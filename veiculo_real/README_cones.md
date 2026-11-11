@@ -273,6 +273,32 @@ mostra `Ultrassom a 0.45 m ignorado: cone da borda direita na curva` (no
 máximo 1 vez por segundo), e o `car.csv` traz `obstacle_ignored`. Para parar
 por qualquer eco: `--strict-ultrasonic`, ou desmarcar a caixa na GUI.
 
+### Linha amarela com a câmera alta
+
+Com a câmera apontada para baixo, a linha aparecia "em pé" na imagem. Com a
+câmera alta (a dos cones), ela deita e fica comprimida perto do horizonte. Nas
+curvas fechadas o detector antigo, que procura uma coluna por linha da imagem,
+não a acha. Além disso, o ajuste por parábola ou arco errava o rumo, às vezes com
+o sinal trocado. Agora (`line_birdseye`, `line_estimator`, ligados por padrão):
+
+- **Vista de cima** (`BirdsEyeView`): a homografia leva a imagem a uma vista do
+  chão de 0,5 a 3 m à frente e ±1,4 m para os lados, a 1 cm por pixel (280×250).
+  Nela a linha volta a ficar como na câmera inclinada, e o mesmo detector e os
+  mesmos `path_settings` funcionam (sem ROI; extensão mínima de 15%). A
+  conversão leva ~6 ms por quadro. A transmissão mostra essa vista de cima.
+- **Estimador**: os pontos da linha (um a cada 15 cm) entram no estimador do
+  corredor como linha central (estado `LINHA`), com clotoide e odometria. Daí
+  saem pure pursuit, prévia de curva e limite de visibilidade, como nos cones.
+  Na curva fechada à esquerda a linha sai da imagem (câmera 8° à direita); a
+  memória vai até 2,5 m / 5 s, com a curvatura mais estável que nos cones.
+
+Na foto do corredor com uma fita sintética: as retas (com até 25 cm de
+deslocamento e rumo de 0,2 rad) erram milímetros. Rodando a pista com curvas de
+1,25 m, as imagens tiveram 75/75 quadros válidos e erro lateral mediano de 1 cm
+(máximo de 4,6 cm). Na pista virtual (`--linha`), o pure pursuit teve 1,4–3,8 cm
+de RMS, contra 5,4–7,5 cm do Stanley. Para voltar ao modo antigo (câmera
+inclinada para baixo): `--line-classic`, ou desmarcar "Linha: câmera alta" na GUI.
+
 ### Pista virtual (sem o carro)
 
 `tools/pista_virtual.py` roda o **mesmo código do carro** em malha fechada:

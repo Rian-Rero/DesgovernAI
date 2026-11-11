@@ -207,6 +207,23 @@ class SimCamera:
         q = np.c_[pixels, np.ones(len(pixels))] @ self.H.T
         return q[:, :2]/q[:, 2:3]
 
+    def observe_line(self, car, track, spacing=.15, line_sigma=.01, miss=.05):
+        """Pontos da linha amarela (linha central da pista) visiveis na imagem,
+        espacados como o detector entrega ao estimador (line_samples)."""
+        if self.rng.random() < miss:
+            return np.empty((0, 2))
+        c, s = math.cos(car.th), math.sin(car.th)
+        d = track.center[::max(1, int(round(spacing/.02)))] - car.front
+        local = np.c_[c*d[:, 0] + s*d[:, 1], -s*d[:, 0] + c*d[:, 1]]
+        local = local[(local[:, 0] > .3) & (local[:, 0] < 3.)]
+        if not len(local):
+            return local
+        pixels, _ = self._to_pixels(local)
+        inside = ((pixels[:, 0] >= 0) & (pixels[:, 0] < self.size[0]) & (pixels[:, 1] >= 0)
+                  & (pixels[:, 1] < self.size[1]))
+        local = local[inside]
+        return local + self.rng.normal(0., line_sigma, local.shape) if len(local) else local
+
     def observe(self, car, track):
         """Cones (esquerda, direita) no referencial do eixo dianteiro, como o detector entrega."""
         c, s = math.cos(car.th), math.sin(car.th)
@@ -251,7 +268,7 @@ def track_error(track, point, hint):
 
 
 def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), duration=None, coast=.5,
-        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0.):
+        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False):
     """Uma volta; devolve dicionario de metricas (e a serie, com trace)."""
     import main as vehicle_main
 
@@ -282,9 +299,13 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         now = car.t
         poses.append(now, *car.odo)
         if now >= next_capture:
-            left, right = camera.observe(car, track)
             motion = poses.delta(last_capture, now) if last_capture is not None else None
-            estimate = estimator.step(now, left, right, motion, pose_frame=True)
+            if line:  # linha amarela no centro, vista de cima -> estimador como linha central
+                estimate = estimator.step(now, [], [], motion, pose_frame=True,
+                                          center=camera.observe_line(car, track))
+            else:
+                left, right = camera.observe(car, track)
+                estimate = estimator.step(now, left, right, motion, pose_frame=True)
             last_capture = now
             frames += 1
             states[estimate.state] += 1
@@ -372,6 +393,8 @@ def plot(track, results, path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--pista', nargs='+', default=list(TRACKS), choices=list(TRACKS))
+    parser.add_argument('--linha', action='store_true',
+                        help='segue a linha amarela no centro (estimador como linha central) em vez dos cones')
     parser.add_argument('--law', nargs='+', default=['stanley', 'pure_pursuit'], choices=['stanley', 'pure_pursuit'])
     parser.add_argument('--width', type=float, default=1.8, help='largura real da pista, m')
     parser.add_argument('--width-end', type=float, help='largura no fim da pista (varia linearmente)')
@@ -405,7 +428,7 @@ def main(argv=None):
                                     rng=np.random.default_rng(100 + seed))
                 result = run(track, config, seed=seed, coast=args.coast, trace=bool(args.plot) and seed == 0,
                              latency=tuple(args.latency), fps=args.fps, servo_tau=args.servo_tau,
-                             steer_bias_deg=args.steer_bias,
+                             steer_bias_deg=args.steer_bias, line=args.linha,
                              camera_kwargs=dict(row_bias=args.row_bias, column_bias=args.column_bias))
                 results.append(result)
                 if 'trace' in result:
