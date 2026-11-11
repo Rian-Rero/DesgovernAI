@@ -27,7 +27,7 @@ def parsed(command):
 class MissionOptionsTests(unittest.TestCase):
     def test_default_command_is_unchanged(self):
         self.assertEqual(gui.build_main_command({}),
-                         "python3 -u main.py --navigation cones --vision-width 0 --steering-filter 3"
+                         "python3 -u main.py --navigation cones --vision-width 320 --steering-filter 3"
                          " --speed 0.7 --stream 8080")
 
     def test_every_checkbox_combination_is_accepted_by_main(self):
@@ -51,11 +51,11 @@ class MissionOptionsTests(unittest.TestCase):
                 self.assertEqual(settings.get("steering_trim_learning", True), options["trim_learning"])
 
     def test_values_and_line_mode(self):
-        settings = parsed(gui.build_main_command({"speed": "2.0", "vision_width": "320", "steering_filter": "1",
+        settings = parsed(gui.build_main_command({"speed": "2.0", "vision_width": "480", "steering_filter": "1",
                                                   "record_hz": "5", "record_frames": True, "min_radius": "2.0"}))
         self.assertEqual((settings["velocity_reference"], settings["vision_width"],
                           settings["steering_filter_size"], settings["record_frames_hz"],
-                          settings["min_curve_radius_m"]), (2., 320, 1, 5., 2.0))
+                          settings["min_curve_radius_m"]), (2., 480, 1, 5., 2.0))
         self.assertNotIn("min_curve_radius_m", parsed(gui.build_main_command({})))  # 1.2: padrao do main.py
         line = gui.build_main_command({"navigation": "line", "pure_pursuit": False, "record_frames": True,
                                        "classifier": True, "estimator": False})

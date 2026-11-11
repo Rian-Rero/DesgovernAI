@@ -124,6 +124,39 @@ class EstimatorTests(unittest.TestCase):
         self.assertEqual(estimate.rejected, 1)
         np.testing.assert_allclose(est.x[:3], before[:3], atol=.02)
 
+    def test_object_beside_the_track_is_left_out_by_the_band(self):
+        # Mochila 50 cm fora da borda esquerda, 2,5 m a frente: o portao estatistico
+        # (largo longe) a aceita; a faixa em torno da borda ajustada a tira.
+        results = {}
+        for band in (0., .2):
+            est = estimator(band_m=band, band_growth=.1)
+            self.drive(est, [0., 0., 0., 0., WIDTH], frames=3, step=.05)
+            left, right = cones(est.x)
+            estimate = est.step(1., np.vstack([left, [[2.5, WIDTH/2 + .5]]]), right, (.05, 0., 0.),
+                                pose_frame=False)
+            results[band] = (estimate.rejected, est.band_rejected, estimate.width_m, estimate.errors)
+        self.assertEqual(results[0.][0], 0)                    # sem faixa: entrou
+        self.assertEqual(results[.2][:2], (1, 1))               # com faixa: saiu pela faixa
+        self.assertAlmostEqual(results[.2][2], WIDTH, delta=.05)
+        self.assertGreater(abs(results[0.][2] - WIDTH), abs(results[.2][2] - WIDTH))
+
+    def test_band_keeps_the_cones_of_a_curve_starting_ahead(self):
+        # Curva comecando a frente: todos os cones longe saem da previsao reta,
+        # juntos; o ajuste os acompanha e a faixa nao tira nenhum.
+        est = estimator()
+        self.assertGreater(est.settings.band_m, 0.)  # ligada por padrao
+        removed = []
+        original = est.update
+
+        def update(*args, **kwargs):
+            result = original(*args, **kwargs)
+            removed.append(est.band_rejected)
+            return result
+        est.update = update
+        estimate, _ = self.drive(est, [0., 0., -.2, .3, WIDTH], frames=12, stop=2.6)
+        self.assertTrue(estimate.valid, estimate.reason)
+        self.assertEqual(sum(removed), 0)
+
     def test_memory_then_lost(self):
         est = estimator(memory_m=.5)
         self.drive(est, [0., 0., 0., 0., WIDTH], frames=10)

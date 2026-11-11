@@ -40,7 +40,7 @@ class BirdsEyeTests(unittest.TestCase):
         q = np.c_[ground, np.ones(3)] @ view.ground_to_view.T
         pixels = q[:, :2]/q[:, 2:3]
         np.testing.assert_allclose(view.to_ground(pixels), ground, atol=1e-9)
-        self.assertEqual(view.size, (280, 250))
+        self.assertEqual(view.size, (200, 250))  # +-1,0 m a 1 cm/px
         # Linha reta a frente: coluna do meio da vista (y = 0).
         self.assertAlmostEqual(pixels[0, 0], view.size[0]/2, places=6)
 
@@ -107,3 +107,25 @@ class VirtualLineTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FalseLineTests(unittest.TestCase):
+    def test_pale_floor_streak_is_not_taken_as_the_tape(self):
+        # Reflexo morno do piso: mesmo matiz da fita, saturacao baixa (S ~30).
+        from fva_car.lateral import LINE_MIN_SATURATION
+        detector = RealLineDetector(CALIBRATION, path_settings=main.parameters['path_settings'],
+                                    render_preview=False, birdseye=True)
+        pale = floor_with_line(np.array([0., 0., 0., 0., 1.]))
+        hsv = cv2.cvtColor(pale, cv2.COLOR_BGR2HSV)
+        line = hsv[..., 1] > 100
+        hsv[..., 1][line] = 28
+        observation = detector.observe_frame(cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR), 1.)
+        self.assertFalse(observation.valid)
+        self.assertLess(28, LINE_MIN_SATURATION)
+
+    def test_cones_are_erased_before_the_top_view(self):
+        from fva_car.lateral import mask_cones
+        frame = np.full((480, 640, 3), (150, 156, 158), np.uint8)
+        cv2.rectangle(frame, (300, 300), (330, 360), (40, 160, 40), -1)  # cone verde
+        cleaned = mask_cones(frame)
+        self.assertLess(np.abs(cleaned[330, 315].astype(int) - [150, 156, 158]).max(), 3)

@@ -17,6 +17,7 @@ import cv2
 from fva_car.cone_debug import ConeDebugRecorder
 from fva_car.cones import RealConeDetector
 from fva_car.obstacle import curve_echo
+from fva_car.version import code_version
 from fva_car.odometry import PoseHistory, SharedPoseHistory
 from fva_car.vision_process import VisionProcess, capture_func, vision_func  # noqa: F401
 from fva_car.lateral import (
@@ -33,6 +34,9 @@ TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20
 STOP_REACTION_TIME = 0.30
 STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
+# Abaixo disto a leitura do ultrassom e falha do sensor (ensaio de 10/11: 0,00 m
+# com nada a frente); um obstaculo real passa antes pela faixa de parada.
+ULTRASONIC_MIN_VALID_M = 0.03
 
 parameters = {
     "ts": 30.0,
@@ -113,6 +117,11 @@ parameters = {
     # liga com os ajustes padrao; dicionario muda ajustes de CorridorSettings
     # (ex.: {"memory_m": 0.6}); False volta ao ajuste quadro a quadro.
     "cone_estimator": True,
+    # Fita amarela no centro do corredor de cones (pista de 10/11): entra no
+    # estimador como linha central. Perto de y = 0 a calibracao e boa; os cones a
+    # +-0,6 m dependem da extrapolacao (centro estimado ~10 cm fora da fita).
+    # Sem fita na pista, nada muda (so o custo da busca, ~5 ms no notebook).
+    "cone_line_fusion": True,
     # Com o estimador: direcao por pure pursuit no centro estimado (alvo a
     # pursuit_min_lookahead_m + pursuit_lookahead_s*v do eixo dianteiro). Na pista
     # virtual (tools/pista_virtual.py) teve metade do erro do Stanley, inclusive
@@ -151,18 +160,32 @@ parameters = {
     # parada: 9 das 13 rodadas de 10/11 pararam por uma leitura isolada falsa.
     # Entra tambem na distancia de parada. 0 volta a parar na primeira leitura.
     "obstacle_confirm_s": 0.15,
-    # Centralizacao: o erro lateral em reta (duas bordas) vira um ajuste do centro
-    # do SERVO (trim), igual para Stanley e pure pursuit; a odometria continua com
-    # o esterco pretendido. Nos ensaios de 10/11 o carro andava 2-12 cm a direita.
+    # Velocidade limitada pelo atraso da imagem: v <= isto / idade media (m). Com
+    # 0,3 s de atraso (ensaios de 10/11) da ~1 m/s; com a visao rapida, nao limita.
+    "latency_speed_budget_m": 0.3,
+    # Centralizacao: em reta (duas bordas) o carro aprende o centro do SERVO
+    # (trim), igual para Stanley e pure pursuit; a odometria continua com o
+    # esterco pretendido. Nos ensaios de 10/11 o carro andava 2-12 cm a direita.
+    # Aprende pelo esterco MEDIO na reta (seguindo reta, a roda real fica em 0):
+    # sem IMU, o vies da direcao entorta tambem a odometria e o estimador, que
+    # ve o carro "no centro" com ele a 11 cm (pista virtual, 2 graus de vies).
+    # Pista virtual, 4 pistas, vies de +-2 graus, visao a 7 q/s: 3,8-8,7 cm RMS
+    # pelo esterco (0,3) contra 5,2-12,3 pelo erro lateral (centering_gain 0,15).
     # O trim aprendido e salvo em logs/direcao_trim.json e a corrida seguinte
-    # comeca dele (pista virtual: vies de 3 graus some na 2a corrida).
-    "centering_gain": 0.15,          # rad por (m*s), so em reta
+    # comeca dele.
+    "centering_steer_gain": 0.3,     # 1/s: trim += 0,3 * esterco comandado * dt, so em reta
+    "centering_gain": 0.0,           # rad por (m*s) do erro lateral estimado (antigo: 0,15)
     "steering_trim_deg": 0.0,        # trim inicial se ainda nao houver o arquivo
     "steering_trim_learning": True,  # False: trim fixo (steering_trim_deg), sem aprender
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
-    "vision_width": 0,  # 0: grade original; 320/480: visao reduzida, homografia original
+    # Largura do processamento dos cones (0 = 640 original). 320: deteccao ~2,5x mais
+    # rapida (no Pi ~95 -> ~35 ms; ensaios de 10/11 rodaram a 6-9 quadros/s com
+    # 260-290 ms de atraso). Nos 617 quadros reais de 10/11, em relacao a 640:
+    # 98% dos cones ate 1,5 m, 94% ate 2,2 m e 86% ate 3 m. 480: 99/97/91%, so 28%
+    # mais rapido. A linha amarela usa a vista de cima e ignora isto.
+    "vision_width": 320,
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
@@ -317,6 +340,7 @@ def save_vision_snapshot(car, observation, status, now):
                 if not cv2.imwrite(str(folder / name), frame):
                     raise OSError(f"Nao foi possivel salvar {name}")
         data = {
+            "code_version": code_version(),
             "control_status": status,
             "vision_reason": observation.reason,
             "metric_line_valid": bool(observation.valid),
@@ -463,6 +487,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         raise ValueError("steering_filter_size deve ser inteiro positivo.")
     # Valida geometria e ajustes antes de abrir sensores ou atuar nos motores.
     calibration = GroundCalibration.from_file(config["camera_calibration_file"])
+    version = code_version()
+    print(f"Codigo: versao {version}", flush=True)
     mode = config.get("navigation_mode", "cones")
     if mode == "cones":
         corridor = corridor_settings(config)
@@ -470,6 +496,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             calibration, settings=config.get("cone_settings"), render_preview=False,
             processing_width=config.get("vision_width", 0),
             classifier=config.get("cone_classifier"), corridor=corridor,
+            line_fusion=bool(config.get("cone_line_fusion", False)),
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -495,7 +522,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         print(f"Direcao: trim {config['steering_trim_deg']:+.1f} graus"
               + (" (aprendendo nas retas)" if config.get("steering_trim_learning", True) else ""), flush=True)
     if not config.get("steering_trim_learning", True):
-        config["centering_gain"] = 0.0
+        config["centering_gain"] = config["centering_steer_gain"] = 0.0
     follower = RealStanleyFollower(config)
     stream = None
     if config.get("stream_port"):
@@ -515,6 +542,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     if mode == "cones" or line_estimator_settings(config) is not None:
         # A visao leva o mapa de cones (ou a linha) pela odometria registrada pelo controle.
         poses = SharedPoseHistory() if use_process else PoseHistory()
+        # O seguidor leva a foto ao instante do comando pela velocidade e guinada
+        # atuais (pista virtual, atraso de 0,3-0,4 s: melhor que pelo historico).
         if not use_process:
             detector.odometry = poses
     vision = None
@@ -523,7 +552,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             detector_kwargs = dict(settings=config.get("cone_settings"),
                                    processing_width=config.get("vision_width", 0),
                                    classifier=config.get("cone_classifier"),
-                                   corridor=corridor_settings(config))
+                                   corridor=corridor_settings(config),
+                                   line_fusion=bool(config.get("cone_line_fusion", False)))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -562,6 +592,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             recorder = ConeDebugRecorder(folder, max_event_frames=config.get("cone_max_event_frames", 300),
                                          record_hz=record_hz)
             recorder.notes["calibration_warnings"] = calibration_warnings
+            recorder.notes["code_version"] = version
         except OSError as error:
             print(f"Debug de cones desativado: {error}", flush=True)
     stop_event = threading.Event()
@@ -657,7 +688,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             stop_distance = stopping_distance(car.v, confirm_s)
             observation = vision_data["observation"]
             echo_ignored = False
-            close = valid and np.isfinite(dist) and dist <= stop_distance
+            close = (valid and np.isfinite(dist) and ULTRASONIC_MIN_VALID_M <= dist <= stop_distance)
             if not close:
                 echo_since = None
             if not obstacle_detected and close:

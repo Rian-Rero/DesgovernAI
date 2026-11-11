@@ -171,7 +171,10 @@ class BirdsEyeView:
     deitada e comprimida perto do horizonte; vista de cima ela volta a ficar
     como com a camera inclinada para baixo, onde o detector foi ajustado."""
 
-    def __init__(self, calibration, near=.5, far=3., half_width=1.4, resolution=.01):
+    def __init__(self, calibration, near=.5, far=3., half_width=1., resolution=.01, edge_px=9):
+        """half_width 1 m: a fita fica a +-0,6 m do carro; alem disso entram as
+        paredes e portas (madeira, quase amarela). edge_px: faixa descartada na
+        borda do campo de visao, onde a borda da imagem vira uma "linha"."""
         homography = np.asarray(calibration.homography, float)
         self.size = (int(round(2*half_width/resolution)), int(round((far-near)/resolution)))
         self.ground_to_view = np.array([[0., -1/resolution, half_width/resolution],
@@ -179,13 +182,49 @@ class BirdsEyeView:
                                         [0., 0., 1.]])
         self.matrix = self.ground_to_view @ homography  # pixel da camera -> pixel da vista
         self.view_to_ground = np.linalg.inv(self.ground_to_view)
+        width, height = calibration.image_size
+        seen = cv2.warpPerspective(np.full((height, width), 255, np.uint8), self.matrix, self.size,
+                                   flags=cv2.INTER_NEAREST)
+        self.valid = cv2.erode(seen, np.ones((edge_px, edge_px), np.uint8)) if edge_px else seen
 
     def warp(self, frame):
-        return cv2.warpPerspective(frame, self.matrix, self.size, flags=cv2.INTER_LINEAR)
+        view = cv2.warpPerspective(frame, self.matrix, self.size, flags=cv2.INTER_LINEAR)
+        view[self.valid == 0] = 0
+        return view
 
     def to_ground(self, pixels):
         pixels = np.asarray(pixels, float).reshape(-1, 2)
         return (np.c_[pixels, np.ones(len(pixels))] @ self.view_to_ground.T)[:, :2]
+
+
+def mask_cones(frame, dilate=7):
+    """Pinta os cones (verde e vermelho saturados) com a cor do piso, na camera.
+
+    Na vista de cima um cone em pe vira uma faixa longa; na borda dela o verde
+    misturado ao piso morno cai no matiz do amarelo e o detector seguia essa
+    faixa em vez da fita (ensaios de 10/11)."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    cones = (cv2.inRange(hsv, (38, 45, 30), (95, 255, 255))
+             | cv2.inRange(hsv, (0, 70, 40), (12, 255, 255))
+             | cv2.inRange(hsv, (165, 70, 40), (179, 255, 255)))
+    if not cv2.countNonZero(cones):
+        return frame
+    cones = cv2.dilate(cones, np.ones((dilate, dilate), np.uint8))
+    floor = np.median(frame[frame.shape[0]//2::4, ::4].reshape(-1, 3), axis=0)
+    output = frame.copy()
+    output[cones > 0] = floor.astype(np.uint8)
+    return output
+
+
+LINE_MIN_SATURATION = 36  # S mediana ao longo da fita: reflexo do piso ~25-30, fita ~49
+
+
+def line_saturation(view, result):
+    """Saturacao mediana dos pixels amarelos da faixa achada (0 sem pixels)."""
+    pixels = (result.path_mask > 0) & (result.raw_mask > 0)
+    if not np.any(pixels):
+        return 0.
+    return float(np.median(cv2.cvtColor(view, cv2.COLOR_BGR2HSV)[..., 1][pixels]))
 
 
 def line_samples(points, spacing=.15, near=.3, far=3.):
@@ -230,7 +269,8 @@ class RealLineDetector:
             self.processing_size = self.view.size
             # Na vista de cima nao ha horizonte (roi 0) e a linha visivel e curta
             # em curva fechada (a camera ve so ~0,5 m dela).
-            self.detect_settings = replace(self.settings, roi_top=0, min_span=min(self.settings.min_span, 15))
+            self.detect_settings = replace(self.settings, roi_top=0, min_span=min(self.settings.min_span, 15),
+                                           h_max=min(self.settings.h_max, 35))
         self.detector = YellowPathDetector()
         self.detector.reset(anchor=self.anchor)
         self.odometry = None  # PoseHistory do laco de controle (como nos cones)
@@ -260,7 +300,7 @@ class RealLineDetector:
         self.last_timestamp = timestamp
         processing_frame = frame
         if self.view is not None:
-            processing_frame = self.view.warp(frame)
+            processing_frame = self.view.warp(mask_cones(frame))
         elif self.processing_size != self.calibration.image_size:
             processing_frame = cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
         result = self.detector.process(processing_frame, self.detect_settings, timestamp=timestamp)
@@ -273,6 +313,12 @@ class RealLineDetector:
         # A validacao de evidencia pertence ao detector compartilhado. O modo
         # pontilhado pode aceitar suporte < 50% apos validar as duas tangentes.
         detected = (result.valid and math.isfinite(result.support) and 0 <= result.support <= 1)
+        if detected and self.view is not None and line_saturation(processing_frame, result) < LINE_MIN_SATURATION:
+            # Faixa fraca demais para ser a fita (reflexo, resto de cone): sem
+            # resposta; o estimador segue pela memoria. Nos quadros de 10/11:
+            # responde em ~53% com 86% de acerto, contra 97% com 47%.
+            detected = False
+            result.status = 'Faixa fraca (reflexo?): seguindo a memoria'
         if self.estimator is not None:
             return self._estimate(timestamp, result, detected, motion, display, metadata)
         if not detected:
@@ -589,6 +635,9 @@ def preview_speed(errors, dkappa, reference, distance, lateral_accel=.6, deceler
 
 
 MAX_LATENCY_COMPENSATION = .25  # s; idade tipica da imagem: 0,12 a 0,19 s
+# Com o caminho do estimador (clotoide) e a odometria, a compensacao e exata e
+# cobre a idade real da imagem: nos ensaios de 10/11 ela chegou a 0,42 s.
+MAX_EXACT_COMPENSATION = .5
 # Entre quadros (~60 ms) o carro gira < 0,2 rad mesmo a 1,5 m/s no batente.
 # Saltos maiores sao deteccao errada (reflexo, outra faixa) e sao descartados,
 # mas no maximo MAX_REJECTED_FRAMES seguidos: uma mudanca real e aceita depois.
@@ -692,6 +741,12 @@ class RealStanleyFollower:
         # Curva mais fechada que pode aparecer logo depois do trecho visto (1/m);
         # 0 desliga o limite de visibilidade (so curvas ja vistas reduzem).
         self.sight_curvature = nonnegative('speed_sight_curvature', 0.)
+        # Velocidade pelo atraso da imagem: o carro anda as cegas v*idade entre a
+        # foto e o comando; limita a no maximo este trecho (m). 0 desliga.
+        self.latency_budget = nonnegative('latency_speed_budget_m', 0.)
+        self.age_average = None
+        self.odometry = None  # PoseHistory do laco de controle (compensacao exata)
+        self.exact_compensation = self.settings.get('exact_latency_compensation', True)
         # Curva vista por uma cor so: multiplica o esterco pedido e a taxa do
         # volante (1 = sem reforco). A borda interna saiu da imagem e o carro
         # tendia a virar tarde/pouco.
@@ -703,6 +758,12 @@ class RealStanleyFollower:
         # a direita do centro nos ensaios de 10/11. Integra so com referencia
         # confiavel (duas bordas, sem perda), andando, e com limite.
         self.centering_gain = nonnegative('centering_gain', 0.)  # rad por (m*s)
+        # Trim pelo esterco medio na reta: seguindo uma reta, a roda real fica em 0,
+        # entao o comando medio vale -(vies + trim). Nao depende do erro estimado,
+        # que fica enviesado junto com a odometria (sem IMU, a guinada vem do
+        # esterco comandado): na pista virtual, 2 graus de vies davam 11 cm de erro
+        # real com o estimador vendo -2 cm.
+        self.centering_steer_gain = nonnegative('centering_steer_gain', 0.)  # 1/s
         self.centering_limit = math.radians(nonnegative('centering_limit_deg', 4.))
         self.centering_min_speed = nonnegative('centering_min_speed', .2)
         # So aprende em reta (|kappa| no eixo e 1,5 m a frente abaixo disto): em
@@ -803,6 +864,41 @@ class RealStanleyFollower:
                 heading + (curvature * front_speed * math.cos(relative) - yaw_rate) * dt,
                 curvature)
 
+    def _propagate(self, errors, observation, now, car):
+        """(erros no instante `now`, idade compensada) levando a clotoide da foto
+        pelo movimento do carro; None sem o caminho do estimador."""
+        dkappa = getattr(observation, 'path_dkappa', math.nan)
+        if not isinstance(dkappa, (int, float, np.number)) or not math.isfinite(dkappa):
+            return None
+        try:
+            from .corridor import move_states
+        except ImportError:  # modulo carregado fora do pacote (alguns testes)
+            from corridor import move_states
+        start = float(observation.timestamp)
+        age = min(now - start, MAX_EXACT_COMPENSATION)
+        if not age > 0:
+            return None
+        motion = None
+        if self.odometry is not None:
+            try:
+                motion = self.odometry.delta(start, start + age)
+            except Exception:  # noqa: BLE001 - historico incompleto: usa o modelo
+                motion = None
+        if motion is None or not np.all(np.isfinite(motion)):
+            # Sem historico: integra a velocidade e a guinada atuais (eixo traseiro).
+            speed = float(car.v) if math.isfinite(float(car.v)) else 0.
+            yaw_rate = self.steering_sign*float(getattr(car, 'w', 0.) or 0.)
+            yaw_rate = yaw_rate if math.isfinite(yaw_rate) else 0.
+            dth = yaw_rate*age
+            dx, dy = speed*age*math.cos(dth/2), speed*age*math.sin(dth/2)
+        else:
+            dx, dy, dth = (float(v) for v in motion)
+        wheelbase = self.controller.wheelbase  # pose no eixo traseiro -> eixo dianteiro
+        dx += wheelbase*(math.cos(dth) - 1)
+        dy += wheelbase*math.sin(dth)
+        moved = move_states([*errors, float(dkappa), 1.], dx, dy, dth, self.max_curvature)[0]
+        return (float(moved[0]), float(moved[1]), float(moved[2])), age
+
     def apply(self, car, observation, now, obstacle_detected=False):
         """Retorna True quando uma observacao atual, ou a faixa vista ha no maximo
         line_loss_frames quadros (e line_loss_tolerance segundos), autoriza seguir."""
@@ -871,11 +967,16 @@ class RealStanleyFollower:
         if line_seen:
             self._filter_curvature(errors[2], float(observation.timestamp))
         if line_seen and self.compensate_latency and finite_sample and age > 0:
-            # Os erros sao do instante da captura; a 1,5 m/s o carro anda
-            # ~20 cm ate o comando. Leva a faixa ao instante atual, com teto
-            # para nao extrapolar a curvatura alem do trecho realmente visto.
-            compensated = min(age, MAX_LATENCY_COMPENSATION)
-            errors = self._predict_line(errors, car, compensated)
+            # Os erros sao do instante da captura; a 1 m/s o carro anda ~30 cm
+            # ate o comando. Com o caminho do estimador, leva a clotoide ao
+            # instante atual pelo movimento real (odometria); sem ele, o modelo
+            # antigo de curvatura constante, com teto.
+            exact = self._propagate(errors, observation, float(now), car) if self.exact_compensation else None
+            if exact is not None:
+                errors, compensated = exact
+            else:
+                compensated = min(age, MAX_LATENCY_COMPENSATION)
+                errors = self._predict_line(errors, car, compensated)
         if line_seen:
             self.line_memory, self.line_seen_at = errors, float(now)
             self.line_speed_limit = speed_limit
@@ -945,6 +1046,11 @@ class RealStanleyFollower:
                 # Uma borda so ou memoria: menos certeza, menos velocidade (sem
                 # descer abaixo do minimo operacional).
                 speed_raw = max(min(self.min_speed, speed_raw), speed_raw*self.line_speed_factor)
+            if self.latency_budget > 0 and math.isfinite(age) and age > 0:
+                # Idade media da imagem (o mesmo quadro serve varios passos).
+                self.age_average = (age if self.age_average is None
+                                    else self.age_average + .05*(age - self.age_average))
+                speed_raw = min(speed_raw, max(self.min_speed, self.latency_budget/max(self.age_average, .05)))
             limit = min(speed_limit, self.line_speed_limit)
             speed_raw = min(speed_raw, limit)
             car.set_vel(min(self._filter_speed(speed_raw, car.dt), limit))
@@ -955,10 +1061,11 @@ class RealStanleyFollower:
             active = active and reference_valid
             dkappa = self.path_dkappa if math.isfinite(self.path_dkappa) else 0.
             straight = max(abs(curvature), abs(curvature + 1.5*dkappa)) < self.centering_max_curvature
-            if (self.centering_gain > 0 and line_seen and not holding and not search and straight
+            if ((self.centering_gain > 0 or self.centering_steer_gain > 0) and line_seen and not holding and not search and straight
                     and self.line_speed_factor >= .999 and abs(lateral) < .4
                     and abs(float(car.v)) >= self.centering_min_speed):
-                self.centering = float(np.clip(self.centering + self.centering_gain*lateral*car.dt,
+                learn = self.centering_gain*lateral + self.centering_steer_gain*self.controller.steer
+                self.centering = float(np.clip(self.centering + learn*car.dt,
                                                -self.centering_limit, self.centering_limit))
                 self.centering_time += float(car.dt)
             self._send_trim(car)

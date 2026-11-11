@@ -135,7 +135,7 @@ class ConeObservation(LineObservation):
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
-                 classifier=None, corridor=None):
+                 classifier=None, corridor=None, line_fusion=False):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
 
         corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
@@ -199,6 +199,17 @@ class RealConeDetector:
             self.corridor = CorridorEstimator(
                 corridor_settings, image_homography(calibration, self.processing_size[::-1]),
                 pixel_scale=self.processing_size[0]/w)
+        # Linha amarela no centro do corredor (se houver): entra no estimador como
+        # linha central junto com os cones. Ela fica perto de y = 0, onde a
+        # calibracao e boa; os cones (+-0,6 m) dependem da extrapolacao.
+        self.line = None
+        if line_fusion and self.corridor is not None:
+            from .lateral import BirdsEyeView
+            from tools.yellow_path import PathSettings, YellowPathDetector
+            self.line = (BirdsEyeView(calibration), YellowPathDetector(),
+                         PathSettings(roi_top=0, min_span=15, h_max=35, s_min=25, dashed=True, dash_gap=120))
+            self.line[1].reset(anchor=.5)
+        self.line_frames = 0
 
     def observe_frame(self, frame, timestamp):
         metadata = dict(processing_size=self.processing_size)
@@ -259,7 +270,14 @@ class RealConeDetector:
         speed_cap = math.inf
         one_border_curve = False
         if self.corridor is not None:
-            estimate = self._corridor_step(result, timestamp, motion)
+            center = None
+            if self.line is not None:
+                # Um quadro sim, um nao: a fita e complemento dos cones e a busca
+                # custa ~8 ms no notebook (mais que os cones a 320 px).
+                self.line_frames += 1
+                if self.line_frames % 2:
+                    center = self._line_points(frame, timestamp)
+            estimate = self._corridor_step(result, timestamp, motion, center)
             valid = estimate.valid
             errors = estimate.errors
             recovery = estimate.slow
@@ -274,7 +292,8 @@ class RealConeDetector:
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
         if estimate is not None:
-            debug.update(corridor=dict(estimate.debug(), sides=self.corridor_sides), legacy_errors=legacy)
+            debug.update(corridor=dict(estimate.debug(), sides=self.corridor_sides,
+                                       line_points=int(self.corridor.used_center)), legacy_errors=legacy)
         debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
                      recovery=bool(valid and recovery),
                      confidence=round(float(result.confidence), 3), branch=bool(result.branch),
@@ -302,7 +321,18 @@ class RealConeDetector:
             self.corridor.learned_width = None
         return green_left, info
 
-    def _corridor_step(self, result, timestamp, motion):
+    def _line_points(self, frame, timestamp):
+        """Pontos da fita amarela no chao (vista de cima), ou vazio se nao ha fita confiavel."""
+        from .lateral import LINE_MIN_SATURATION, line_samples, line_saturation, mask_cones
+        view, detector, settings = self.line
+        image = view.warp(mask_cones(frame))
+        result = detector.process(image, settings, timestamp=timestamp)
+        self.line_seen = bool(result.valid) and line_saturation(image, result) >= LINE_MIN_SATURATION
+        if not self.line_seen:
+            return np.empty((0, 2))
+        return line_samples(view.to_ground(result.center))
+
+    def _corridor_step(self, result, timestamp, motion, center=None):
         """Cones deste quadro (ja confirmados pelo classificador) -> estimador."""
         homography = self.corridor.homography
         detector_side = self.green_left if result.green_left is None else bool(result.green_left)
@@ -317,7 +347,7 @@ class RealConeDetector:
             # Sem odometria: o deslocamento estimado pelo fluxo optico do piso,
             # ja no referencial dos cones.
             motion = (result.debug.get('tracking') or {}).get('motion_m')
-        return self.corridor.step(float(timestamp), left, right, motion, pose_frame)
+        return self.corridor.step(float(timestamp), left, right, motion, pose_frame, center=center)
 
     def roi_row(self):
         """Primeira linha util na grade de processamento: acima, so o que fica alem

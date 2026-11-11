@@ -31,3 +31,27 @@ class VirtualTrackTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DecoyTests(unittest.TestCase):
+    def test_objects_sit_outside_the_track(self):
+        track = pv.build_track([('reta', 6.), ('curva', 2., 90)], 1.2, rng=np.random.default_rng(3))
+        pv.add_decoys(track, 20, np.random.default_rng(4))
+        self.assertEqual(track.decoys.shape, (20, 2))
+        for point in track.decoys:
+            error, _, half = pv.track_error(track, point, 0)
+            self.assertGreaterEqual(abs(error), half + .2 - 1e-6)
+            self.assertLessEqual(abs(error), half + .8 + 1e-6)
+
+    def test_band_keeps_the_car_centered_with_objects_beside_the_track(self):
+        # Grampo, 15 objetos fixos fora da pista: sem a faixa o carro se desvia
+        # (~11 cm RMS); com ela, como numa pista limpa (~3 cm).
+        results = {}
+        for band in (0., .2):
+            track = pv.build_track(pv.TRACKS['grampo'], 1.8, None, .5, rng=np.random.default_rng(101))
+            config = pv.base_config({'steering_law': 'pure_pursuit', 'velocity_reference': 1.0,
+                                     'cone_estimator': {'band_m': band, 'band_growth': .1}})
+            results[band] = pv.run(track, config, seed=1, decoys=15)
+        self.assertTrue(results[.2]['finished'])
+        self.assertLess(results[.2]['rms_m'], .05)
+        self.assertGreater(results[0.]['rms_m'], 2*results[.2]['rms_m'])

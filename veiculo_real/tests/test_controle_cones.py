@@ -153,6 +153,22 @@ class CenteringTests(unittest.TestCase):
         # O trim vai para o servo: o esterco pretendido (odometria) nao o inclui.
         self.assertLess(abs(car.st - follower.controller.steer), 1e-9)
 
+    def test_mean_steering_on_a_straight_becomes_servo_trim(self):
+        # Para seguir a reta o carro comanda 1 grau a esquerda: o servo puxa para
+        # a direita. O trim vai para a esquerda ate o comando medio zerar.
+        follower = RealStanleyFollower(dict(self.settings, centering_gain=0., centering_steer_gain=.3))
+        car = fake_car()
+        car.v, car.dt = .6, .02
+        follower.controller.steer = math.radians(1.)
+        follower.controller.target_steer = math.radians(1.)
+        follower.apply(car, LineObservation(10., errors=(0., 0., 0.), path_dkappa=0.), 10.)
+        self.assertAlmostEqual(follower.centering, .3*math.radians(1.)*.02, places=6)
+        self.assertGreater(follower.centering_time, 0.)
+
+    def test_mission_learns_trim_from_the_mean_steering(self):
+        self.assertGreater(main.parameters['centering_steer_gain'], 0.)
+        self.assertEqual(main.parameters['centering_gain'], 0.)
+
     def test_no_learning_in_curves_with_one_border_or_disabled(self):
         for errors, extra in (((.05, 0., .5), {}),                    # curva
                               ((.05, 0., 0.), {'centering_gain': 0.})):  # desligado

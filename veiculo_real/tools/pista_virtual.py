@@ -72,6 +72,10 @@ class Track:
     width: np.ndarray
     left: np.ndarray     # cones (Mx2)
     right: np.ndarray
+    # Objetos fixos fora da pista que o detector toma por cone (mochila, roupa):
+    # (x, y) e a cor (0: entra com os da esquerda, 1: com os da direita).
+    decoys: np.ndarray = None
+    decoy_color: np.ndarray = None
 
     @property
     def length(self):
@@ -105,6 +109,20 @@ def build_track(segments, width=1.8, width_end=None, spacing=.5, cone_noise=.03,
         base = center[index] + sign*widths[index, None]/2*normal[index]
         cones[side] = base + rng.normal(0., cone_noise, base.shape)
     return Track(center, heading, s, widths, cones['left'], cones['right'])
+
+
+def add_decoys(track, count, rng, gap=(.2, .8)):
+    """`count` objetos fixos a gap m FORA da borda, lado e cor ao acaso."""
+    if count <= 0:
+        return track
+    index = np.searchsorted(track.s, rng.uniform(2., max(2.1, track.length - 1.), count))
+    index = np.clip(index, 0, len(track.s) - 1)
+    sign = rng.choice([-1., 1.], count)
+    normal = np.c_[-np.sin(track.heading[index]), np.cos(track.heading[index])]
+    offset = sign*(track.width[index]/2 + rng.uniform(*gap, count))
+    track.decoys = track.center[index] + offset[:, None]*normal
+    track.decoy_color = rng.integers(0, 2, count)
+    return track
 
 
 class SimCar:
@@ -230,7 +248,10 @@ class SimCamera:
         front = car.front
         pitch = self.rng.normal(0., self.pitch_sigma)
         output = []
-        for cones in (track.left, track.right):
+        sources = [track.left, track.right]
+        if track.decoys is not None:
+            sources = [np.vstack([cones, track.decoys[track.decoy_color == k]]) for k, cones in enumerate(sources)]
+        for cones in sources:
             d = cones - front
             local = np.c_[c*d[:, 0] + s*d[:, 1], -s*d[:, 0] + c*d[:, 1]]
             local = local[(local[:, 0] > .2) & (local[:, 0] < self.max_range + .3)]
@@ -268,20 +289,25 @@ def track_error(track, point, hint):
 
 
 def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), duration=None, coast=.5,
-        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False):
+        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False, decoys=0):
     """Uma volta; devolve dicionario de metricas (e a serie, com trace)."""
     import main as vehicle_main
 
     rng = np.random.default_rng(seed)
+    add_decoys(track, decoys, np.random.default_rng(1000 + seed))
     calibration = GroundCalibration.from_file(CALIBRATION)
     camera = SimCamera(calibration, rng, **(camera_kwargs or {}))
-    corridor = corridor if corridor is not None else vehicle_main.corridor_settings(config)
+    if corridor is None:  # como no main.py: a linha amarela tem o estimador proprio
+        corridor = (vehicle_main.line_estimator_settings(config) if line
+                    else vehicle_main.corridor_settings(config))
     settings = CorridorSettings.from_value(
         corridor, track_width_m=config['cone_settings'].get('track_width_cm', 90)/100, max_range_m=3.)
     estimator = CorridorEstimator(settings, calibration.homography)
     follower = RealStanleyFollower(vehicle_main.follower_config(config, 'cones', corridor))
     run.last_follower = follower  # trim aprendido (corridas seguidas)
     poses = PoseHistory()
+    if config.get('exact_compensation', False):
+        follower.odometry = poses  # como no carro: compensacao exata do atraso
     start = -WHEELBASE  # eixo dianteiro no inicio da pista
     car = SimCar((start*math.cos(track.heading[0]), start*math.sin(track.heading[0]), track.heading[0]),
                  rng, coast=coast, servo_tau=servo_tau, fixed_bias_deg=steer_bias_deg)
@@ -407,6 +433,9 @@ def main(argv=None):
     parser.add_argument('--steer-bias', type=float, default=0., help='vies fixo da direcao (graus, + esquerda)')
     parser.add_argument('--row-bias', type=float, default=0., help='erro fixo da calibracao na linha, px')
     parser.add_argument('--column-bias', type=float, default=0., help='erro fixo da calibracao na coluna, px')
+    parser.add_argument('--objetos', type=int, default=0,
+                        help='objetos fixos tomados por cone, 20-80 cm fora da pista (mochila, roupa)')
+    parser.add_argument('--falsos', type=float, default=.05, help='fracao de quadros com um falso ao acaso')
     parser.add_argument('--set', action='append', default=[], metavar='AJUSTE=VALOR',
                         help='sobrepoe main.parameters (ex.: velocity_reference=1.0)')
     parser.add_argument('--plot', type=Path, help='PNG com as trajetorias (1a semente)')
@@ -428,8 +457,9 @@ def main(argv=None):
                                     rng=np.random.default_rng(100 + seed))
                 result = run(track, config, seed=seed, coast=args.coast, trace=bool(args.plot) and seed == 0,
                              latency=tuple(args.latency), fps=args.fps, servo_tau=args.servo_tau,
-                             steer_bias_deg=args.steer_bias, line=args.linha,
-                             camera_kwargs=dict(row_bias=args.row_bias, column_bias=args.column_bias))
+                             steer_bias_deg=args.steer_bias, line=args.linha, decoys=args.objetos,
+                             camera_kwargs=dict(row_bias=args.row_bias, column_bias=args.column_bias,
+                                                false_rate=args.falsos))
                 results.append(result)
                 if 'trace' in result:
                     traced[law] = result

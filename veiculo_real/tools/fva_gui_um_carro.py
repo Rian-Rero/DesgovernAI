@@ -11,15 +11,19 @@
 # GUI Tkinter para envio de arquivos e execução remota em múltiplas Raspberry Pis,
 # com senha SSH padrão (DEFAULT_PASS) pré-preenchida no campo.
 import hashlib
+import sys
 import os
 import re
 import posixpath
 import shlex
+import shutil
 import uuid
 import platform
 import subprocess
 import threading
+import math
 import stat
+import tarfile
 import time
 import queue
 import csv
@@ -62,7 +66,7 @@ MISSION_DEFAULTS = {
     "record_hz": "3",
     "classifier": False,          # --classifier CAMINHO
     "classifier_path": "modelos/cones.onnx",
-    "vision_width": "0",
+    "vision_width": "320",
     "steering_filter": "3",
     "min_radius": "1.2",          # --min-radius (so cones; 1.2 e o padrao do main.py)
     "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
@@ -457,6 +461,199 @@ def sync_directory(client, sftp, local_dir, remote_dir, log, force=False, delete
     return {"sent": len(send), "same": len(same) + len(touched), "bytes": sent_bytes,
             "removed": len(removed), "seconds": time.monotonic() - started}
 
+
+def local_code_version():
+    """Versao do codigo nesta copia (mesmo calculo de fva_car/version.py no carro)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from fva_car.version import code_version
+        return code_version()
+    except Exception:  # noqa: BLE001 - so informativo
+        return None
+
+
+def remote_code_version(client, remote_dir: str):
+    """Versao do codigo no carro, ou None se nao der para saber."""
+    try:
+        _, out, _ = client.exec_command(
+            f"cd {shlex.quote(remote_dir)} && python3 -c 'from fva_car.version import code_version;"
+            f" print(code_version())'", timeout=30)
+        text = _output_text(out).strip().splitlines()
+        return text[-1] if text and re.fullmatch(r"[0-9a-f]{8}", text[-1]) else None
+    except Exception:  # noqa: BLE001 - so informativo
+        return None
+
+
+
+########################################
+# Coleta incremental, limpeza do carro e relogio
+########################################
+# Lista do que ja foi baixado (por carro): mover ou reorganizar os ensaios no PC
+# nao faz a coleta baixar tudo de novo.
+COLLECT_MANIFEST = ".coletados.json"
+# Estado do carro dentro de logs/: vem na coleta, mas nunca e apagado do carro.
+COLLECT_KEEP = {"direcao_trim.json"}
+COLLECT_TAR_MIN_FILES = 8      # a partir disto, um fluxo tar (frames: milhares de arquivos pequenos)
+DELETE_MIN_AGE_S = 60          # arquivo mexido ha menos disso pode ser de uma corrida em andamento
+CLOCK_TOLERANCE_S = 2.0
+
+
+def parse_remote_listing(text: str) -> dict:
+    """Saida de `find -printf '%P\\t%s\\t%T@\\n'` -> {caminho relativo: (bytes, mtime)}."""
+    files = {}
+    for line in text.splitlines():
+        parts = line.rsplit("\t", 2)
+        if len(parts) != 3 or not parts[0]:
+            continue
+        rel = parts[0]
+        if rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        try:
+            files[rel] = (int(parts[1]), float(parts[2]))
+        except ValueError:
+            continue
+    return files
+
+
+def remote_listing(client, remote_dir: str):
+    """({caminho: (bytes, mtime)}, relogio do carro) numa ida so; None se a pasta nao existe."""
+    folder = shlex.quote(remote_dir)
+    _, out, _ = client.exec_command(
+        f"test -d {folder} || {{ echo FVA_MISSING; exit 0; }}; cd {folder} && "
+        "find . -type f -printf '%P\\t%s\\t%T@\\n'; echo FVA_NOW:$(date +%s)", timeout=60)
+    text = _output_text(out)
+    if "FVA_MISSING" in text.splitlines()[:1]:
+        return None, None
+    now = None
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("FVA_NOW:"):
+            try:
+                now = float(line.split(":", 1)[1])
+            except ValueError:
+                pass
+        else:
+            lines.append(line)
+    return parse_remote_listing("\n".join(lines)), now
+
+
+def load_manifest(local_dest: str) -> dict:
+    try:
+        with open(os.path.join(local_dest, COLLECT_MANIFEST), encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_manifest(local_dest: str, manifest: dict):
+    path = os.path.join(local_dest, COLLECT_MANIFEST)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=0, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def _local_path(local_dest: str, rel: str) -> str:
+    return os.path.join(local_dest, *rel.split("/"))
+
+
+def already_collected(rel: str, info, local_dest: str, manifest: dict) -> bool:
+    """Ja esta no PC: o arquivo com o mesmo tamanho, ou baixado antes (mesmo tamanho e data)."""
+    size, mtime = info
+    local = _local_path(local_dest, rel)
+    if os.path.isfile(local) and os.path.getsize(local) == size:
+        return True
+    return manifest.get(rel) == [size, int(mtime)]
+
+
+def collect_plan(remote: dict, local_dest: str, manifest: dict, force=False):
+    """Arquivos a baixar (os que faltam no PC), em ordem."""
+    return sorted(rel for rel, info in remote.items()
+                  if force or not already_collected(rel, info, local_dest, manifest))
+
+
+def deletable(remote: dict, local_dest: str, manifest: dict, remote_now) -> list:
+    """O que pode sair do carro: ja no PC, parado ha 1 min e nao e estado do carro."""
+    if remote_now is None:
+        return []
+    return sorted(rel for rel, info in remote.items()
+                  if rel not in COLLECT_KEEP
+                  and remote_now - info[1] >= DELETE_MIN_AGE_S
+                  and already_collected(rel, info, local_dest, manifest))
+
+
+def _mb(size) -> str:
+    return f"{size / 1e6:.1f} MB"
+
+
+def local_timezone():
+    """Fuso IANA do notebook (Linux/macOS), ou None."""
+    try:
+        target = os.path.realpath("/etc/localtime")
+        return target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else None
+    except OSError:
+        return None
+
+
+def clock_command(epoch: float, password: str = None, timezone: str = None):
+    """(comando, texto para o stdin) que acerta data, hora e fuso do carro com sudo.
+
+    fake-hwclock: o Pi nao tem relogio com bateria; salvar faz o proximo boot ja
+    comecar perto da hora certa."""
+    steps = [f"date -s @{int(round(epoch))} >/dev/null"]
+    if timezone and re.fullmatch(r"[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)*", timezone):
+        steps.append(f"(timedatectl set-timezone {timezone} 2>/dev/null || true)")
+    steps.append("(command -v fake-hwclock >/dev/null && fake-hwclock save >/dev/null 2>&1; true)")
+    inner = " && ".join(steps)
+    if password:
+        return f"sudo -S -p '' sh -c {shlex.quote(inner)}", password + "\n"
+    return f"sudo -n sh -c {shlex.quote(inner)}", ""
+
+
+def car_clock(client):
+    """(diferenca carro - notebook em s, deslocamento do fuso do carro '+hhmm')."""
+    before = time.time()
+    _, out, _ = client.exec_command("date +%s.%N; date +%z", timeout=15)
+    lines = _output_text(out).split()
+    after = time.time()
+    return float(lines[0]) - (before + after) / 2, lines[1] if len(lines) > 1 else ""
+
+
+def sync_car_clock(client, password: str, report, force=False):
+    """Confere o relogio do carro e acerta se precisar. True se ficou certo."""
+    try:
+        offset, zone = car_clock(client)
+    except Exception as exc:  # noqa: BLE001 - so informativo
+        report(f"⚠️ Não consegui ler o relógio do carro: {exc}")
+        return False
+    local_zone = time.strftime("%z")
+    wrong_zone = bool(zone) and zone != local_zone
+    if not force and abs(offset) <= CLOCK_TOLERANCE_S and not wrong_zone:
+        return True
+    late = "atrasado" if offset < 0 else "adiantado"
+    amount = abs(offset)
+    text = (f"{amount / 86400:.1f} dias" if amount >= 86400 else f"{amount / 3600:.1f} h" if amount >= 3600
+            else f"{amount / 60:.1f} min" if amount >= 60 else f"{amount:.1f} s")
+    report(f"🕒 Relógio do carro {late} {text}" + (f" e fuso {zone} (notebook {local_zone})" if wrong_zone else "")
+           + ": acertando...")
+    command, secret = clock_command(time.time() + 0.05, password, local_timezone() if wrong_zone else None)
+    stdin, out, err = client.exec_command(command, timeout=20)
+    if secret:
+        stdin.write(secret)
+        stdin.flush()
+    stdin.channel.shutdown_write()
+    status = out.channel.recv_exit_status()
+    problem = _output_text(err).strip()
+    try:
+        offset, zone = car_clock(client)
+    except Exception:  # noqa: BLE001
+        offset = math.inf
+    if status == 0 and abs(offset) <= CLOCK_TOLERANCE_S:
+        report(f"✅ Relógio do carro acertado ({time.strftime('%d/%m/%Y %H:%M:%S')}, diferença {offset:+.1f} s).")
+        return True
+    report(f"❌ Não foi possível acertar o relógio (sudo pede a senha do usuário?): {problem or status}")
+    return False
 
 def open_folder(path: Path):
     """Abre a pasta no gerenciador de arquivos do sistema."""
@@ -1026,6 +1223,10 @@ class RsyncGUI(tk.Tk):
         self.mission_checks["classifier"] = check
         self.classifier_entry = ttk.Entry(extra, textvariable=self.mission_vars["classifier_path"], width=26)
         self.classifier_entry.pack(side="left", padx=(4, 0))
+        ttk.Label(box, foreground="#b06000",
+                  text="Gravar quadros deixa a visão ~20% mais lenta: só para coleta, nunca em corrida "
+                       "valendo. Relatório do ensaio: python3 tools/analisar_ensaio.py <pasta> --linha").pack(
+            anchor="w", padx=6, pady=(0, 4))
         self._update_mission_widgets()
 
     def mission_options(self):
@@ -1304,6 +1505,9 @@ class RsyncGUI(tk.Tk):
         ttk.Button(controls, text="📂 Dados coletados", command=self.open_collected_data).pack(
             side="left", padx=4
         )
+        ttk.Button(controls, text="📷 Foto p/ calibração", command=self.calibration_photo).pack(
+            side="left", padx=4
+        )
 
         ttk.Label(parent, text="Saída do teste:").pack(
             anchor="w", padx=10, pady=(10, 2)
@@ -1516,6 +1720,62 @@ class RsyncGUI(tk.Tk):
             ),
             daemon=True,
         ).start()
+
+    ########################################
+    def calibration_photo(self):
+        """Tira a foto no carro (sem janela la), traz e abre a calibracao por grade aqui."""
+        targets = self.get_selected_devices()
+        if not targets:
+            messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado.")
+            return
+        if self.test_running:
+            messagebox.showinfo("Câmera ocupada", "Pare o teste em execução antes da foto.")
+            return
+        if not messagebox.askokcancel(
+            "Foto para calibração",
+            "Carro parado, com a grade de fita no chão (x = 0,6 a 3 m a partir do eixo "
+            "dianteiro; y = -1 a +1 m) e nenhuma missão rodando.\n\nTirar a foto agora?",
+        ):
+            return
+        self.clear_test_log()
+        threading.Thread(target=self._calibration_photo_worker, args=targets[0], daemon=True).start()
+
+    def _calibration_photo_worker(self, name, ip):
+        workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+        root = Path(__file__).resolve().parents[1]
+        local = root / "calibracao" / "fotos" / time.strftime("foto_%Y-%m-%d_%Hh%Mm%S.jpg")
+        remote = "/tmp/fva_calibracao.jpg"
+        client = None
+        try:
+            self._queue_test_output(f"Foto para calibração em {name.upper()} ({ip})...")
+            client = self._connect_ssh(ip)
+            _, out, err = client.exec_command(
+                f"cd {shlex.quote(workdir)} && python3 tools/calibrar_camera_lateral.py"
+                f" --capturar {remote}", timeout=60)
+            text = _output_text(out).strip()
+            if out.channel.recv_exit_status() != 0:
+                raise RuntimeError(text + " " + _output_text(err).strip())
+            self._queue_test_output(text)
+            local.parent.mkdir(parents=True, exist_ok=True)
+            sftp = client.open_sftp()
+            try:
+                sftp.get(remote, str(local))
+            finally:
+                sftp.close()
+            self._queue_test_output(f"Foto salva em {local}")
+            self._queue_test_output(
+                "Abrindo a calibração por grade. Ao salvar, envie ao carro (Enviar arquivos)."
+            )
+            subprocess.Popen([sys.executable, str(root / "tools" / "calibrar_camera_lateral.py"),
+                              "--image", str(local)], cwd=str(root))
+        except Exception as exc:
+            self._queue_test_output(f"Erro na foto para calibração: {exc}")
+        finally:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     ########################################
     def _open_camera_window(self):
@@ -1833,10 +2093,17 @@ class RsyncGUI(tk.Tk):
             local_frame, text="Selecionar...", command=self.select_data_destination
         ).pack(side="left")
 
-        # botao de coleta
-        ttk.Button(parent, text="📥 Coletar dados", command=self.collect_data).pack(
-            anchor="w", padx=10, pady=6
-        )
+        # botoes de coleta
+        actions = ttk.Frame(parent)
+        actions.pack(fill="x", padx=10, pady=6)
+        ttk.Button(actions, text="📥 Coletar dados", command=self.collect_data).pack(side="left")
+        self.recollect_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions, text="Baixar de novo o que já foi coletado",
+                        variable=self.recollect_var).pack(side="left", padx=(6, 18))
+        ttk.Button(actions, text="🗑 Apagar do carro o que já está no PC…",
+                   command=self.free_car_space).pack(side="left")
+        ttk.Button(actions, text="🕒 Acertar relógio do carro",
+                   command=self.sync_clock).pack(side="left", padx=(18, 0))
 
         # Mensagens da coleta (altura reduzida para liberar espaço)
         ttk.Label(parent, text="Transferências:").pack(anchor="w", padx=10, pady=(4, 2))
@@ -1859,6 +2126,9 @@ class RsyncGUI(tk.Tk):
         ttk.Button(
             selector, text="Atualizar lista", command=self.refresh_experiments
         ).pack(side="left")
+        ttk.Button(
+            selector, text="📋 Relatório", command=self.experiment_report
+        ).pack(side="left", padx=(6, 0))
 
         self.experiment_graphs = [
             ("Velocidade", "Velocidade medida e referência"),
@@ -1976,6 +2246,37 @@ class RsyncGUI(tk.Tk):
             except (OSError, ValueError, TypeError) as exc:
                 messagebox.showerror("Erro ao ler experimento", f"{path}\n\n{exc}")
         self.render_experiment_graphs()
+
+    ########################################
+    def experiment_report(self):
+        """tools/analisar_ensaio.py --linha no experimento escolhido, numa janela."""
+        path = self.experiment_paths.get(self.log_file_var.get())
+        if not path:
+            messagebox.showinfo("Relatório", "Escolha um experimento na lista.")
+            return
+        folder = os.path.dirname(path)
+        window = tk.Toplevel(self)
+        window.title("Relatório — " + os.path.basename(folder))
+        text = scrolledtext.ScrolledText(window, width=120, height=24, font=("Courier", 10))
+        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text.insert("end", "Analisando (com quadros gravados, mede a posição pela fita amarela)...\n")
+
+        def worker():
+            script = Path(__file__).resolve().parent / "analisar_ensaio.py"
+            try:
+                result = subprocess.run([sys.executable, str(script), folder, "--linha"],
+                                        capture_output=True, text=True, timeout=600)
+                output = (result.stdout + result.stderr).strip()
+            except Exception as exc:  # noqa: BLE001 - mostrado na janela
+                output = f"Erro: {exc}"
+
+            def show():
+                if text.winfo_exists():
+                    text.delete("1.0", "end")
+                    text.insert("end", output + f"\n\n(salvo em {os.path.join(folder, 'relatorio.txt')})")
+            self.ui(show)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     ########################################
     def show_cone_summary(self, folder):
@@ -2651,6 +2952,21 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                     exit_path = f"/tmp/fva_gui_{run_id}.exit"
                     if not arduino_flash:
                         report(f"$ cd {remote_workdir} && {raw_cmd}")
+                        if re.search(r"\bmain\.py\b", raw_cmd):
+                            # Confere antes de andar: o carro ja rodou codigo velho sem ninguem saber.
+                            local = local_code_version()
+                            checker = self._connect_ssh(ip)
+                            try:
+                                remote = remote_code_version(checker, remote_workdir)
+                                # Relogio errado = logs com data errada (o Pi nao tem bateria).
+                                sync_car_clock(checker, self.pass_entry.get().strip() or None, report)
+                            finally:
+                                checker.close()
+                            if local and remote and local != remote:
+                                report(f"⚠️ CÓDIGO DIFERENTE: carro {remote}, notebook {local}."
+                                       " Envie os arquivos antes de testar.")
+                            elif local and remote:
+                                report(f"✅ Código igual ao do notebook (versão {local}).")
                     # Processo remoto em segundo plano: grava stdout/stderr na Raspberry.
                     # O status é escrito em arquivo separado APÓS a saída terminar.
                     inner = (
@@ -2802,7 +3118,7 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         """Abre a pasta onde o Coletar Dados salva (aba Coletar Dados)."""
         open_folder(os.path.abspath(self.data_dest_entry.get().strip() or "experimentos"))
 
-    def collect_data(self):
+    def collect_data(self, then_delete=False):
 
         targets = self.get_selected_devices()
 
@@ -2822,13 +3138,28 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             return
 
         os.makedirs(local_base, exist_ok=True)
+        force = bool(self.recollect_var.get()) and not then_delete
 
         threading.Thread(
-            target=self._collect_data, args=(targets, local_base), daemon=True
+            target=self._collect_data, args=(targets, local_base, force, then_delete), daemon=True
         ).start()
+
+    def free_car_space(self):
+        """Coleta o que falta e depois apaga do carro so o que esta comprovadamente no PC."""
+        if not messagebox.askokcancel(
+            "Apagar experimentos do carro",
+            "Primeiro a coleta traz o que ainda falta para o PC.\n\n"
+            "Depois a GUI mostra quanto pode ser apagado e pede confirmação de novo. "
+            "Só sai do carro o que já está no PC com o mesmo tamanho. Ficam no carro:\n"
+            "  • o trim da direção (direcao_trim.json);\n"
+            "  • arquivos mexidos no último minuto (corrida em andamento).",
+        ):
+            return
+        self.collect_data(then_delete=True)
 
     ########################################
     def _sftp_download_directory_contents(self, sftp, remote_dir, local_dir):
+        """Caminho antigo (sem find no carro): baixa o que falta, arquivo a arquivo."""
         os.makedirs(local_dir, exist_ok=True)
         for entry in sftp.listdir_attr(remote_dir):
             remote_path = posixpath.join(remote_dir, entry.filename)
@@ -2839,8 +3170,6 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                 not os.path.isfile(local_path)
                 or os.path.getsize(local_path) != entry.st_size
             ):
-                # Coleta incremental: ensaios ja baixados (e frames de eventos)
-                # nao sao transferidos de novo pelo Wi-Fi.
                 sftp.get(remote_path, local_path)
 
     ########################################
@@ -2867,42 +3196,181 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             count += 1
         return count
 
-    def _collect_data(self, targets, local_base):
+    def _download_files(self, client, sftp, remote_dir, local_dest, remote, todo, manifest, report):
+        """Baixa `todo`: um fluxo tar para muitos arquivos, SFTP para poucos (ou se o tar falhar)."""
+        wanted = set(todo)
+        done = 0
+        last = time.monotonic()
+
+        def finished(rel, path):
+            nonlocal done, last
+            mtime = remote[rel][1]
+            os.utime(path, (mtime, mtime))
+            # Tamanho que chegou: arquivo pego no meio da escrita nao conta como coletado.
+            manifest[rel] = [os.path.getsize(path), int(mtime)]
+            wanted.discard(rel)
+            done += 1
+            if time.monotonic() - last > 3:
+                last = time.monotonic()
+                report(f"   ... {done}/{len(todo)} arquivos")
+
+        if len(todo) >= COLLECT_TAR_MIN_FILES:
+            try:
+                stdin, out, _ = client.exec_command(
+                    f"cd {shlex.quote(remote_dir)} && tar -cf - --null -T -", timeout=600)
+                stdin.write("\0".join(todo) + "\0")
+                stdin.flush()
+                stdin.channel.shutdown_write()
+                with tarfile.open(fileobj=out, mode="r|") as archive:
+                    for member in archive:
+                        rel = posixpath.normpath(member.name)  # "./a/b" -> "a/b"
+                        if not member.isfile() or rel not in wanted:
+                            continue  # so o que foi pedido, nunca fora da pasta de destino
+                        path = _local_path(local_dest, rel)
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
+                        source = archive.extractfile(member)
+                        with open(path + ".part", "wb") as handle:
+                            shutil.copyfileobj(source, handle, 1 << 20)
+                        os.replace(path + ".part", path)
+                        finished(rel, path)
+            except Exception as exc:  # noqa: BLE001 - o resto vai por SFTP
+                report(f"   (fluxo tar interrompido: {exc}; seguindo arquivo a arquivo)")
+        failed = []
+        for rel in sorted(wanted):
+            path = _local_path(local_dest, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            try:
+                sftp.get(posixpath.join(remote_dir, rel), path + ".part")
+            except (OSError, IOError) as exc:  # sumiu do carro no meio da coleta
+                failed.append(f"{rel} ({exc})")
+                continue
+            os.replace(path + ".part", path)
+            finished(rel, path)
+        if failed:
+            report(f"⚠️ {len(failed)} arquivo(s) não vieram: " + "; ".join(failed[:3]))
+        return done
+
+    def _collect_data(self, targets, local_base, force=False, then_delete=False):
         remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         remote_logs = posixpath.join(remote_workdir, "logs")
+        report = lambda text: self.ui(self.datalog_write, text)
 
         for name, ip in targets:
             local_dest = os.path.join(local_base, name)
             os.makedirs(local_dest, exist_ok=True)
-            self.ui(
-                self.datalog_write, f"📥 Coletando dados de {name.upper()} ({ip})..."
-            )
+            report(f"📥 Coletando dados de {name.upper()} ({ip})...")
 
             client = None
             sftp = None
+            manifest = load_manifest(local_dest)
             try:
                 client = self._connect_ssh(ip)
                 sftp = client.open_sftp()
-                self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
+                started = time.monotonic()
+                try:
+                    remote, remote_now = remote_listing(client, remote_logs)
+                except Exception as exc:  # noqa: BLE001 - carro sem find GNU: caminho antigo
+                    report(f"   (listagem rápida falhou: {exc}; usando o caminho antigo)")
+                    self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
+                    remote, remote_now = {}, None
+                if remote is None:
+                    report(f"❌ Pasta remota não encontrada: {remote_logs}")
+                    continue
+                todo = collect_plan(remote, local_dest, manifest, force)
+                total = sum(size for size, _ in remote.values())
+                new = sum(remote[rel][0] for rel in todo)
+                report(f"   No carro: {len(remote)} arquivos ({_mb(total)}); já no PC: {len(remote) - len(todo)};"
+                       f" baixando {len(todo)} ({_mb(new)})")
+                done = self._download_files(client, sftp, remote_logs, local_dest, remote, todo, manifest, report)
                 recovered = self._collect_legacy_tmp_logs(sftp, local_dest)
                 if recovered:
-                    self.ui(self.datalog_write,
-                            f"   + {recovered} log(s) antigo(s) de /tmp em terminal/recuperados_tmp/")
-                self.ui(self.datalog_write, f"✅ Dados de {name.upper()} coletados em: {os.path.abspath(local_dest)}")
-            except FileNotFoundError:
-                self.ui(
-                    self.datalog_write, f"❌ Pasta remota não encontrada: {remote_logs}"
-                )
+                    report(f"   + {recovered} log(s) antigo(s) de /tmp em terminal/recuperados_tmp/")
+                report(f"✅ {done} arquivo(s) novo(s) de {name.upper()} em {time.monotonic() - started:.0f} s:"
+                       f" {os.path.abspath(local_dest)}")
+                if then_delete:
+                    candidates = deletable(remote, local_dest, manifest, remote_now)
+                    if candidates:
+                        size = sum(remote[rel][0] for rel in candidates)
+                        self.ui(self._confirm_delete, name, ip, remote_logs, candidates, size,
+                                len(remote) - len(candidates))
+                    else:
+                        report("   Nada para apagar do carro (tudo é recente ou é o trim).")
             except Exception as e:
-                self.ui(self.datalog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+                report(f"❌ Erro em {name.upper()} ({ip}): {e}")
             finally:
+                try:
+                    save_manifest(local_dest, manifest)
+                except OSError as exc:
+                    report(f"⚠️ Não salvei a lista do que já foi coletado: {exc}")
                 if sftp:
                     sftp.close()
                 if client:
                     client.close()
 
-        self.ui(self.datalog_write, "🏁 Coleta finalizada.")
+        report("🏁 Coleta finalizada.")
         self.ui(self.refresh_experiments)
+
+    def _confirm_delete(self, name, ip, remote_logs, candidates, size, kept):
+        runs = sorted({rel.split("/", 1)[0] for rel in candidates if "/" in rel})
+        sample = ", ".join(runs[:6]) + (f" e mais {len(runs) - 6}" if len(runs) > 6 else "")
+        if not messagebox.askyesno(
+            "Confirmar: apagar do carro",
+            f"Apagar do carro {name.upper()} {len(candidates)} arquivos ({_mb(size)}),"
+            f" todos já conferidos no PC?\n\nPastas: {sample or '-'}\n"
+            f"Ficam no carro: {kept} arquivo(s) (trim e recentes).\n\nIsso não pode ser desfeito no carro.",
+            icon="warning",
+        ):
+            self.datalog_write("   Nada apagado.")
+            return
+        threading.Thread(target=self._delete_remote, args=(name, ip, remote_logs, candidates, size),
+                         daemon=True).start()
+
+    def _delete_remote(self, name, ip, remote_logs, candidates, size):
+        report = lambda text: self.ui(self.datalog_write, text)
+        client = None
+        try:
+            client = self._connect_ssh(ip)
+            folder = shlex.quote(remote_logs)
+            stdin, out, err = client.exec_command(
+                f"cd {folder} && xargs -0 rm -f -- && find . -mindepth 1 -type d -empty -delete;"
+                f" df -h {folder} | tail -1", timeout=300)
+            stdin.write("\0".join(candidates) + "\0")
+            stdin.flush()
+            stdin.channel.shutdown_write()
+            free = _output_text(out).split()
+            problem = _output_text(err).strip()
+            if out.channel.recv_exit_status() != 0 or problem:
+                report(f"⚠️ Apagando em {name.upper()}: {problem}")
+            report(f"🗑 Apagados {len(candidates)} arquivos ({_mb(size)}) de {name.upper()}."
+                   + (f" Livre no carro: {free[3]}" if len(free) >= 4 else ""))
+        except Exception as exc:
+            report(f"❌ Erro apagando em {name.upper()}: {exc}")
+        finally:
+            if client:
+                client.close()
+
+    ########################################
+    def sync_clock(self):
+        targets = self.get_selected_devices()
+        if not targets:
+            messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado.")
+            return
+        name, ip = targets[0]
+        report = lambda text: self.ui(self.datalog_write, text)
+
+        def worker():
+            client = None
+            try:
+                client = self._connect_ssh(ip)
+                sync_car_clock(client, self.pass_entry.get().strip() or None, report, force=True)
+            except Exception as exc:
+                report(f"❌ Relógio de {name.upper()}: {exc}")
+            finally:
+                if client:
+                    client.close()
+
+        report(f"🕒 Acertando o relógio de {name.upper()} pelo do notebook ({time.strftime('%d/%m/%Y %H:%M:%S')})...")
+        threading.Thread(target=worker, daemon=True).start()
 
     ########################################
     def datalog_write(self, text):

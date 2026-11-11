@@ -99,6 +99,25 @@ distância: 1 px ≈ 5 cm a 2,5 m, e 1° de arfagem desloca ~10 linhas. Por isso
 - **Descarte**: um cone a mais de 3σ da previsão (porta, reflexo, cone de outro
   trecho) fica de fora. Se a rejeição domina dois quadros seguidos, o estimador
   recomeça pelos cones atuais.
+- **Faixa de busca** (`band_m` 0,2 + `band_growth` 0,1 por m além de 1 m: 0,3 m
+  a 2 m, 0,4 m a 3 m). Longe, o portão de 3σ é largo (passa de 1,5 m a 2,5 m),
+  porque a curva à frente ainda é incerta. Por isso, depois do ajuste com os
+  cones aceitos, um cone a mais que a faixa da borda **ajustada** sai, e o
+  quadro é refeito sem ele. Uma curva de verdade desloca todos os cones longe
+  juntos, e o ajuste os acompanha; um objeto isolado (mochila, roupa) fica de
+  fora. Na pista virtual com 15 objetos fixos 20–80 cm fora da pista, de cor ao
+  acaso:
+
+  | | voltas completas | erro RMS (médio / pior) | toques |
+  |---|---|---|---|
+  | sem faixa | 11 de 12 | 11,1 / 41 cm | 2 |
+  | com faixa | 12 de 12 | 4,4 / 6,6 cm | 0 |
+
+  Com faixa, o resultado ficou igual ao de uma pista sem objetos. Nos 11 ensaios
+  reais de 10/11, ela tira 22 de ~11 mil cones, sem perder quadros válidos. Não
+  resolve objetos da cor **errada** colados na borda oposta, muitos e logo no
+  início (a largura "encolhe" ao recomeçar): isso é trabalho do classificador.
+  `{"band_m": 0}` desliga. Os cones tirados entram em `rejected`.
 - **Estados e velocidade** (fração da vref, nunca abaixo de `curve_min_speed`):
 
 | Estado | Quando | vref |
@@ -186,6 +205,25 @@ RMS, contra 7,5–9,4 cm do Stanley. O maior erro isolado é no grampo de R = 1,
 `pursuit_target_y_m`, `path_dkappa`, `preview_speed_m_s` e
 `preview_curvature_m_inv`.
 
+### Atraso da visão
+
+Nos ensaios de 10/11 a imagem chegava ao controle com 260–290 ms (p90 até
+420 ms), a 6–9 quadros/s. A 1 m/s, são ~30 cm andados entre a foto e o uso.
+
+- **Visão a 320 px** (`vision_width: 320`, padrão também na GUI). Em 617
+  quadros reais, a 320 px os cones achados até 1 m / 1–2 m / 2–3 m foram 98 /
+  94 / 86% dos achados a 640 px, com a detecção 2,5× mais rápida. A 480 px:
+  99 / 97 / 91%, só 28% mais rápida. `--vision-width 640` volta ao antigo.
+- **Compensação exata** (`exact_latency_compensation`, ligada): o estado do
+  estimador (clotoide inteira) é levado do instante da foto até o do comando,
+  pela velocidade e guinada atuais, até 0,5 s. Antes: curvatura constante, até
+  0,25 s.
+- **Velocidade pelo atraso** (`latency_speed_budget_m: 0.3`): v ≤ 0,3 m ÷ idade
+  média da imagem. Com 0,3 s de atraso, isso dá 1 m/s; com a visão rápida, o
+  teto sobe sozinho. 0 desliga.
+- **Gravar quadros** (`--record-frames`) deixa a visão ~20% mais lenta: use só
+  em coleta.
+
 ### Rápido nas retas, cuidado nas curvas
 
 Nos cones, `velocity_reference` (a velocidade da GUI) é a **velocidade máxima
@@ -228,17 +266,26 @@ lento; 1,3/2,0 já passava do ponto. Com 1 o reforço fica desligado.
 Nos ensaios de 10/11, o carro andava 2–12 cm à direita do centro: nas retas, e
 sobretudo nas curvas à direita. Nem o Stanley nem o pure pursuit têm termo
 integral, então um viés fixo (centro do servo fora, assimetria esquerda/direita)
-vira desvio fixo. Agora o erro lateral **em reta e com as duas bordas** é
-integrado (`centering_gain` = 0,15 rad por m·s, limite ±4°) e vira **trim do
-servo** (`Car.set_steer_trim`). A odometria continua usando o esterço pretendido:
+vira desvio fixo. Agora, **em reta e com as duas bordas**, o carro aprende o
+**trim do servo** (`Car.set_steer_trim`, limite ±4°) pelo **esterço médio**
+comandado (`centering_steer_gain` = 0,3/s). Seguindo uma reta, a roda real fica
+em 0, então o comando médio é −(viés + trim), e o trim anda até ele zerar.
+
+Por que não pelo erro lateral (o modo antigo, `centering_gain` = 0,15, agora
+0)? Sem a IMU, a guinada da odometria vem do esterço comandado. Com viés na
+direção, a odometria entorta, e com ela o estimador. Na pista virtual, com 2° de
+viés, o carro ficava 11 cm fora do centro enquanto o estimador o via a −2 cm,
+com o sinal trocado. O erro estimado não vê o viés; o esterço médio vê. Em 4
+pistas com ±2° de viés e visão a 7 q/s, o erro RMS ficou em 3,8–8,7 cm pelo
+esterço, contra 5,2–12,3 cm pelo erro lateral. Com ganho 1,0 o carro oscilou na
+pista fechada. A odometria continua usando o esterço pretendido:
 com o centro certo, a roda faz o que a odometria supõe. Se o trim fosse somado
 ao comando, o próprio estimador ficaria enviesado (testado na pista virtual).
 
 O trim aprendido é salvo em `logs/direcao_trim.json` no fim de cada corrida (se
 houve ao menos 3 s de reta), e a corrida seguinte começa dele. Cada corrida move
-o trim salvo só metade do que aprendeu. Na pista virtual, com 3° de viés na
-direção, o pure pursuit ficava em média 10 cm de lado (RMS 10,5 cm); da 2ª
-corrida em diante, RMS de 3,1–3,7 cm, igual a um carro sem viés. O terminal
+o trim salvo só metade do que aprendeu. Na pista virtual, com o trim já certo,
+2° de viés dão o mesmo erro de um carro sem viés (4,0 cm RMS). O terminal
 mostra o trim no início e no fim. Para desligar: `--no-trim-learning`, ou a
 caixa "Aprender o centro da direção" na GUI (aí vale `steering_trim_deg`).
 
@@ -267,6 +314,9 @@ Além disso, um eco curto só para o carro se durar 0,15 s (`obstacle_confirm_s`
 cerca de 2 leituras): nos ensaios de 10/11, 9 de 13 rodadas pararam por uma
 leitura isolada falsa de 0,1–0,2 m.
 
+Leitura de 0,00 m (abaixo de 3 cm) é **falha do sensor**, não obstáculo: conta
+como leitura inválida (`ULTRASONIC_MIN_VALID_M` em `main.py`).
+
 Um obstáculo no meio da faixa não coincide com nenhuma borda e **para como
 antes**, assim como em reta, sem corredor válido ou sem esterço. O terminal
 mostra `Ultrassom a 0.45 m ignorado: cone da borda direita na curva` (no
@@ -282,7 +332,9 @@ não a acha. Além disso, o ajuste por parábola ou arco errava o rumo, às veze
 o sinal trocado. Agora (`line_birdseye`, `line_estimator`, ligados por padrão):
 
 - **Vista de cima** (`BirdsEyeView`): a homografia leva a imagem a uma vista do
-  chão de 0,5 a 3 m à frente e ±1,4 m para os lados, a 1 cm por pixel (280×250).
+  chão de 0,5 a 3 m à frente e ±1,0 m para os lados, a 1 cm por pixel (200×250).
+  A borda do campo de visão (9 px) fica de fora: o canto preto da projeção
+  criava falsas linhas.
   Nela a linha volta a ficar como na câmera inclinada, e o mesmo detector e os
   mesmos `path_settings` funcionam (sem ROI; extensão mínima de 15%). A
   conversão leva ~6 ms por quadro. A transmissão mostra essa vista de cima.
@@ -291,6 +343,25 @@ o sinal trocado. Agora (`line_birdseye`, `line_estimator`, ligados por padrão):
   saem pure pursuit, prévia de curva e limite de visibilidade, como nos cones.
   Na curva fechada à esquerda a linha sai da imagem (câmera 8° à direita); a
   memória vai até 2,5 m / 5 s, com a curvatura mais estável que nos cones.
+
+Nos quadros reais de 10/11 (fita fina e tracejada, piso com reflexo quente do
+mesmo matiz), três filtros foram necessários:
+
+- **Cones apagados** antes da vista de cima (`mask_cones`): verde e vermelho
+  viram a cor mediana do piso. Os riscos dos cones esticados pela homografia
+  eram tomados pela fita.
+- **Saturação mínima** da fita achada (`LINE_MIN_SATURATION` = 36; fita ~49,
+  reflexo ~30): abaixo disso o quadro conta como "sem fita" e a memória segue.
+- **Matiz até 35** (`h_max`): o laranja dos cones e do piso fica de fora.
+
+Com isso, a fita é achada em 53% dos quadros e 86% delas estão certas (antes:
+97% achadas e só 46% certas: seguia o reflexo).
+
+**Fita junto com os cones** (`cone_line_fusion`, ligado): no modo cones, se
+houver fita no centro, um quadro sim e um não ela entra no estimador do
+corredor como linha central, junto com os cones como bordas. Sem fita
+confiável, nada muda. Custa ~6 ms por quadro em média no notebook. O debug
+traz `line_points` no corredor.
 
 Na foto do corredor com uma fita sintética: as retas (com até 25 cm de
 deslocamento e rumo de 0,2 rad) erram milímetros. Rodando a pista com curvas de
@@ -322,7 +393,10 @@ python3 tools/pista_virtual.py --pista s --plot s.png                     # traj
 
 `--set` muda qualquer chave de `main.parameters`. `--latency`, `--fps`,
 `--servo-tau`, `--coast`, `--row-bias` e `--column-bias` pioram o carro, a
-câmera ou a calibração. Ela não substitui o ensaio: não modela escorregamento,
+câmera ou a calibração. `--objetos N` põe N objetos fixos 20–80 cm fora da pista,
+de cor ao acaso, que o detector toma por cone (mochila, roupa). `--falsos`
+define a fração de quadros com um falso ao acaso (padrão 0,05). Com `--linha`, a
+pista usa os ajustes do estimador da linha, como o `main.py`. Ela não substitui o ensaio: não modela escorregamento,
 reflexos nem a detecção de cor. Serve para comparar ajustes antes de levar ao
 carro.
 
@@ -408,12 +482,67 @@ Stanley segue brevemente a última trajetória pela odometria e então para.
 
 ## Calibração e ajustes
 
-A calibração atual contém medidas a 0,30–0,60 m do eixo dianteiro. Ela não
-comprova precisão em toda a área necessária para ver os cones. Confira o
-campo de visão e calibre com pontos no piso cobrindo as distâncias e larguras
-usadas. Se mudar a inclinação da câmera para enxergar mais longe ou as duas
-bordas, refaça a calibração com `tools/calibrar_camera_lateral.py`.
-A homografia vale para o contato no piso, não para o topo dos cones.
+A calibração atual tem pontos de 0,75 a 1,65 m e ±0,3 m. Os cones ficam a
+±0,5–0,65 m e são vistos até 3 m, ou seja, fora da área medida. Pela fita
+amarela dos ensaios de 10/11, o centro achado pelos cones fica a 1–4 cm da
+fita a 1 m (`tools/analisar_ensaio.py --linha`). Ainda assim, vale refazer a
+calibração com a grade:
+
+1. Com o carro parado, marque com fita no chão x = 0,6 / 1 / 1,5 / 2 / 2,5 / 3 m
+   (à frente do **eixo dianteiro**) e y = +1 / +0,5 / 0 / −0,5 / −1 m (esquerda
+   +).
+2. Na GUI, aba de testes: **📷 Foto p/ calibração**. O carro tira a foto (sem
+   janela no Pi), a GUI a traz para `calibracao/fotos/` e abre a calibração no
+   notebook.
+3. A janela pede um ponto por vez, na ordem. Clique nele, ou use **Pular**
+   (espaço) se ele não aparece. Backspace desfaz. Com 5 ou mais pontos, uma cruz
+   azul mostra onde o próximo deve estar. Cada ponto ganha uma cor pelo erro
+   **deixando-o fora do ajuste**: verde até 3 cm, amarelo até 6, vermelho acima
+   (clique ou medida errada).
+4. Salvar grava `calibracao/camera_lateral.json`, com o erro de cada ponto.
+   Depois, **Enviar arquivos** leva o arquivo ao carro.
+
+Sem a GUI: `python3 tools/calibrar_camera_lateral.py --image foto.jpg` (grade)
+ou `--livre` (o modo antigo, digitando cada medida). A homografia vale para o
+contato no piso, não para o topo dos cones.
+
+## Coleta, limpeza e relógio do carro (aba de dados da GUI)
+
+- **📥 Coletar dados** é incremental. Um `find` no carro lista tudo numa ida só,
+  e só vem o que falta no PC, num único fluxo `tar` (milhares de frames sem uma
+  ida e volta por arquivo). O que já foi baixado fica anotado em
+  `<destino>/<carro>/.coletados.json`. Mover ou reorganizar ensaios no PC não
+  faz a coleta baixar de novo. O log mostra quantos arquivos há no carro,
+  quantos já estão no PC e quantos MB vão vir. "Baixar de novo o que já foi
+  coletado" força tudo.
+- **🗑 Apagar do carro o que já está no PC…** coleta primeiro, depois mostra
+  quantos arquivos e MB saem e pede confirmação. Só apaga o que está no PC com o
+  mesmo tamanho. Nunca apaga `direcao_trim.json` (o trim aprendido) nem
+  arquivos mexidos no último minuto (corrida em andamento). Pastas vazias saem
+  junto, e o log mostra o espaço livre no carro.
+- **🕒 Acertar relógio do carro**: o Pi não tem bateria de relógio e, sem
+  internet no hotspot, liga com a hora errada, e os ensaios ganham nomes de
+  data errados. O botão acerta data, hora e fuso pelo notebook (`sudo`, com a
+  senha da GUI) e salva no `fake-hwclock`, para o próximo boot começar perto
+  da hora certa. Toda execução do `main.py` pela GUI confere o relógio e acerta
+  sozinha se a diferença passar de 2 s.
+
+## Relatório do ensaio e versão do código
+
+- `main.py` imprime `Codigo: versao xxxxxxxx` (hash dos `.py`) e grava esse
+  valor em `cones_summary.json` e `vision_status.json`. A GUI compara as
+  versões do notebook e do carro antes de rodar e avisa se forem diferentes.
+- `python3 tools/analisar_ensaio.py <pasta> [--linha]`, ou o botão
+  **📋 Relatório** na aba de dados, traz:
+  - a versão do código;
+  - quadros por segundo e idade da imagem (metas: 15 q/s e 150 ms);
+  - as paradas do ultrassom (eco isolado ou leituras seguidas);
+  - o erro lateral e o rumo RMS (metas: 5 cm e 6°);
+  - o centro estimado em reta e nas curvas, as trocas de lado e o trim.
+
+  Com `--linha` e quadros gravados, mede também a posição real do carro pela
+  fita e o desvio da calibração (centro dos cones − fita a 1 m). O relatório é
+  salvo em `<pasta>/relatorio.txt`.
 
 Em `main.py`, `cone_settings` permite ajustar:
 

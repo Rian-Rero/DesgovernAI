@@ -69,6 +69,17 @@ class CorridorSettings:
     model_sigma: float = .05       # cones fora da curva ideal (posicionamento), m
     model_growth: float = .05      # m por m de caminho: o modelo vale perto
     gate_sigma: float = 3.         # cone a mais de N sigma da previsao e descartado
+    # Faixa de busca: depois do ajuste com todos os cones aceitos, cone a mais de
+    # band_m (+ band_growth por m alem de 1 m) da borda AJUSTADA sai e o quadro e
+    # refeito sem ele. O portao acima e largo longe (curva ainda desconhecida:
+    # 3 sigma passa de 1,5 m a 2,5 m); uma curva de verdade move todos os cones
+    # juntos e o ajuste acompanha, um falso isolado (mochila, roupa) fica fora.
+    # Pista virtual, 15 objetos fixos 20-80 cm fora da pista com cor ao acaso:
+    # sem faixa 11/12 voltas, 11 cm RMS (pior 41), 2 toques; com 0,2 + 0,1/m
+    # 12/12, 4,4 cm (pior 6,6), sem toque, igual a pista sem objetos. Nos 11
+    # ensaios reais de 10/11 tira 22 de ~11 mil cones, sem perder quadros validos.
+    band_m: float = .2             # 0 desliga
+    band_growth: float = .1        # m de faixa por m alem de 1 m (0,3 m a 2 m; 0,4 m a 3 m)
     kappa_noise: float = .1        # (1/m)^2 por m andado
     dkappa_noise: float = .5       # (1/m^2)^2 por m andado: curvas comecam de repente
     init_kappa_sigma: float = .4  # prior da curvatura ao (re)comecar, 1/m
@@ -212,6 +223,31 @@ def sample_centerline(state, arc_lengths, offset=0., max_curvature=2.):
     return np.c_[x - offset*np.sin(t), y + offset*np.cos(t)]
 
 
+def move_states(states, dx, dy, dth, max_curvature=2.):
+    """Estados (S, 5) vistos do eixo dianteiro deslocado (dx, dy) e girado dth.
+
+    Leva a clotoide inteira: o novo ponto mais proximo do eixo, o rumo ali e a
+    curvatura (kappa + dkappa*s). Usado na previsao do estimador e na
+    compensacao do atraso da imagem no seguidor.
+    """
+    states = np.atleast_2d(np.asarray(states, float))
+    line, theta = centerlines(states, max_curvature)
+    diff = np.array([dx, dy]) - line
+    index = np.argmin(np.einsum('smk,smk->sm', diff, diff), axis=1)
+    rows = np.arange(len(states))
+    delta, angle = diff[rows, index], theta[rows, index]
+    c, s_ = np.cos(angle), np.sin(angle)
+    d = delta[:, 1]*c - delta[:, 0]*s_
+    s = ARC[index] + delta[:, 0]*c + delta[:, 1]*s_
+    kappa, dkappa = states[:, KAPPA], states[:, DKAPPA]
+    moved = np.array(states, float)
+    moved[:, E] = -d
+    psi = states[:, PSI] + kappa*s + dkappa*s*s/2 - dth
+    moved[:, PSI] = np.arctan2(np.sin(psi), np.cos(psi))
+    moved[:, KAPPA] = np.clip(kappa + dkappa*s, -max_curvature, max_curvature)
+    return moved
+
+
 def _wrap(angle):
     return math.atan2(math.sin(angle), math.cos(angle))
 
@@ -249,6 +285,7 @@ class CorridorEstimator:
         self.blind_m = 0.
         self.bad_frames = 0
         self.used_center = 0
+        self.band_rejected = 0  # cones tirados pela faixa no ultimo quadro (ja somados em rejected)
 
     def set_homography(self, ground_from_pixel, pixel_scale=1.):
         self.homography = np.asarray(ground_from_pixel, float)
@@ -261,22 +298,7 @@ class CorridorEstimator:
 
     def _move_many(self, states, dx, dy, dth):
         """_move de varios estados (S, 5) de uma vez (estado e passos do jacobiano)."""
-        limit = self.settings.max_curvature
-        line, theta = centerlines(states, limit)
-        diff = np.array([dx, dy]) - line
-        index = np.argmin(np.einsum('smk,smk->sm', diff, diff), axis=1)
-        rows = np.arange(len(states))
-        delta, angle = diff[rows, index], theta[rows, index]
-        c, s_ = np.cos(angle), np.sin(angle)
-        d = delta[:, 1]*c - delta[:, 0]*s_
-        s = ARC[index] + delta[:, 0]*c + delta[:, 1]*s_
-        kappa, dkappa = states[:, KAPPA], states[:, DKAPPA]
-        moved = np.array(states, float)
-        moved[:, E] = -d
-        psi = states[:, PSI] + kappa*s + dkappa*s*s/2 - dth
-        moved[:, PSI] = np.arctan2(np.sin(psi), np.cos(psi))
-        moved[:, KAPPA] = np.clip(kappa + dkappa*s, -limit, limit)
-        return moved
+        return move_states(states, dx, dy, dth, self.settings.max_curvature)
 
     def predict(self, motion, pose_frame=True, dt=0.):
         """motion: (frente, esquerda, yaw) desde o quadro anterior, ou None.
@@ -367,6 +389,10 @@ class CorridorEstimator:
         P = I_KH @ P0 @ I_KH.T + K @ np.diag(R) @ K.T
         return x, P
 
+    def _band(self, along):
+        """Meia largura da faixa de busca em torno da borda ajustada, m."""
+        return self.settings.band_m + self.settings.band_growth*np.maximum(np.asarray(along) - 1., 0.)
+
     def _usable(self, along):
         return (along > -.6) & (along < ARC[-1] - .2)
 
@@ -423,6 +449,7 @@ class CorridorEstimator:
         points = np.vstack([left, right, center])
         sides = np.r_[np.ones(len(left)), -np.ones(len(right)), np.zeros(len(center))]
         self.used_center = 0
+        self.band_rejected = 0
         near = (points[:, 0] > 0) & (points[:, 0] <= cfg.max_range_m) & np.all(np.isfinite(points), axis=1)
         points, sides = points[near], sides[near]
         if not len(points):
@@ -448,6 +475,13 @@ class CorridorEstimator:
                     self.bad_frames = 0
             elif np.any(keep):
                 x, P = self._solve(self.x, self.P, points[keep], sides[keep], covariance[keep])
+                if cfg.band_m > 0 and np.count_nonzero(keep) > 3:
+                    h, _, _, along = self._measure(x, points, sides, covariance)
+                    outside = keep & (np.abs(h) > self._band(along))
+                    if np.any(outside) and np.count_nonzero(keep & ~outside) >= 3:
+                        keep = keep & ~outside
+                        self.band_rejected += int(np.count_nonzero(outside))
+                        x, P = self._solve(self.x, self.P, points[keep], sides[keep], covariance[keep])
                 self.x, self.P = self._constrain(x, P)
         left_used = int(np.sum(keep & (sides > 0)))
         right_used = int(np.sum(keep & (sides < 0)))

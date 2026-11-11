@@ -224,6 +224,12 @@ class MissionTests(unittest.TestCase):
         with patch.object(mission,'RealStanleyFollower',return_value=follower):self.run_fake()
         self.assertFalse(any(call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list))
 
+    def test_zero_reading_is_a_sensor_failure_not_an_obstacle(self):
+        self.car.distances=iter([(0.,True),(0.,True)])
+        follower=Mock()
+        with patch.object(mission,'RealStanleyFollower',return_value=follower):self.run_fake()
+        self.assertFalse(any(call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list))
+
     def test_obstacle_stop_remains_latched_after_distance_recovers(self):
         self.car.steps_left=3
         self.car.distances=iter([(.1,True),(.1,True),(10.,True)])
@@ -310,11 +316,11 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(mission.parameters['encoder_protocol'], 'rc')
 
     def test_cli_selects_reduced_vision_without_changing_default_resolution(self):
-        with patch.object(sys, 'argv', ['main.py', '--vision-width', '320', '--speed', '.3']), \
+        with patch.object(sys, 'argv', ['main.py', '--vision-width', '480', '--speed', '.3']), \
                 patch.object(mission, 'run_mission') as run:
             mission.main()
-        run.assert_called_once_with({'velocity_reference': .3, 'vision_width': 320}, display=False)
-        self.assertEqual(mission.parameters['vision_width'], 0)
+        run.assert_called_once_with({'velocity_reference': .3, 'vision_width': 480}, display=False)
+        self.assertEqual(mission.parameters['vision_width'], 320)  # padrao: 320 (visao rapida)
 
     def test_cli_allows_filter_comparison_without_changing_direction_sign(self):
         with patch.object(sys, 'argv', ['main.py', '--steering-filter', '1']), \
