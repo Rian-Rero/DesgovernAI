@@ -595,20 +595,36 @@ Fluxo (o que só a equipe pode fazer está em **negrito**):
    mais importante.
    `python3 veiculo_real/main.py --record-frames 3 --speed 0.3`
    Também dá para dirigir pelo rádio no modo manual; a visão grava do mesmo jeito.
-2. **Rotular** no notebook. O detector pré-marca os cones e você corrige com
-   cliques. Comece com uns 200–300 quadros revisados.
-   `python3 veiculo_real/tools/rotular_cones.py logs/<ensaio>`
-3. Gerar os recortes (positivos dos rótulos, negativos dos candidatos sem
-   rótulo):
-   `python3 veiculo_real/tools/extrair_recortes_cones.py logs/<a> logs/<b> --out cones_ds.npz --preview amostra.jpg`
-4. Treinar no notebook (`pip install torch --index-url https://download.pytorch.org/whl/cpu onnx`):
-   `python3 veiculo_real/tools/treinar_classificador_cones.py cones_ds.npz --out veiculo_real/modelos/cones.onnx`
+2. **Rotular "é cone? sim / não"** no notebook (`tools/rotular_sim_nao.py`).
+   O jeito mais rápido é o botão **🏷 Rotular cones (sim/não)** na aba de
+   dados da GUI. Ele recorta os candidatos de **todos** os quadros coletados (só
+   os novos, a cada vez: os rótulos feitos ficam) e abre a grade maximizada,
+   com os recortes ocupando a tela toda (colunas e linhas pelo tamanho da tela;
+   F11 = tela cheia), já pré-marcados pelo detector atual (borda verde = sim,
+   vermelha = não). Você só clica nos errados e aperta Enter. O botão direito
+   mostra o quadro inteiro, e `t` marca a página toda como "não". Pela linha de
+   comando (`--colunas`/`--linhas` fixam a grade):
+   ```bash
+   python3 veiculo_real/tools/rotular_sim_nao.py preparar ~/fva_experimentos --saida ~/fva_experimentos/rotulagem
+   python3 veiculo_real/tools/rotular_sim_nao.py rotular ~/fva_experimentos/rotulagem
+   python3 veiculo_real/tools/rotular_sim_nao.py exportar ~/fva_experimentos/rotulagem --out ~/fva_experimentos/rotulagem/cones.npz
+   ```
+   Usa 1 quadro a cada 2 (`--passo`), porque quadros vizinhos repetem os
+   mesmos cones, e no máximo 15 candidatos por quadro. Precisa de quadros
+   gravados (`frames/`, opção "Gravar quadros" da GUI). A foto única
+   `vision_camera.jpg` entra também, mas rende pouco. Um cone que nem a cor
+   larga pegou não aparece na grade; para esses, use o modo antigo
+   (`rotular_cones.py`, clicar na base de cada cone) e o
+   `extrair_recortes_cones.py`.
+3. Treinar no notebook (`pip install torch --index-url https://download.pytorch.org/whl/cpu onnx`):
+   `python3 veiculo_real/tools/treinar_classificador_cones.py ~/fva_experimentos/rotulagem/cones.npz --out veiculo_real/modelos/cones.onnx`
+   (aceita vários `.npz`, inclusive os do modo antigo).
    A validação é separada por quadro. O script mostra a matriz de confusão e
    recarrega o modelo no OpenCV para confirmar que a saída bate com o PyTorch.
-5. Medir antes e depois:
+4. Medir antes e depois:
    `python3 veiculo_real/tools/benchmark_visao.py --cones --image logs/<ensaio>/vision_camera.jpg --classifier veiculo_real/modelos/cones.onnx`
    e `avaliar_cones.py` nos quadros rotulados que ficaram fora do treino.
-6. Usar no carro: `"cone_classifier": "veiculo_real/modelos/cones.onnx"` em
+5. Usar no carro: `"cone_classifier": "veiculo_real/modelos/cones.onnx"` em
    `main.py`, ou `--classifier ...` na linha de comando (`--classifier none`
    desliga).
 

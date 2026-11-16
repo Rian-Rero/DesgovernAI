@@ -1,0 +1,26 @@
+\makeatletter
+% Parâmetros do documento (mesma interface do template dos relatórios)
+\newcommand{\titulo}[1]{\gdef\@titulo{#1}}
+\newcommand{\subtitulo}[1]{\gdef\@subtitulo{#1}}
+\newcommand{\descricao}[1]{\gdef\@descricao{#1}}
+\newcommand{\autores}[1]{\gdef\@autores{#1}}
+\newcommand{\departamento}[1]{\gdef\@departamento{#1}}
+\newcommand{\professor}[1]{\gdef\@professor{#1}}
+\newcommand{\disciplina}[1]{\gdef\@disciplina{#1}}
+\newcommand{\turma}[1]{\gdef\@turma{#1}}
+\newcommand{\data}[1]{\gdef\@data{#1}}
+% Campo a preencher antes da entrega (aparece em vermelho no PDF)
+\newcommand{\pendente}[1]{\textcolor{red}{[#1]}}
+% Figura que só é incluída se o arquivo existir em imgs/;
+% caso contrário, desenha um quadro indicando o arquivo esperado.
+% \figuraopcional{arquivo}{rótulo}{legenda}{o que a figura deve mostrar}
+\newcommand{\figuraopcional}[4]{%
+  \begin{figure}[H]\centering
+  \IfFileExists{imgs/#1}{\includegraphics[width=0.9\linewidth]{imgs/#1}}%
+  {\fbox{\parbox[c][4.5cm][c]{0.85\linewidth}{\centering\small
+     \textcolor{red}{Inserir aqui: \texttt{imgs/#1}}\\[2mm]#4}}}%
+  \caption{#3}\label{fig:#2}\end{figure}}
+\newcommand{\figura}[3][0.85]{%
+  \begin{figure}[H]\centering\includegraphics[width=#1\linewidth]{imgs/#2}
+  \caption{#3}\label{fig:#2}\end{figure}}
+\makeatother

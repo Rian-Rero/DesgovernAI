@@ -65,6 +65,63 @@ class StanleyController:
         return self.steer
 
 
+def orientation_reference(cross_track, heading_error, lookahead=.8):
+    """Erro de orientacao em relacao a um ponto a frente sobre a referencia.
+
+    O ponto fica a `lookahead` metros ao longo da tangente da referencia,
+    partindo do ponto mais proximo do eixo dianteiro. No referencial da
+    tangente ele vale (lookahead, cross_track); girando de heading_error para
+    o referencial do carro, o angulo ate ele e exatamente
+    heading_error + atan2(cross_track, lookahead).
+    Usa os mesmos erros que o Stanley: e_y (+ linha a esquerda) e e_psi.
+    """
+    if not math.isfinite(lookahead) or lookahead <= 0:
+        raise ValueError('lookahead deve ser positivo e finito.')
+    return math.atan2(math.sin(heading_error), math.cos(heading_error)) + \
+        math.atan2(cross_track, lookahead)
+
+
+class OnOffSteering:
+    """Rele de tres niveis com histerese para o esterçamento (on-off lateral).
+
+    e = orientacao desejada - orientacao do carro (positivo: virar a esquerda)
+      e >  +h_on              -> delta = +delta_on
+      e <  -h_on              -> delta = -delta_on
+      |e| <  h_off            -> delta = 0 (volta ao centro)
+      h_off <= |e| <= h_on    -> mantem o nivel anterior (histerese)
+    O atuador continua com limite de taxa, como no Stanley, para comparar
+    as duas leis com o mesmo servo.
+    """
+    def __init__(self, delta_on=math.radians(15), h_on=math.radians(3),
+                 h_off=math.radians(1), max_rate=math.radians(60)):
+        if not all(math.isfinite(x) and x > 0 for x in (delta_on, h_on, max_rate)):
+            raise ValueError('Parametros on-off devem ser finitos e positivos.')
+        if not (math.isfinite(h_off) and 0 <= h_off <= h_on):
+            raise ValueError('Requer 0 <= h_off <= h_on.')
+        self.delta_on, self.h_on, self.h_off = delta_on, h_on, h_off
+        self.max_rate = max_rate
+        self.level = 0  # -1, 0, +1
+        self.steer = 0.
+        self.switches = 0
+
+    def update(self, error, dt):
+        if not (math.isfinite(error) and math.isfinite(dt)) or dt <= 0:
+            raise ValueError('On-off requer erro finito e dt positivo.')
+        previous = self.level
+        if error > self.h_on:
+            self.level = 1
+        elif error < -self.h_on:
+            self.level = -1
+        elif abs(error) < self.h_off:
+            self.level = 0
+        if self.level != previous:
+            self.switches += 1
+        target = self.level * self.delta_on
+        self.steer += float(np.clip(target - self.steer,
+                                    -self.max_rate * dt, self.max_rate * dt))
+        return self.steer
+
+
 def yellow_centers(image, hsv_lower=YELLOW_HSV_LOWER, hsv_upper=YELLOW_HSV_UPPER):
     """Segmenta amarelo em HSV e retorna centros por linha da imagem.
 

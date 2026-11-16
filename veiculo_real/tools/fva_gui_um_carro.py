@@ -2104,6 +2104,12 @@ class RsyncGUI(tk.Tk):
                    command=self.free_car_space).pack(side="left")
         ttk.Button(actions, text="🕒 Acertar relógio do carro",
                    command=self.sync_clock).pack(side="left", padx=(18, 0))
+        training = ttk.Frame(parent)
+        training.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Button(training, text="🏷 Rotular cones (sim/não)", command=self.label_cones).pack(side="left")
+        ttk.Label(training, foreground="#888",
+                  text="Recorta os candidatos de todos os quadros coletados (só os novos) e abre a grade.").pack(
+            side="left", padx=8)
 
         # Mensagens da coleta (altura reduzida para liberar espaço)
         ttk.Label(parent, text="Transferências:").pack(anchor="w", padx=10, pady=(4, 2))
@@ -3348,6 +3354,32 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         finally:
             if client:
                 client.close()
+
+    ########################################
+    def label_cones(self):
+        """Prepara (incremental) os candidatos de tudo que foi coletado e abre a grade sim/nao."""
+        base = os.path.abspath(self.data_dest_entry.get().strip() or "experimentos")
+        out = os.path.join(base, "rotulagem")
+        script = str(Path(__file__).resolve().parent / "rotular_sim_nao.py")
+        report = lambda text: self.ui(self.datalog_write, text)
+
+        def worker():
+            report(f"🏷 Preparando os recortes dos quadros coletados em {base} (só os novos)...")
+            try:
+                result = subprocess.run([sys.executable, script, "preparar", base, "--saida", out],
+                                        capture_output=True, text=True, timeout=3600)
+                lines = (result.stdout + result.stderr).strip().splitlines()
+                for line in lines[-6:]:
+                    report("   " + line)
+                if result.returncode != 0:
+                    return
+                subprocess.Popen([sys.executable, script, "rotular", out])
+                report("   Grade aberta. Ao terminar: rotular_sim_nao.py exportar "
+                       f"{out} --out {os.path.join(out, 'cones.npz')}")
+            except Exception as exc:  # noqa: BLE001 - mostrado no log
+                report(f"❌ Rotulagem: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     ########################################
     def sync_clock(self):

@@ -1,0 +1,24 @@
+\section{Plataformas e Arquitetura do Sistema}\label{sec:arquitetura}
+
+Os ensaios foram realizados no CoppeliaSim 4.10, na cena \texttt{simulador\_cones.ttt}. A aplicação em Python comunica-se com o simulador pela API remota ZMQ em modo síncrono: a cada passo de $50\,\mathrm{ms}$, o mesmo período do PI de velocidade, são lidos os estados e a imagem, calculados os comandos e avançada a simulação. O esterçamento é aplicado por \texttt{car.setSteer()}, que converte o ângulo do modelo bicicleta nos ângulos das duas rodas por Ackermann. Com $|\delta|\le20^\circ$ e $L=0{,}302\,\mathrm{m}$, o menor raio de curva é $L/\tan20^\circ\approx0{,}83\,\mathrm{m}$. Na cena, um comando positivo vira para a direita; os controladores usam a convenção usual (positivo para a esquerda) e o sinal é invertido apenas na aplicação.
+
+A câmera é perspectiva, de $600\times400$ pixels e abertura de $60^\circ$, montada a $\approx0{,}35\,\mathrm{m}$ do chão e inclinada $\approx10^\circ$ para baixo. A borda inferior da imagem corresponde a um ponto $\approx0{,}5\,\mathrm{m}$ à frente do eixo dianteiro, ou seja, a linha nunca é vista sob o ponto em que o erro lateral é definido. A \autoref{tab:parametros-laterais} resume os parâmetros. Os controladores, as referências geométricas e a cadeia de visão estão em \texttt{fva\_car/lateral.py} e \texttt{fva\_car/trajetorias.py}; o laço de ensaio, em \texttt{controle\_lateral.py}.
+
+\begin{table}[ht]
+    \centering
+    \caption{Parâmetros do veículo simulado e dos controladores laterais.}
+    \label{tab:parametros-laterais}
+    \small
+    \begin{tabular}{lc}
+        \hline
+        Parâmetro & Valor \\
+        \hline
+        Período de controle e de aquisição da imagem & $50\,\mathrm{ms}$ \\
+        Esterçamento máximo / taxa máxima (ambos os controladores) & $20^\circ$ / $60^\circ/\mathrm{s}$ \\
+        On-off: amplitude $\delta_{on}$ / histerese $h_{on}$, $h_{off}$ & $15^\circ$ / $3^\circ$, $1^\circ$ \\
+        On-off: distância de antecipação $L_d$ & $0{,}8\,\mathrm{m}$ \\
+        Stanley: ganho $k$ / suavização $v_s$ & $1{,}5\,\mathrm{s^{-1}}$ / $0{,}3\,\mathrm{m/s}$ \\
+        Controle longitudinal (Parte 1) & PI, $k_p=4$, $k_i=2$ \\
+        \hline
+    \end{tabular}
+\end{table}
