@@ -9,3 +9,7 @@ logs/
 *.json
 *.jsonl
 *.log
+# *.json acima e para dados de ensaio; estes sao parte do codigo:
+!veiculo_real/modelos/*.json
+!veiculo_real/tools/tests/dados/*.json
+!veiculo_real/calibracao/camera_lateral*.json

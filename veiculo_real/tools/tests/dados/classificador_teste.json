@@ -1,0 +1,22 @@
+{
+  "classes": [
+    "nao_cone",
+    "cone_verde",
+    "cone_vermelho"
+  ],
+  "crop": {
+    "size": 32,
+    "height_factor": 1.6,
+    "bottom_margin": 0.15,
+    "min_side": 12
+  },
+  "candidate_settings": {
+    "green_h_max": 105,
+    "green_chroma_min": 5,
+    "green_angle_high": 255
+  },
+  "min_confidence": 0.6,
+  "trained": {
+    "aviso": "MODELO DE TESTE: treinado com pseudo-rotulos so para os testes de carregamento; nao usar no carro."
+  }
+}
