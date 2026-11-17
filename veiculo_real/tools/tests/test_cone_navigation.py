@@ -386,11 +386,19 @@ class CalibrationCoverageTests(unittest.TestCase):
         rows = calibration_report(far)['rows_by_distance_m']
         self.assertGreater(rows[.5], rows[2.])  # mais longe = mais alto na imagem
 
-    def test_repository_calibration_is_flagged_as_short(self):
+    def test_repository_calibration_is_flagged_when_short(self):
+        # A calibracao do repositorio muda; o aviso deve acompanhar a cobertura dela.
         report = calibration_report(load_calibration(
-            Path(__file__).resolve().parents[2]/'calibracao'/'camera_lateral.json'))
-        self.assertLess(report['max_x_m'], 1.5)
-        self.assertTrue(report['warnings'])
+            Path(__file__).resolve().parents[2]/'calibracao'/'camera_lateral.json'), max_range_m=3.)
+        short = report['max_x_m'] < 2.4 or report['max_abs_y_m'] < .6
+        self.assertEqual(any('Calibracao do piso cobre' in w for w in report['warnings']), short)
+
+    def test_narrow_calibration_is_flagged_on_the_sides(self):
+        narrow = SimpleNamespace(image_size=(640, 480), homography=H,
+                                 ground_points_m=((.75, .3), (2.5, .3), (2.5, -.3), (.75, -.3)))
+        warnings = calibration_report(narrow, max_range_m=2.5)['warnings']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('+-0.30 m para os lados', warnings[0])
 
     def test_roi_starts_below_the_useful_horizon_and_ignores_objects_above(self):
         detector = ConePathDetector(calibration())

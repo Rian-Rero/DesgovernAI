@@ -120,13 +120,53 @@ class FollowerTests(unittest.TestCase):
         car = fake_car()
         car.dt = .02
         self.apply(follower, LineObservation(10., errors=(0., 0., 0.)), car, 10.)
-        self.assertAlmostEqual(car.vref, 1., places=3)  # primeiro passo: sem historico
+        # Primeiro passo: a rampa parte da velocidade medida (0,4), nao salta para 1.
+        self.assertAlmostEqual(car.vref, .42, places=3)
         follower.speed_target = .3
         self.apply(follower, LineObservation(10.02, errors=(0., 0., 0.)), car, 10.02)
         self.assertAlmostEqual(car.vref, .32, places=3)  # sobe 1 m/s^2 * 0,02 s
         follower.speed_target = 1.
         self.apply(follower, LineObservation(10.04, errors=(0., 0., 1.)), car, 10.04)
         self.assertAlmostEqual(car.vref, math.sqrt(.4/1.), places=2)  # curva: desce na hora
+
+
+class StartupTests(unittest.TestCase):
+    """Partida sem "engasgo": velocidade de recuperacao so com o caminho a frente
+    incerto, alvo longe enquanto o eixo e incerto, rampa a partir da velocidade."""
+    def test_far_cones_do_not_hold_the_car_at_recovery_speed(self):
+        from fva_car.corridor import CorridorEstimator, CorridorSettings
+        from fva_car.lateral import GroundCalibration
+        calibration = GroundCalibration.from_file(Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+        estimator = CorridorEstimator(CorridorSettings(track_width_m=1.2), calibration.homography)
+        x = np.array([.8, 1.2, 1.6, 2.1])  # partida: nenhum cone junto ao eixo
+        estimate = estimator.step(10., np.c_[x, np.full(4, .6)], np.c_[x, np.full(4, -.6)], (0., 0., 0.))
+        self.assertTrue(estimate.valid)
+        self.assertGreater(estimate.sigma[0], .1)       # antes: so isso ja segurava a 0,35 m/s
+        self.assertLess(estimator.lateral_sigma(1., given_width=True), .1)
+        self.assertFalse(estimate.slow)
+        self.assertTrue(estimate.near_uncertain)        # mas mira longe
+
+    def test_uncertain_axle_moves_the_pursuit_target_out(self):
+        settings = dict(FollowerTests.settings, steering_law='pure_pursuit')
+        car = fake_car()
+        follower = RealStanleyFollower(settings)
+        follower.apply(car, LineObservation(10., errors=(.1, 0., 0.), path_dkappa=0.), 10.)
+        self.assertLess(follower.pursuit_target[0], .8)
+        follower = RealStanleyFollower(settings)
+        follower.apply(car, LineObservation(10., errors=(.1, 0., 0.), path_dkappa=0., min_lookahead_m=1.), 10.)
+        self.assertAlmostEqual(follower.pursuit_target[0], 1.)
+
+    def test_settling_estimator_widens_the_jump_gate(self):
+        def rejected(sigma):
+            follower = RealStanleyFollower(dict(FollowerTests.settings, max_lateral_jump_m=.25))
+            car = fake_car()
+            car.v = 0.
+            follower.apply(car, LineObservation(10., errors=(0., 0., 0.), lateral_sigma_m=sigma), 10.)
+            follower.apply(car, LineObservation(10.1, errors=(.35, 0., 0.), lateral_sigma_m=sigma), 10.1)
+            return follower.frame_rejected
+        self.assertTrue(rejected(float('nan')))
+        self.assertTrue(rejected(.02))
+        self.assertFalse(rejected(.3))  # 0,25 + 3*0,3: correcao legitima do estimador
 
 
 class CenteringTests(unittest.TestCase):

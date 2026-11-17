@@ -41,7 +41,16 @@ CAR = {
 # controlador PI de velocidade para comando direto de throttle
 KP_VEL = 1
 KI_VEL = 0.8
-THROTTLE_FF_GAIN = 0.17  # fracao de throttle por m/s
+# Feedforward = throttle de regime: THROTTLE_FF_OFFSET + THROTTLE_FF_GAIN*vref.
+# Nos 11 ensaios de 10/11 (trechos em regime) o throttle foi ~0,42 a 0,3 m/s,
+# 0,39 a 0,55, 0,45 a 0,65 e 0,59 a 0,9 m/s: o ESC so move o carro acima de ~0,35
+# (zona morta). So com 0,17*vref (0,06 a 0,35 m/s) o integrador levava 1-2 s
+# para chegar la; na partida, com o PI oscilando em volta da zona morta, o motor
+# ligava e desligava (o "engasgo"). O offset fica um pouco abaixo da zona morta:
+# o PI completa. Outro carro/ESC/bateria pode pedir outro valor (veja o u em
+# regime no car.csv).
+THROTTLE_FF_OFFSET = 0.32  # throttle com vref > 0
+THROTTLE_FF_GAIN = 0.22  # fracao de throttle por m/s
 VELOCITY_FILTER_SIZE = 5
 
 MACS_CARS = {
@@ -64,6 +73,16 @@ class Car:
     def __init__(self, parameters):
 
         self.parameters = parameters
+        # Feedforward do acelerador (veja THROTTLE_FF_OFFSET): ajustavel por carro
+        # sem editar o codigo (main.py --throttle-offset / campo da GUI).
+        self.ff_offset = float(parameters.get("throttle_ff_offset", THROTTLE_FF_OFFSET))
+        self.ff_gain = float(parameters.get("throttle_ff_gain", THROTTLE_FF_GAIN))
+        # Mapa aprendido do throttle de regime (fva_car/throttle.py); None: so a reta acima.
+        self.throttle_map = None
+        if parameters.get("throttle_learning", False):
+            from .throttle import ThrottleMap
+
+            self.throttle_map = ThrottleMap.from_dict(parameters.get("throttle_map"), self.ff_offset, self.ff_gain)
 
         # detecta carrinho pronto
         self.color = self.get_car_color()
@@ -456,7 +475,13 @@ class Car:
         error = vref_abs - v_abs
 
         # feedforward fornece o throttle de regime; o PI faz a correcao
-        feedforward = THROTTLE_FF_GAIN * vref_abs
+        offset = getattr(self, "ff_offset", THROTTLE_FF_OFFSET)
+        gain = getattr(self, "ff_gain", THROTTLE_FF_GAIN)
+        throttle_map = getattr(self, "throttle_map", None)
+        if throttle_map is not None:
+            feedforward = throttle_map.feedforward(vref_abs)
+        else:
+            feedforward = offset + gain * vref_abs if vref_abs > 0.05 else 0.0
         u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
         u_sat = np.clip(u, 0.0, 1.0)
 
@@ -467,6 +492,11 @@ class Car:
             u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
 
         self.set_u(u)
+        # Em regime (na referencia, sem saturar, sem acelerar): o throttle aplicado
+        # e o que esta velocidade pede. So no automatico (no RC a vref e do radio).
+        if (throttle_map is not None and self.sel_tracao != 0 and vref_abs > 0.15 and abs(error) < 0.04
+                and 0.0 < self.u < 1.0 and abs(getattr(self, "a", 0.0)) < 0.4):
+            throttle_map.update(v_abs, self.u, min(self.dt, 2.0 * self.sample_rate))
 
     ########################################
     # seta throttle dos motores do veiculo

@@ -23,7 +23,9 @@ if str(ROOT) not in sys.path:
 
 GOALS = {  # PLANO_CORRECAO.md
     'quadros_por_s': 15., 'idade_ms': 150., 'erro_rms_cm': 5., 'rumo_rms_graus': 6.,
+    'partida_s': 1.5,  # ate 80% da velocidade de cruzeiro (README_cones.md, "Partida")
 }
+RECOVERY_SPEED = .35  # fva_car/cones.py CONE_RECOVERY_SPEED
 
 
 def _read_jsonl(path):
@@ -125,6 +127,39 @@ def line_truth(folder, records):
     return offsets
 
 
+def startup(car, records):
+    """Partida: primeiros segundos depois que o controle lateral ligou.
+
+    Devolve dict: alvo (vref de cruzeiro), ate_80_s (tempo ate v >= 80% do alvo;
+    nan se nao chegou em 10 s), motor_parou (vezes que v caiu < 0,08 m/s com vref
+    > 0,25 nos primeiros 5 s, depois de ter andado), lenta_s (tempo a velocidade de
+    recuperacao nos primeiros 10 s), esterco_parado_graus (maior |esterco| com o
+    carro parado no primeiro 1,5 s); None sem controle ativo.
+    """
+    if 'lateral_active' not in car or not (car['lateral_active'] == 1).any():
+        return None
+    t0 = float(car.loc[car['lateral_active'] == 1, 't'].iloc[0])
+    window = car[(car['t'] >= t0) & (car['t'] <= t0 + 10.)]
+    active = car[car['lateral_active'] == 1]
+    target = float(active['vref'].quantile(.75)) if len(active) else math.nan
+    reached = window[window['v'] >= .8*target] if math.isfinite(target) and target > 0 else window.iloc[:0]
+    first5 = window[window['t'] <= t0 + 5.]
+    moving = (first5['v'] > .15).cumsum() > 0  # depois de ter andado
+    stalled = ((first5['v'] < .08) & (first5['vref'] > .25) & moving).astype(int)
+    dt = float(np.median(np.diff(car['t']))) if len(car) > 1 else .02
+    slow = window['vref'].between(RECOVERY_SPEED - .005, RECOVERY_SPEED + .005)
+    steer = 'steer_cmd_rad' if 'steer_cmd_rad' in car else 'st' if 'st' in car else None
+    still = window[(window['t'] <= t0 + 1.5) & (window['v'].abs() < .05)]
+    return {
+        'alvo': target,
+        'ate_80_s': float(reached['t'].iloc[0] - t0) if len(reached) else math.nan,
+        'motor_parou': int(np.sum(np.diff(np.r_[0, stalled.to_numpy()]) > 0)),
+        'lenta_s': float(slow.sum()*dt) if target > RECOVERY_SPEED + .05 else math.nan,
+        'esterco_parado_graus': (math.degrees(float(still[steer].abs().max())) if steer and len(still)
+                                 else math.nan),
+    }
+
+
 def report(folder, with_line=False):
     import pandas as pd
     folder = Path(folder)
@@ -146,6 +181,33 @@ def report(folder, with_line=False):
                  f' | visao {status.get("processing_size")}')
     if laws and laws != ['pure_pursuit']:
         warnings.append('ATENCAO controle com Stanley: o plano usa pure pursuit (metade do erro na pista virtual)')
+
+    options = summary.get('options') or {}
+    refined = [((r.get('vision') or {}).get('detection') or {}).get('refined_bases') for r in records]
+    refined = [v for v in refined if v is not None]
+    classified = any(((r.get('vision') or {}).get('detection') or {}).get('classifier') for r in records)
+    flag = lambda value: '?' if value is None else 'sim' if value else 'nao'
+    lines.append('opcoes: classificador ' + flag(options.get('classifier', classified if records else None))
+                 + ' | refino da base ' + flag(options.get('refine_bases', bool(refined) if records else None))
+                 + (f' ({np.mean(refined):.1f} cones/quadro)' if refined else '')
+                 + ' | partida ' + {True: 'ANTIGA', False: 'nova'}.get(options.get('old_start'), '?')
+                 + ('' if 'throttle_ff_offset' not in options or options.get('old_start') else
+                    ' | acelerador aprendido' if options.get('throttle_learning') else
+                    f' | acelerador minimo fixo {options["throttle_ff_offset"]:.2f}'))
+    start = startup(car, records)
+    if start is not None:
+        reached = start['ate_80_s']
+        ok(math.isfinite(reached) and reached <= GOALS['partida_s'],
+           f'partida: 80% de {start["alvo"]:.2f} m/s em '
+           + (f'{reached:.1f} s' if math.isfinite(reached) else 'mais de 10 s (nao chegou)')
+           + f' (meta <= {GOALS["partida_s"]:.1f})'
+           + (f' | {start["lenta_s"]:.1f} s presa a {RECOVERY_SPEED:.2f} m/s' if math.isfinite(start['lenta_s']) else ''))
+        ok(start['motor_parou'] == 0, f'partida: motor parou {start["motor_parou"]} vez(es) nos primeiros 5 s'
+           ' (acelerador minimo baixo? suba na GUI)' if start['motor_parou'] else
+           'partida: motor nao parou nos primeiros 5 s')
+        if math.isfinite(start['esterco_parado_graus']):
+            ok(start['esterco_parado_graus'] < 12., f'partida: maior esterco com o carro parado'
+               f' {start["esterco_parado_graus"]:.0f} graus (fim de curso ~20)')
 
     frames = active.drop_duplicates('vision_frame_id') if 'vision_frame_id' in active else active
     span = max(float(active['t'].max() - active['t'].min()), 1e-3) if len(active) else 1.

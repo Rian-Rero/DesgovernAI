@@ -44,6 +44,11 @@ class LineObservation:
     # Curva vista por uma cor so (estimador em SO_EXTERNA/SO_INTERNA): a outra
     # borda saiu da imagem; o seguidor vira mais e mais rapido (one_border_curve_*).
     one_border_curve: bool = False
+    # Estimador de cones: alvo minimo do pure pursuit (eixo ainda incerto, caminho
+    # a frente conhecido) e desvio do deslocamento no eixo, m (alarga o portao de
+    # salto enquanto o estimador ainda converge). 0 / nan: sem efeito.
+    min_lookahead_m: float = 0.
+    lateral_sigma_m: float = math.nan
 
     @property
     def valid(self):
@@ -834,7 +839,12 @@ class RealStanleyFollower:
             setter(trim)
             self.trim_sent = trim
 
-    def _filter_speed(self, target, dt):
+    def _filter_speed(self, target, dt, current=0.):
+        """current: velocidade medida; a rampa parte dela (na partida e depois de
+        uma parada a vref nao salta direto para o alvo)."""
+        if self.speed_target is None and self.speed_rise > 0:
+            current = float(current) if isinstance(current, (int, float, np.number)) and math.isfinite(current) else 0.
+            self.speed_target = min(target, max(0., abs(current)))
         if self.speed_target is None or self.speed_filter <= 0 and self.speed_rise <= 0:
             self.speed_target = target
         elif self.speed_rise > 0:
@@ -946,7 +956,11 @@ class RealStanleyFollower:
                 measured = errors[:2]
                 if self.compensate_latency and age > 0:
                     measured = self._predict_line(errors, car, min(age, MAX_LATENCY_COMPENSATION))[:2]
-                jump = (abs(measured[0] - expected[0]) > self.max_lateral_jump
+                # Estimador ainda convergindo (eixo incerto): a correcao legitima
+                # passa do salto maximo; o proprio estimador ja descarta cones ruins.
+                sigma = getattr(observation, 'lateral_sigma_m', math.nan)
+                allowed = self.max_lateral_jump + (3.*sigma if math.isfinite(sigma) else 0.)
+                jump = (abs(measured[0] - expected[0]) > allowed
                         or abs(measured[1] - expected[1]) > self.max_heading_jump)
             self.rejected_frames = self.rejected_frames + 1 if jump else 0
             self.frame_rejected = jump and self.rejected_frames <= MAX_REJECTED_FRAMES
@@ -1053,7 +1067,7 @@ class RealStanleyFollower:
                 speed_raw = min(speed_raw, max(self.min_speed, self.latency_budget/max(self.age_average, .05)))
             limit = min(speed_limit, self.line_speed_limit)
             speed_raw = min(speed_raw, limit)
-            car.set_vel(min(self._filter_speed(speed_raw, car.dt), limit))
+            car.set_vel(min(self._filter_speed(speed_raw, car.dt, getattr(car, 'v', 0.)), limit))
             active = bool(getattr(car, 'encoder_valid', True))
             stanley_speed = car.vref if self.use_vref else car.v
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
@@ -1077,7 +1091,8 @@ class RealStanleyFollower:
                        and math.isfinite(self.path_dkappa) and not search)
             self.pursuit_target = None
             if pursuit:
-                lookahead = float(np.clip(self.pursuit_min + self.pursuit_time*abs(stanley_speed),
+                lookahead = float(np.clip(max(self.pursuit_min + self.pursuit_time*abs(stanley_speed),
+                                              getattr(observation, 'min_lookahead_m', 0.) or 0.),
                                           self.pursuit_min, self.pursuit_max))
                 raw, x, y = pure_pursuit_steer(errors, self.path_dkappa, lookahead,
                                                self.controller.wheelbase, self.max_curvature)

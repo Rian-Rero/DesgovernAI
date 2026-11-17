@@ -41,6 +41,68 @@ SIDE_FLIP_FRAMES = 2
 # carro saiu da pista em todas). Trocar com o corredor estimado exige evidencia
 # forte (separacao >= meia largura) por SIDE_FLIP_FRAMES_TRACKING quadros seguidos.
 SIDE_FLIP_FRAMES_TRACKING = 6
+# Profundidade dos cones longe. O detector roda na imagem reduzida (vision_width,
+# 320 px): ali 1 linha vale 6 cm a 2 m e 14 cm a 3 m (a 640 px, metade), e a
+# distancia sai da linha da base. Em cones sinteticos com a calibracao real,
+# o erro de distancia a 2-3 m foi 5-10 cm (desvio) a 320 px e 1-2 cm a 640 px.
+# Por isso a base de cada cone alem de REFINE_MIN_DISTANCE_M e refeita na imagem
+# CHEIA, so numa janela em volta dele (mesma segmentacao de cor e mesma regra de
+# base do detector): a precisao de 640 px pelo custo de 320 px + ~0,1 ms/cone.
+REFINE_MIN_DISTANCE_M = 1.3
+REFINE_BASE_M = .15        # largura da base do cone (janela de busca)
+
+
+def refine_bases(frame, points, color, detector, settings, scale, light=None, ground_from_pixel=None,
+                 min_distance=REFINE_MIN_DISTANCE_M):
+    """Bases (N, 2) em px da imagem reduzida -> mesmas bases refeitas na imagem cheia.
+
+    frame: BGR na resolucao calibrada; scale: px cheios por px reduzido; color: 0
+    verde, 1 vermelho (ordem de ConePathDetector.segment); light: ganhos BGR da
+    normalizacao de luz do quadro; ground_from_pixel: homografia da imagem cheia
+    (decide quem esta longe e o tamanho da janela). Base sem mascara na janela,
+    ou que andaria mais de 1,5 px reduzido, fica como estava. Devolve (bases,
+    quantas mudaram).
+    """
+    points = np.asarray(points, float).reshape(-1, 2)
+    if not len(points) or scale <= 1 or ground_from_pixel is None:
+        return points, 0
+    height, width = frame.shape[:2]
+    full = (points + .5)*scale - .5
+    ground = transform_points(full, ground_from_pixel)
+    inverse = np.linalg.inv(ground_from_pixel)
+    out, changed = points.copy(), 0
+    table = None
+    if light is not None and np.any(np.abs(np.asarray(light, float) - 1.) > 1e-3):
+        table = np.clip(np.arange(256, dtype=np.float32)[:, None]*np.asarray(light, np.float32)[None, :], 0, 255)
+        table = table.astype(np.uint8).reshape(1, 256, 3)
+    for k, ((x, y), (gx, gy)) in enumerate(zip(full, ground)):
+        if not (np.isfinite(gx) and gx >= min_distance):
+            continue
+        edges = transform_points(np.array([[gx, gy - REFINE_BASE_M/2], [gx, gy + REFINE_BASE_M/2]]), inverse)
+        half = max(3., abs(edges[1, 0] - edges[0, 0])/2)
+        x0, x1 = int(max(0, math.floor(x - 1.3*half) - 2)), int(min(width, math.ceil(x + 1.3*half) + 3))
+        y0, y1 = int(max(0, math.floor(y - 4*scale) - 2)), int(min(height, math.ceil(y + 3*scale) + 3))
+        if x1 - x0 < 6 or y1 - y0 < 6:
+            continue
+        crop = frame[y0:y1, x0:x1]
+        if table is not None:
+            crop = cv2.LUT(crop, table)
+        mask = detector.segment(np.ascontiguousarray(crop), settings, roi=0)[color]
+        band = mask[:, max(0, int(x - 1.1*half) - x0):int(x + 1.1*half) - x0 + 1] > 0
+        widths = np.count_nonzero(band, axis=1)
+        rows = np.flatnonzero(widths)
+        if len(rows) < 2 or widths.max() < 2:
+            continue
+        # Mesma regra do detector: base = linha mais larga mais baixa (o reflexo
+        # no piso brilhante, abaixo, se estreita).
+        base = int(np.flatnonzero(widths >= .85*widths.max()).max())
+        columns = np.flatnonzero(band[base]) + max(0, int(x - 1.1*half) - x0)
+        new = np.array([x0 + (columns.min() + columns.max())/2, y0 + base], float)
+        moved = (new + .5)/scale - .5
+        if np.all(np.abs(moved - points[k]) <= 1.5):
+            out[k] = moved
+            changed += 1
+    return out, changed
 
 
 def path_separation(green, red, state, max_curvature=2.):
@@ -135,7 +197,7 @@ class ConeObservation(LineObservation):
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
-                 classifier=None, corridor=None, line_fusion=False):
+                 classifier=None, corridor=None, line_fusion=False, refine_bases=True):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
 
         corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
@@ -182,6 +244,10 @@ class RealConeDetector:
         w, h = calibration.image_size
         self.processing_size = (w, h) if not processing_width else (processing_width, round(h*processing_width/w))
         self.render_preview = render_preview
+        # Base dos cones longe refeita na imagem cheia (refine_bases acima).
+        self.refine = bool(refine_bases) and self.processing_size != (w, h)
+        self.full_homography = np.asarray(calibration.homography, float)
+        self.refined = 0
         # Um unico detector: os lados sao decididos pela geometria, com histerese,
         # sem reprocessar o quadro inteiro com as cores trocadas.
         self.detector = ConePathDetector(calibration, classifier=self.classifier)
@@ -230,6 +296,17 @@ class RealConeDetector:
             motion = self.odometry.delta(self.last_timestamp, timestamp)
         self.last_timestamp = timestamp
         result = self.detector.process(small, self.settings, timestamp=timestamp, motion=motion)
+        if self.refine:
+            scale = frame.shape[1]/small.shape[1]
+            light = (result.debug.get('detection') or {}).get('light')
+            changed = 0
+            for index, name in enumerate(('green_points', 'red_points')):
+                points, count = refine_bases(frame, getattr(result, name), index, self.detector, self.settings,
+                                             scale, light, self.full_homography)
+                setattr(result, name, points)
+                changed += count
+            self.refined = changed
+            result.debug.setdefault('detection', {})['refined_bases'] = changed
         self.green_left = bool(result.green_left)
         # O desenho usa o lado decidido neste quadro.
         settings = replace(self.settings, green_left=self.green_left)
@@ -269,6 +346,8 @@ class RealConeDetector:
         path_dkappa = math.nan
         speed_cap = math.inf
         one_border_curve = False
+        min_lookahead = 0.
+        sigma_e = math.nan
         if self.corridor is not None:
             center = None
             if self.line is not None:
@@ -288,6 +367,9 @@ class RealConeDetector:
                 if estimate.state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA'):
                     speed_cap = self.corridor.settings.one_border_speed
                 one_border_curve = estimate.state in ('SO_EXTERNA', 'SO_INTERNA')
+                sigma_e = float(estimate.sigma[0])
+                if estimate.near_uncertain:
+                    min_lookahead = self.corridor.settings.check_distance_m
             metadata['corridor'] = estimate
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
@@ -308,7 +390,7 @@ class RealConeDetector:
             errors=tuple(float(e) for e in errors) if valid else None,
             speed_limit=CONE_RECOVERY_SPEED if valid and recovery else speed_cap,
             speed_factor=speed_factor, path_dkappa=path_dkappa, one_border_curve=one_border_curve,
-            reason=reason, debug=debug,
+            reason=reason, debug=debug, min_lookahead_m=min_lookahead, lateral_sigma_m=sigma_e,
             corridor_width_m=width, **metadata)
         return self.with_preview(observation) if self.render_preview else observation
 

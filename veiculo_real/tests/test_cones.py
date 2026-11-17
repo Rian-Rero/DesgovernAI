@@ -348,3 +348,38 @@ class HairpinSideTests(unittest.TestCase):
         flips = [tracker.update(green, red, estimator, fallback=True)[2] for _ in range(SIDE_FLIP_FRAMES_TRACKING)]
         self.assertEqual(flips, [False]*(SIDE_FLIP_FRAMES_TRACKING-1) + [True])
         self.assertFalse(tracker.green_left)
+
+
+class FarBaseRefinementTests(unittest.TestCase):
+    """Base dos cones longe refeita na imagem cheia (fva_car/cones.py refine_bases)."""
+    def setUp(self):
+        from fva_car.cones import refine_bases
+        self.refine = refine_bases
+        self.calibration = GroundCalibration.from_file(
+            Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+        self.inverse = np.linalg.inv(self.calibration.homography)
+        self.frame = np.full((480, 640, 3), (150, 156, 158), np.uint8)
+        self.detector = RealConeDetector(self.calibration, processing_width=320)
+
+    def cone(self, x, y):
+        """Cone vermelho com a base em (x, y) m; devolve a base em px da imagem cheia."""
+        u, v = cv2.perspectiveTransform(np.array([[[x, y]]]), self.inverse)[0, 0]
+        u, v = int(round(u)), int(round(v))
+        cv2.fillConvexPoly(self.frame, np.array([(u, v-16), (u-6, v), (u+6, v)], np.int32), (30, 30, 210))
+        return np.array([u, v], float)
+
+    def test_far_base_gets_the_full_resolution_row_and_near_ones_stay(self):
+        far, near = self.cone(2.4, -.3), self.cone(1., .2)
+        reduced = lambda pixel: (pixel + .5)/2 - .5
+        # O detector a 320 px entrega a base com 1 linha reduzida (2 px cheios) de erro.
+        given = np.array([reduced(far) - [0, 1.], reduced(near) - [0, 1.], [20., 200.]])
+        refined, changed = self.refine(self.frame, given, 1, self.detector.detector, self.detector.settings, 2.,
+                                       None, self.detector.full_homography)
+        self.assertEqual(changed, 1)
+        np.testing.assert_allclose(refined[0], reduced(far), atol=.5)  # meio px reduzido = 1 px cheio
+        np.testing.assert_allclose(refined[1:], given[1:])  # perto (< 1,3 m) e sem cone: intactos
+
+    def test_detector_uses_it_only_on_reduced_images(self):
+        self.assertTrue(self.detector.refine)
+        self.assertFalse(RealConeDetector(self.calibration).refine)  # 640: ja e a imagem cheia
+        self.assertFalse(RealConeDetector(self.calibration, processing_width=320, refine_bases=False).refine)

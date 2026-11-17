@@ -147,6 +147,24 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result['seguidas'], 1)
         self.assertEqual(result['depois'][:2], [.5, 4.])
 
+    def test_startup_section_finds_the_stutter(self):
+        import pandas as pd
+        report = load_tool('analisar_ensaio')
+        t = np.arange(500)*.02
+        # Liga em 1 s; 2 s presa a 0,35 m/s com o motor parando, depois sobe a 0,8.
+        vref = np.where(t < 1., 0., np.where(t < 3., .35, .8))
+        v = np.where(t < 1.2, 0., np.where(t < 3., .25 + .1*np.sign(np.sin(8*t)), np.minimum(.8, .2 + (t - 3.))))
+        v[(t > 1.6) & (t < 1.7)] = 0.  # motor morreu
+        car = pd.DataFrame(dict(t=t, v=v, vref=vref, lateral_active=(t >= 1.).astype(int),
+                                steer_cmd_rad=np.where(t < 1.2, .3, 0.)))
+        start = report.startup(car, [])
+        self.assertAlmostEqual(start['alvo'], .8)
+        self.assertAlmostEqual(start['ate_80_s'], 2.44, delta=.03)  # 0,64 m/s em t = 3,44 s
+        self.assertAlmostEqual(start['lenta_s'], 2., delta=.05)
+        self.assertEqual(start['motor_parou'], 1)
+        self.assertGreater(start['esterco_parado_graus'], 15.)
+        self.assertIsNone(report.startup(car.assign(lateral_active=0), []))
+
     def test_report_on_a_synthetic_run(self):
         import json
         import pandas as pd
@@ -172,6 +190,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn('OK      visao: 16.7 quadros/s', text)
         self.assertIn('OK      erro lateral (estimador): 2.0 cm', text)
         self.assertNotIn('ATENCAO', text)
+        self.assertIn('partida: 80% de 0.70 m/s em 0.0 s', text)
 
 
 if __name__ == '__main__':

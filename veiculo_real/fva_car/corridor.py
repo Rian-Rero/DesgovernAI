@@ -83,6 +83,16 @@ class CorridorSettings:
     kappa_noise: float = .1        # (1/m)^2 por m andado
     dkappa_noise: float = .5       # (1/m^2)^2 por m andado: curvas comecam de repente
     init_kappa_sigma: float = .4  # prior da curvatura ao (re)comecar, 1/m
+    # Prior do deslocamento e do rumo no eixo: .6 m / .6 rad ao recomecar depois
+    # de uma perda (o carro pode estar em qualquer lugar). Na PRIMEIRA vez da
+    # corrida o carro foi posto a mao no corredor, alinhado: start_sigma_e/psi.
+    # Com cones so a 1,2-2,6 m, o eixo e pouco observavel e o prior decide quanto
+    # tempo a incerteza leva para cair (partida, README_cones.md). Replay dos 11
+    # ensaios de 10/11: 0,25 m / 0,3 rad tirava quase toda a espera, mas na pista
+    # virtual com objetos falsos numa curva fechada o erro subia de 5 para 7 cm;
+    # 0,5 passa em todos os testes de robustez e encurta a espera nos piores.
+    start_sigma_e: float = .5     # m
+    start_sigma_psi: float = .5    # rad
     init_dkappa_sigma: float = .4  # prior da variacao da curvatura, 1/m^2
     time_noise: float = 1.         # escala do ruido por segundo (mesmo parado o modelo erra)
     max_curvature: float = 2.      # 1/m
@@ -97,7 +107,19 @@ class CorridorSettings:
     max_sigma_lateral: float = .2  # m, a check_distance_m
     max_sigma_e: float = .5        # teto no eixo, m
     max_sigma_psi: float = .5      # rad (e e psi no eixo sao correlacionados; vale o lateral)
-    slow_sigma_e: float = .1       # acima disso, velocidade de recuperacao
+    # Velocidade de recuperacao (CONE_RECOVERY_SPEED) so quando o caminho A FRENTE
+    # e incerto: sigma lateral a check_distance_m > slow_sigma_lateral, ou o eixo
+    # muito incerto (slow_sigma_e). Antes valia sigma no eixo > 0,1 m: na partida,
+    # com os cones a 1,5 m, isso segurava o carro a 0,35 m/s por 1,6-4,1 s nos 11
+    # ensaios de 10/11 (motor na zona morta do ESC: o "engasgo"), e em 4 deles
+    # tambem em 70-100% do resto da volta, com o caminho a frente bem medido.
+    # Com o novo criterio, a partida libera em 0-2,3 s (replay_corredor dos mesmos).
+    slow_sigma_lateral: float = .1  # m, a check_distance_m
+    slow_sigma_e: float = .3       # m, no eixo
+    # Eixo ainda incerto (sigma > near_sigma_e) mas caminho a frente conhecido: o
+    # pure pursuit mira pelo menos check_distance_m a frente (alvo bem medido),
+    # nao 0,4 m (alvo pela incerteza do eixo, direcao batendo no fim de curso).
+    near_sigma_e: float = .1       # m
     straight_curvature: float = .15  # 1/m: abaixo disso uma borda so e "reta"
     pose_offset_m: float = .36     # do ponto da pose (eixo traseiro) ao eixo dianteiro
     # Teto absoluto (m/s) com uma borda so (SO_EXTERNA/SO_INTERNA/UMA_BORDA_RETA):
@@ -137,6 +159,7 @@ class CorridorEstimate:
     reason: str = ''
     state_vector: tuple | None = None  # (e, psi, kappa, dkappa, W) para desenhar
     slow: bool = False             # incerteza alta: limitar a velocidade
+    near_uncertain: bool = False   # eixo incerto (sigma e > near_sigma_e): mirar longe
     learned_width_m: float = math.nan  # largura aprendida nesta corrida (nan: ainda nao medida)
 
     @property
@@ -153,6 +176,7 @@ class CorridorEstimate:
                 'learned_width_m': r(self.learned_width_m),
                 'used': list(self.used), 'rejected': int(self.rejected),
                 'blind_m': r(self.blind_m), 'speed_factor': self.speed_factor, 'slow': bool(self.slow),
+                'near_uncertain': bool(self.near_uncertain),
                 'reason': self.reason}
 
 
@@ -261,6 +285,7 @@ class CorridorEstimator:
         self.homography = None if ground_from_pixel is None else np.asarray(ground_from_pixel, float)
         self.pixel_scale = float(pixel_scale)
         self.learned_width = None  # sobrevive a reset(): a pista nao muda ao perder os cones
+        self.started = False       # ja inicializou nesta corrida (sobrevive a reset())
         self.reset()
 
     @property
@@ -413,7 +438,9 @@ class CorridorEstimator:
         cfg = self.settings
         x0 = np.array([0., 0., 0., 0., self.nominal_width])
         width_sigma = cfg.init_width_sigma if self.learned_width is None else (cfg.width_prior_sigma or .2)
-        P0 = np.diag([.6**2, .6**2, cfg.init_kappa_sigma**2, cfg.init_dkappa_sigma**2, width_sigma**2])
+        sigma_e, sigma_psi = (.6, .6) if self.started else (cfg.start_sigma_e, cfg.start_sigma_psi)
+        P0 = np.diag([sigma_e**2, sigma_psi**2, cfg.init_kappa_sigma**2, cfg.init_dkappa_sigma**2,
+                      width_sigma**2])
         keep = np.ones(len(points), bool)
         x, P = x0, P0
         for _ in range(3):
@@ -433,6 +460,7 @@ class CorridorEstimator:
         elif left + right < 3 or (min(left, right) == 0 and max(left, right) < 3):
             return None
         x, P = self._constrain(x, P)
+        self.started = True
         return x, P, keep
 
     def update(self, left, right, center=None):
@@ -530,6 +558,10 @@ class CorridorEstimator:
         # nao medida, segue a borda a meia largura do palpite (como a recuperacao
         # por uma borda do detector), devagar (slow, pelo sigma do eixo).
         lateral_sigma = self.lateral_sigma(cfg.check_distance_m, given_width=True)
+        # Uma borda so e a largura nunca medida nesta corrida: o centro sai do
+        # palpite de largura (lateral_sigma acima o supoe conhecido): devagar.
+        width_guessed = (state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA') and self.learned_width is None
+                         and sigma[WIDTH] > cfg.width_prior_sigma)
         # Em MEMORIA o carro segue o trecho ja visto; o criterio a frente vale
         # para liberar a partida e com cones, e o limite e memory_m.
         uncertain = ((state != 'MEMORIA' and lateral_sigma > cfg.max_sigma_lateral)
@@ -549,7 +581,9 @@ class CorridorEstimator:
         errors = (float(self.x[E]), float(self.x[PSI]), float(self.x[KAPPA])) if valid else None
         estimate = CorridorEstimate(valid, state, errors, float(self.x[WIDTH]), sigma, (used_left, used_right),
                                     rejected, self.blind_m, reason, tuple(float(v) for v in self.x),
-                                    slow=valid and (state == 'MEMORIA' or sigma[E] > cfg.slow_sigma_e),
+                                    slow=valid and (state == 'MEMORIA' or lateral_sigma > cfg.slow_sigma_lateral
+                                                    or sigma[E] > cfg.slow_sigma_e or width_guessed),
+                                    near_uncertain=valid and sigma[E] > cfg.near_sigma_e,
                                     learned_width_m=math.nan if self.learned_width is None else self.learned_width)
         if state == 'PERDIDO':
             self.reset()

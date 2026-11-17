@@ -213,8 +213,9 @@ class Labeler:
         self.status = tk.StringVar()
         tk.Label(self.root, textvariable=self.status, font=('TkDefaultFont', -round(1.3*self.font_px), 'bold'),
                  pady=4).pack()
-        tk.Label(self.root, text='Clique = trocar sim/nao   |   botao direito = quadro inteiro   |   '
-                                 'Enter = proxima pagina   |   Backspace = voltar   |   t = pagina toda "nao"'
+        tk.Label(self.root, text='Pergunta: o objeto NA MARCA AMARELA (ponto = base) e um cone?   |   '
+                                 'Clique = trocar   |   botao direito = quadro inteiro   |   Enter = proxima'
+                                 '   |   Backspace = voltar   |   t = pagina toda "nao"   |   m = esconder marca'
                                  '   |   F11 = tela cheia',
                  fg='#555', font=('TkDefaultFont', -self.font_px)).pack()
         buttons = tk.Frame(self.root)
@@ -235,6 +236,8 @@ class Labeler:
         for key in ('<BackSpace>', 'b'):
             self.root.bind(key, lambda event: self.previous())
         self.root.bind('t', lambda event: self.all_no())
+        self.show_mark = True
+        self.root.bind('m', lambda event: self.toggle_mark())
         self.root.bind('<F11>', lambda event: self.fullscreen())
         for key in ('q', '<Escape>'):
             self.root.bind(key, lambda event: self.quit())
@@ -271,6 +274,25 @@ class Labeler:
         if self._pending_draw is not None:  # arrastando a borda: desenha so quando parar
             self.root.after_cancel(self._pending_draw)
         self._pending_draw = self.root.after(60, self.draw)
+
+    def toggle_mark(self):
+        self.show_mark = not self.show_mark
+        self.draw()
+
+    def mark(self, x, y):
+        """Onde o candidato esta no recorte de tela: a base fica sempre no mesmo lugar
+        (centro, 1 - bottom_margin) e um cone de verdade ocuparia ~1/height_factor de altura."""
+        tile = self.tile
+        base_x, base_y = x + tile/2, y + (1 - VIEW_CROP['bottom_margin'])*tile
+        height = tile/VIEW_CROP['height_factor']
+        half = .35*height
+        width = max(2, tile//110)
+        for color, extra in (('#000000', width + 2), ('#ffd400', width)):  # contorno preto: ve no claro e no escuro
+            self.canvas.create_rectangle(base_x - half, base_y - height, base_x + half, base_y,
+                                         outline=color, width=extra, dash=(6, 4))
+        dot = max(4, tile//28)
+        self.canvas.create_oval(base_x - dot, base_y - dot, base_x + dot, base_y + dot, fill='#ffd400',
+                                outline='#000000', width=2)
 
     def fullscreen(self):
         self.root.attributes('-fullscreen', not self.root.attributes('-fullscreen'))
@@ -315,9 +337,10 @@ class Labeler:
             color = '#22dd44' if yes else '#ff3333'
             self.canvas.create_rectangle(x - line//2, y - line//2, x + tile + line//2, y + tile + line//2,
                                          outline=color, width=line)
-            cone = 'verde' if item['cor'] == 'green' else 'vermelho'
+            if self.show_mark:
+                self.mark(x, y)
             self.canvas.create_text(x + tile/2, y + tile + self.label_h()/2 + 2,
-                                    text=f'{"SIM" if yes else "NAO"}  ({cone})', fill=color,
+                                    text='É CONE' if yes else 'NÃO É CONE', fill=color,
                                     font=('TkDefaultFont', -self.font_px, 'bold'))
         done = len(self.labels)
         total = len(self.items)

@@ -62,6 +62,17 @@ parameters = {
         Path(__file__).resolve().parent / "calibracao" / "camera_lateral.json"
     ),
     "velocity_reference": MAIN_VEL,
+    # Acelerador minimo com vref > 0 (zona morta do ESC; fva_car/car.py,
+    # THROTTLE_FF_OFFSET). Tranco na partida: baixe; ainda engasga: suba.
+    "throttle_ff_offset": 0.32,
+    # Throttle de regime aprendido por faixa de velocidade e salvo entre corridas
+    # (fva_car/throttle.py, logs/acelerador.json): o offset acima vira so o valor
+    # inicial. --throttle-offset fixa o valor e desliga o aprendizado.
+    "throttle_learning": True,
+    # Partida como antes de 17/11 (comparacao A/B): velocidade de recuperacao
+    # pelo sigma no eixo > 0,1 m, alvo do pure pursuit sem minimo e acelerador
+    # 0,17*vref sem offset. Tambem --old-start.
+    "old_start": False,
     "stanley_gain": 1.5,
     "stanley_softening": 0.3,
     "stanley_use_vref": True,  # True: vref no denominador; False: velocidade medida (car.v)
@@ -186,6 +197,11 @@ parameters = {
     # 98% dos cones ate 1,5 m, 94% ate 2,2 m e 86% ate 3 m. 480: 99/97/91%, so 28%
     # mais rapido. A linha amarela usa a vista de cima e ignora isto.
     "vision_width": 320,
+    # Base dos cones a mais de 1,3 m refeita na imagem cheia (so uma janela em volta
+    # de cada um; fva_car/cones.py refine_bases): nos quadros reais de 10/11 a
+    # distancia a 1,7-2,6 m passou a bater com a de 640 px (p90 da diferenca
+    # 8-14 cm -> 4-5 cm) por +0,7 ms/quadro no notebook. False desliga.
+    "cone_refine_bases": True,
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
@@ -241,7 +257,11 @@ def corridor_settings(config):
     if not isinstance(value, dict):
         raise ValueError("cone_estimator deve ser True, False ou um dicionario de ajustes.")
     # A pose do Car e do eixo traseiro; os cones tem origem no eixo dianteiro.
-    return {"pose_offset_m": float(config.get("wheelbase", 0.36)), **value}
+    settings = {"pose_offset_m": float(config.get("wheelbase", 0.36)), **value}
+    if config.get("old_start", False):
+        # Criterio antigo: devagar com sigma no eixo > 0,1 m e alvo sem minimo.
+        settings.update(slow_sigma_e=0.1, slow_sigma_lateral=99.0, near_sigma_e=99.0)
+    return settings
 
 
 def cone_calibration_warnings(calibration, detector):
@@ -291,6 +311,33 @@ def save_steering_trim(follower, config, path=TRIM_FILE):
         "aprendido_nesta_corrida_deg": round(learned, 2), "reta_s": round(learned_time, 1),
         "salvo_em": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2) + "\n", encoding="utf-8")
     return value
+
+
+# Throttle de regime aprendido (fva_car/throttle.py): em logs/, como o trim.
+THROTTLE_FILE = Path(__file__).resolve().parent / "logs" / "acelerador.json"
+THROTTLE_MIN_STEADY_S = 3.0  # so salva com pelo menos isto de regime na corrida
+
+
+def load_throttle_map(path=THROTTLE_FILE):
+    """Mapa salvo pelas corridas anteriores (dict) ou None."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def save_throttle_map(car, config, path=THROTTLE_FILE):
+    """Grava o mapa do throttle para a proxima corrida; devolve o mapa ou None."""
+    throttle_map = getattr(car, "throttle_map", None)
+    if not config.get("throttle_learning", False) or throttle_map is None:
+        return None
+    if throttle_map.learned_s < THROTTLE_MIN_STEADY_S:
+        return None
+    data = dict(throttle_map.to_dict(), regime_nesta_corrida_s=round(throttle_map.learned_s, 1),
+                salvo_em=time.strftime("%Y-%m-%d %H:%M:%S"))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return throttle_map
 
 
 def now_print_ok(last, now, period=1.0):
@@ -473,6 +520,11 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     config = dict(parameters)
     if settings is not None:
         config.update(settings)
+    if config.get("old_start", False):
+        config["throttle_ff_offset"], config["throttle_ff_gain"] = 0.0, 0.17  # acelerador de antes de 17/11
+        config["throttle_learning"] = False
+    if config.get("throttle_learning", False) and car_factory is None and "throttle_map" not in config:
+        config["throttle_map"] = load_throttle_map()
     if not config["camera"] or config["ultrasonic_steering"]:
         raise ValueError(
             "Stanley requer camera ligada e fixa (ultrasonic_steering=False)."
@@ -497,6 +549,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             processing_width=config.get("vision_width", 0),
             classifier=config.get("cone_classifier"), corridor=corridor,
             line_fusion=bool(config.get("cone_line_fusion", False)),
+            refine_bases=bool(config.get("cone_refine_bases", True)),
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -553,7 +606,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    processing_width=config.get("vision_width", 0),
                                    classifier=config.get("cone_classifier"),
                                    corridor=corridor_settings(config),
-                                   line_fusion=bool(config.get("cone_line_fusion", False)))
+                                   line_fusion=bool(config.get("cone_line_fusion", False)),
+                                   refine_bases=bool(config.get("cone_refine_bases", True)))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -593,6 +647,15 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                          record_hz=record_hz)
             recorder.notes["calibration_warnings"] = calibration_warnings
             recorder.notes["code_version"] = version
+            # Opcoes desta volta, para o relatorio comparar voltas (A/B).
+            recorder.notes["options"] = {
+                "classifier": bool(config.get("cone_classifier")),
+                "refine_bases": bool(config.get("cone_refine_bases", True)),
+                "old_start": bool(config.get("old_start", False)),
+                "throttle_ff_offset": float(config.get("throttle_ff_offset", 0.32)),
+                "throttle_learning": bool(config.get("throttle_learning", False)),
+                "velocity_reference": float(config.get("velocity_reference", 0.0)),
+            }
         except OSError as error:
             print(f"Debug de cones desativado: {error}", flush=True)
     stop_event = threading.Event()
@@ -857,6 +920,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                   f" {saved:+.1f} graus ({TRIM_FILE.name}).", flush=True)
                     except (OSError, TypeError, ValueError) as error:
                         print(f"Trim da direcao nao salvo: {error}", flush=True)
+                    try:
+                        learned = save_throttle_map(car, config)
+                        if learned is not None:
+                            print(f"Acelerador: regime aprendido ({learned.learned_s:.0f} s nesta corrida):"
+                                  f" {learned.summary()} ({THROTTLE_FILE.name}).", flush=True)
+                    except (OSError, TypeError, ValueError) as error:
+                        print(f"Mapa do acelerador nao salvo: {error}", flush=True)
                 car.close()
                 if plot is not None:
                     plot[0].close(plot[1])
@@ -939,6 +1009,14 @@ def main():
     parser.add_argument("--min-radius", type=float, metavar="R",
                         help="Cones: raio (m) da curva mais fechada da pista; limita a velocidade nas retas"
                              " (padrao 1.2; 0 desliga)")
+    parser.add_argument("--throttle-offset", type=float, metavar="U",
+                        help="Acelerador minimo fixo com o carro andando (zona morta do ESC). Sem esta"
+                             " opcao, o throttle e aprendido e salvo entre corridas (logs/acelerador.json)."
+                             " Tranco na partida: baixe; engasga: suba")
+    parser.add_argument("--no-refine", action="store_true",
+                        help="Cones: sem o refino da base dos cones longe na imagem cheia (comparacao)")
+    parser.add_argument("--old-start", action="store_true",
+                        help="Partida como antes de 17/11, para comparar (ignora --throttle-offset)")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
@@ -981,6 +1059,15 @@ def main():
         if args.min_radius < 0:
             parser.error("--min-radius deve ser >= 0")
         settings["min_curve_radius_m"] = args.min_radius
+    if args.throttle_offset is not None:
+        if not 0. <= args.throttle_offset <= .6:
+            parser.error("--throttle-offset deve estar entre 0 e 0.6")
+        settings["throttle_ff_offset"] = args.throttle_offset
+        settings["throttle_learning"] = False  # valor fixo para comparar
+    if args.no_refine:
+        settings["cone_refine_bases"] = False
+    if args.old_start:
+        settings["old_start"] = True
     if args.no_preview:
         settings["speed_preview_m"] = 0.0
         settings["speed_rise_m_s2"] = 0.0

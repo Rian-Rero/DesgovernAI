@@ -67,6 +67,26 @@ class MissionOptionsTests(unittest.TestCase):
         self.assertNotIn("--line-classic", gui.build_main_command({"line_highcam": False}))  # so na linha
         self.assertFalse({"steering_law", "record_frames_hz", "cone_classifier", "cone_estimator"} & set(settings))
 
+    def test_comparison_switches_and_throttle_reach_main(self):
+        """Rodada de testes: refino e partida nova liga/desliga, acelerador minimo."""
+        self.assertNotIn("cone_refine_bases", parsed(gui.build_main_command({})))
+        self.assertFalse(parsed(gui.build_main_command({"refine": False}))["cone_refine_bases"])
+        self.assertNotIn("--no-refine", gui.build_main_command({"navigation": "line", "refine": False}))
+        self.assertNotIn("throttle_learning", parsed(gui.build_main_command({})))  # auto: aprende no carro
+        fixed = parsed(gui.build_main_command({"throttle_offset": "0.28"}))
+        self.assertEqual((fixed["throttle_ff_offset"], fixed["throttle_learning"]), (.28, False))
+        self.assertEqual(parsed(gui.build_main_command({"throttle_offset": "0,36"}))["throttle_ff_offset"], .36)
+        for typing in ("auto", "", ".", "abc", "0.9"):  # auto, digitando ou fora da faixa: aprende
+            self.assertNotIn("throttle_ff_offset", parsed(gui.build_main_command({"throttle_offset": typing})))
+        old = parsed(gui.build_main_command({"new_start": False, "throttle_offset": "0.28"}))
+        self.assertTrue(old["old_start"])
+        self.assertNotIn("throttle_ff_offset", old)  # a partida antiga traz o acelerador antigo
+        self.assertEqual(mission.corridor_settings(old)["slow_sigma_e"], .1)
+        self.assertNotIn("slow_sigma_e", mission.corridor_settings({}))
+        label = gui.command_label(gui.build_main_command({"refine": False, "new_start": False}))
+        self.assertTrue(label.endswith("_sem-refino_partida-antiga"), label)
+        self.assertTrue(gui.command_label(gui.build_main_command({"throttle_offset": "0.28"})).endswith("_acel0.28"))
+
     def test_only_main_lines_are_rewritten(self):
         self.assertEqual(gui.with_main_command("ls\npython3 -u main.py --speed 0.7\necho fim", "python3 -u main.py X"),
                          "ls\npython3 -u main.py X\necho fim")

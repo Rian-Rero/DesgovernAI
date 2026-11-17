@@ -207,7 +207,10 @@ class EstimatorTests(unittest.TestCase):
         for k in range(10):
             estimate = est.step(.15*k, left, right, (0., 0., 0.) if k else None)
         self.assertTrue(estimate.valid, estimate.reason)
-        self.assertTrue(estimate.slow)  # parte devagar ate os cones chegarem perto
+        # Antes partia a 0,35 m/s ate os cones chegarem perto (o "engasgo"). O
+        # caminho a 1 m ja e conhecido: parte normal, mirando longe (eixo incerto).
+        self.assertFalse(estimate.slow)
+        self.assertTrue(estimate.near_uncertain)
         self.assertLess(abs(estimate.errors[0]), .2)
         self.assertLess(abs(estimate.errors[2]), .2)
 

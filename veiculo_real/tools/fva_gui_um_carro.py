@@ -72,12 +72,16 @@ MISSION_DEFAULTS = {
     "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
     "trim_learning": True,        # False: --no-trim-learning (trim da direcao fixo)
     "line_highcam": True,         # linha amarela com a camera alta; False: --line-classic
+    "refine": True,               # False: --no-refine (base dos cones longe na imagem reduzida)
+    "new_start": True,            # False: --old-start (partida como antes de 17/11, para comparar)
+    "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
+THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
-                     "curve_echo")
+                     "curve_echo", "refine")
 LINE_ONLY_OPTIONS = ("line_highcam",)
 
 
@@ -115,6 +119,17 @@ def build_main_command(options: dict) -> str:
             parts.append(f"--min-radius {o['min_radius']}")
         if o["classifier"] and str(o["classifier_path"]).strip():
             parts.append(f"--classifier {shlex.quote(str(o['classifier_path']).strip())}")
+        if not o["refine"]:
+            parts.append("--no-refine")
+    if not o["new_start"]:
+        parts.append("--old-start")  # ja traz o acelerador antigo
+    else:
+        try:  # campo editavel: texto invalido (digitando) fica no padrao
+            offset = float(str(o["throttle_offset"]).replace(",", "."))
+        except ValueError:
+            offset = None
+        if offset is not None and 0 <= offset <= .6:  # "auto" (ou invalido): aprendido no carro
+            parts.append(f"--throttle-offset {offset:g}")
     return " ".join(parts)
 
 
@@ -213,6 +228,12 @@ def command_label(command: str) -> str:
                 parts.append("gravando")
             if "--classifier" in options and options["--classifier"].lower() != "none":
                 parts.append("rede")
+            if "--no-refine" in options:
+                parts.append("sem-refino")
+        if "--old-start" in options:
+            parts.append("partida-antiga")
+        elif options.get("--throttle-offset"):
+            parts.append(f"acel{options['--throttle-offset']}")
         return "_".join(parts)
     if "unittest" in argv:
         return "testes_unitarios"
@@ -236,7 +257,8 @@ SYNC_DATA_DIR_WORDS = ("log", "experimento", "ajuste_camera", "frames", "recorte
 SYNC_DATA_DIR_DATE = re.compile(r"^\d{8}_\d{4,6}|^\d{4}-\d{2}-\d{2}")
 SYNC_RUN_FILES = {"car.csv", "cones_debug.jsonl", "cones_summary.json", "vision_status.json"}
 SYNC_SKIP_SUFFIXES = (".pyc", ".pyo", ".swp", ".csv", ".jsonl", ".npz", ".npy", ".zip", ".tar", ".gz", ".7z",
-                      ".rar", ".jpg", ".jpeg", ".bmp", ".mp4", ".avi", ".mov", ".mkv", ".log", ".bag", ".h264")
+                      ".rar", ".jpg", ".jpeg", ".bmp", ".mp4", ".avi", ".mov", ".mkv", ".log", ".bag", ".h264",
+                      ".pdf")
 SYNC_SKIP_FILES = {".DS_Store", "Thumbs.db"}
 # Compatibilidade: pastas de dados do carro que nunca sao apagadas nem enviadas.
 SYNC_SKIP_TOP_DIRS = {"logs", "experimentos", "ajuste_camera"}
@@ -492,7 +514,7 @@ def remote_code_version(client, remote_dir: str):
 # nao faz a coleta baixar tudo de novo.
 COLLECT_MANIFEST = ".coletados.json"
 # Estado do carro dentro de logs/: vem na coleta, mas nunca e apagado do carro.
-COLLECT_KEEP = {"direcao_trim.json"}
+COLLECT_KEEP = {"direcao_trim.json", "acelerador.json"}
 COLLECT_TAR_MIN_FILES = 8      # a partir disto, um fluxo tar (frames: milhares de arquivos pequenos)
 DELETE_MIN_AGE_S = 60          # arquivo mexido ha menos disso pode ser de uma corrida em andamento
 CLOCK_TOLERANCE_S = 2.0
@@ -659,6 +681,12 @@ def open_folder(path: Path):
     """Abre a pasta no gerenciador de arquivos do sistema."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
+    open_file(path)
+
+
+def open_file(path: Path):
+    """Abre o arquivo (ou pasta) com o programa padrao do sistema."""
+    path = Path(path)
     if platform.system() == "Windows":
         os.startfile(str(path))  # noqa: S606
     elif platform.system() == "Darwin":
@@ -815,6 +843,7 @@ class RsyncGUI(tk.Tk):
         style.configure("TNotebook.Tab", font=("Arial", 11, "bold"), padding=[7, 7])
 
         self._build_ui()
+        self._fit_to_screen()
         self.after(50, self._flush_test_output)
         self.after(100, self._refresh_live_video)
         # preenche a senha padrão (se houver)
@@ -1122,6 +1151,9 @@ class RsyncGUI(tk.Tk):
         self.ax.grid(True)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        # Pedido pequeno: na janela de 1120 px os dois paineis cabem (a figura de
+        # 6 pol. + terminal de 80 colunas pediam 1344 px e cortavam o terminal).
+        self.canvas.get_tk_widget().configure(width=420, height=320)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
         ########################################
@@ -1136,6 +1168,7 @@ class RsyncGUI(tk.Tk):
             fg="white",
             insertbackground="white",
             font=("Courier", 11),
+            width=60,
         )
         self.cmd_log.pack(fill="both", expand=True)
 
@@ -1180,12 +1213,17 @@ class RsyncGUI(tk.Tk):
         for value, label in (("cones", "Cones"), ("line", "Linha amarela")):
             ttk.Radiobutton(row, text=label, value=value,
                             variable=self.mission_vars["navigation"]).pack(side="left", padx=(4, 8))
-        for label, key, values, width in (("Vel. máx. retas [m/s]:", "speed", SPEED_PRESETS, 6),
-                                          ("Curva mais fechada R [m]:", "min_radius", CURVE_RADII, 5),
-                                          ("Largura da visão:", "vision_width", VISION_WIDTHS, 5),
-                                          ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4)):
-            ttk.Label(row, text=label).pack(side="left", padx=(12, 4))
-            combo = ttk.Combobox(row, textvariable=self.mission_vars[key], state="readonly",
+        # Duas linhas: numa so (1156 px) passava da janela de 1120.
+        row2 = ttk.Frame(box)
+        row2.pack(fill="x", padx=6, pady=(0, 2))
+        for index, (label, key, values, width) in enumerate((
+                ("Vel. máx. retas [m/s]:", "speed", SPEED_PRESETS, 6),
+                ("Curva mais fechada R [m]:", "min_radius", CURVE_RADII, 5),
+                ("Largura da visão:", "vision_width", VISION_WIDTHS, 5),
+                ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4))):
+            parent_row = row if index < 2 else row2
+            ttk.Label(parent_row, text=label).pack(side="left", padx=(12 if index != 2 else 0, 4))
+            combo = ttk.Combobox(parent_row, textvariable=self.mission_vars[key], state="readonly",
                                  values=values, width=width)
             combo.pack(side="left")
             self.mission_combos = {**getattr(self, "mission_combos", {}), key: combo}
@@ -1202,6 +1240,8 @@ class RsyncGUI(tk.Tk):
             ("curve_echo", "Ultrassom ignora cone da borda na curva"),
             ("trim_learning", "Aprender o centro da direção (trim)"),
             ("line_highcam", "Linha: câmera alta (vista de cima)"),
+            ("refine", "Refino da base dos cones longe"),
+            ("new_start", "Partida nova (sem engasgo)"),
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])
@@ -1223,11 +1263,30 @@ class RsyncGUI(tk.Tk):
         self.mission_checks["classifier"] = check
         self.classifier_entry = ttk.Entry(extra, textvariable=self.mission_vars["classifier_path"], width=26)
         self.classifier_entry.pack(side="left", padx=(4, 0))
-        ttk.Label(box, foreground="#b06000",
+        throttle = ttk.Frame(box)
+        throttle.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(throttle, text="Acelerador mínimo:").pack(side="left")
+        # Editavel: aceita outro valor alem da lista.
+        self.throttle_combo = ttk.Combobox(throttle, textvariable=self.mission_vars["throttle_offset"],
+                                           values=THROTTLE_OFFSETS, width=5)
+        self.throttle_combo.pack(side="left", padx=(4, 8))
+        ttk.Label(throttle, foreground="#555",
+                  text="auto = o carro aprende | número fixo: tranco na partida, baixe; engasga, suba"
+                  ).pack(side="left")
+        ttk.Label(box, foreground="#b06000", wraplength=1000, justify="left",
                   text="Gravar quadros deixa a visão ~20% mais lenta: só para coleta, nunca em corrida "
                        "valendo. Relatório do ensaio: python3 tools/analisar_ensaio.py <pasta> --linha").pack(
             anchor="w", padx=6, pady=(0, 4))
         self._update_mission_widgets()
+
+    def _fit_to_screen(self):
+        """Abre com o tamanho que o conteudo pede (no minimo 1120x760), ate o limite
+        da tela: em 760 px de altura a aba Comandos deixava ~60 px para o terminal."""
+        self.update_idletasks()
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width = max(1120, min(self.winfo_reqwidth(), screen_w - 40))
+        height = max(760, min(self.winfo_reqheight(), screen_h - 100))
+        self.geometry(f"{min(width, screen_w)}x{min(height, screen_h)}")
 
     def mission_options(self):
         return {key: variable.get() for key, variable in getattr(self, "mission_vars", {}).items()}
@@ -1248,6 +1307,7 @@ class RsyncGUI(tk.Tk):
             radius.state(["readonly", "!disabled"] if cones and options.get("estimator", True)
                          else ["disabled"])
         self.classifier_entry.state(["!disabled"] if cones and options.get("classifier") else ["disabled"])
+        self.throttle_combo.state(["!disabled"] if options.get("new_start", True) else ["disabled"])
 
     def apply_mission_options(self):
         if not hasattr(self, "cmd_text") or not hasattr(self, "mission_checks"):
@@ -1505,7 +1565,13 @@ class RsyncGUI(tk.Tk):
         ttk.Button(controls, text="📂 Dados coletados", command=self.open_collected_data).pack(
             side="left", padx=4
         )
-        ttk.Button(controls, text="📷 Foto p/ calibração", command=self.calibration_photo).pack(
+        calibration = ttk.Frame(parent)
+        calibration.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(calibration, text="Calibração da câmera:").pack(side="left")
+        ttk.Button(calibration, text="🖨 Marcadores da grade", command=self.calibration_markers).pack(
+            side="left", padx=4
+        )
+        ttk.Button(calibration, text="📷 Foto p/ calibração", command=self.calibration_photo).pack(
             side="left", padx=4
         )
 
@@ -1722,6 +1788,22 @@ class RsyncGUI(tk.Tk):
         ).start()
 
     ########################################
+    def calibration_markers(self):
+        """PDF com o mapa dos pontos que a camera ve e um marcador por ponto (grade_calibracao.py)."""
+        root = Path(__file__).resolve().parents[1]
+        pdf = root / "calibracao" / "marcadores_grade.pdf"
+        result = subprocess.run([sys.executable, str(root / "tools" / "grade_calibracao.py"), "--pdf", str(pdf)],
+                                cwd=str(root), capture_output=True, text=True)
+        self.clear_test_log()
+        self._queue_test_output((result.stdout + result.stderr).strip())
+        if result.returncode != 0:
+            messagebox.showerror("Marcadores", "Não foi possível gerar o PDF (veja a saída do teste).")
+            return
+        self._queue_test_output(
+            "Imprima em tamanho real. Página 1: onde marcar e como medir. Depois: cole cada marcador com o "
+            "centro (onde os pretos se tocam) no ponto. A foto p/ calibração usa a mesma numeração.")
+        open_file(pdf)
+
     def calibration_photo(self):
         """Tira a foto no carro (sem janela la), traz e abre a calibracao por grade aqui."""
         targets = self.get_selected_devices()
@@ -1733,8 +1815,8 @@ class RsyncGUI(tk.Tk):
             return
         if not messagebox.askokcancel(
             "Foto para calibração",
-            "Carro parado, com a grade de fita no chão (x = 0,6 a 3 m a partir do eixo "
-            "dianteiro; y = -1 a +1 m) e nenhuma missão rodando.\n\nTirar a foto agora?",
+            "Carro parado, com os marcadores da grade no chão (🖨 Marcadores da grade: mapa e "
+            "numeração; x a partir do eixo dianteiro) e nenhuma missão rodando.\n\nTirar a foto agora?",
         ):
             return
         self.clear_test_log()

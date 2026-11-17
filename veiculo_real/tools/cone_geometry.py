@@ -29,13 +29,20 @@ def image_homography(calibration, shape):
     return calibration.homography @ scale
 
 
-def calibration_report(calibration, shape=None, max_range_m=2.5, min_coverage_m=1.5):
+def calibration_report(calibration, shape=None, max_range_m=2.5, min_coverage_m=None, min_lateral_m=.6):
     """Ate onde a homografia do piso vale e onde fica o horizonte na imagem.
 
     Uma calibracao feita com outra inclinacao da camera, ou so com pontos
     proximos, leva os cones distantes a posicoes metricas absurdas (ensaio de
-    23/10: todo o piso visivel virou 0,3-1,2 m). Retorna avisos legiveis.
+    23/10: todo o piso visivel virou 0,3-1,2 m). Fora dos pontos medidos a
+    homografia e extrapolada: a de 05/11 (0,75-1,65 m, +-0,3 m) servia ate ~1,5 m
+    (erro ~2 cm nos ensaios de 10/11) e errava ~20 cm alem disso, com os cones
+    usados ate 3 m e a +-0,6-0,9 m. Avisa se os pontos nao chegam a
+    min_coverage_m a frente (padrao: 80% de max_range_m) ou a +-min_lateral_m.
+    Retorna avisos legiveis.
     """
+    if min_coverage_m is None:
+        min_coverage_m = .8*max_range_m
     h, w = shape if shape is not None else calibration.image_size[::-1]
     homography = image_homography(calibration, (h, w))
     inverse = np.linalg.inv(homography)
@@ -55,7 +62,12 @@ def calibration_report(calibration, shape=None, max_range_m=2.5, min_coverage_m=
     if report['max_x_m'] is not None and report['max_x_m'] < min_coverage_m:
         report['warnings'].append(
             f"Calibracao do piso cobre so ate {report['max_x_m']:.2f} m a frente; os cones sao usados ate "
-            f"{max_range_m:.1f} m. Refaca com pontos ate 2,5 m (README_cones.md).")
+            f"{max_range_m:.1f} m (alem disso a distancia e extrapolada). Refaca com a grade ate 3 m"
+            f" (README_cones.md, Calibracao).")
+    if report['max_abs_y_m'] is not None and report['max_abs_y_m'] < min_lateral_m:
+        report['warnings'].append(
+            f"Calibracao do piso cobre so +-{report['max_abs_y_m']:.2f} m para os lados; os cones ficam a"
+            f" +-0,6-0,9 m. Refaca com a grade (+-1 m) (README_cones.md, Calibracao).")
     far = rows.get(round(max_range_m, 1)) if round(max_range_m, 1) in rows else None
     if far is None:
         pixel = transform_points([[max_range_m, 0.]], inverse)[0]

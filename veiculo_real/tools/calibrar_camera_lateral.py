@@ -13,6 +13,12 @@ ponto de fora do ajuste): verde <= 3 cm, amarelo <= 6, vermelho acima (clique er
 ou medida errada: desfaca). Cones ficam a +-0,5-0,65 m: por isso a grade vai a +-1 m.
 
 No carro, so a foto (sem janela):  python3 tools/calibrar_camera_lateral.py --capturar /tmp/foto.jpg
+
+Grade sugerida (padrao quando existe): tools/grade_calibracao.py preve, pela
+calibracao atual, quais pontos a camera ve e gera o PDF com o mapa e os
+marcadores para imprimir (calibracao/grade_sugerida.json). Esta janela usa a
+mesma ordem e numeracao, mostra desde o inicio onde cada ponto deve aparecer
+(circulos numerados) e tem lupa no canto. --grade-fixa volta a grade de 30 pontos.
 """
 import argparse
 import json
@@ -194,8 +200,11 @@ def select_points(frame, output):
     window.mainloop()
 
 
-def select_grid(frame, output, targets, photo_path=None):
-    """Um ponto da grade por vez; mostra a previsao do proximo e o erro de cada um."""
+def select_grid(frame, output, targets, photo_path=None, hints=None):
+    """Um ponto da grade por vez; mostra a previsao do proximo e o erro de cada um.
+
+    hints: pixel previsto de cada alvo pela calibracao anterior (ou None): circulos
+    numerados desde o inicio, para achar cada marcador na foto."""
     import tkinter as tk
     from tkinter import messagebox
     from PIL import Image, ImageTk
@@ -208,8 +217,15 @@ def select_grid(frame, output, targets, photo_path=None):
     photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).resize(display_size))
     prompt = tk.StringVar()
     tk.Label(window, textvariable=prompt, font=('TkDefaultFont', 13, 'bold'), padx=12, pady=8).pack()
-    canvas = tk.Canvas(window, width=display_size[0], height=display_size[1], cursor='crosshair')
-    canvas.pack(padx=12)
+    views = tk.Frame(window)
+    views.pack(padx=12)
+    canvas = tk.Canvas(views, width=display_size[0], height=display_size[1], cursor='crosshair')
+    canvas.pack(side='left')
+    # Lupa: 5x em volta do mouse (piso brilhante: o centro do marcador e pequeno longe).
+    ZOOM, RADIUS = 5, 16
+    lens = tk.Canvas(views, width=2*RADIUS*ZOOM, height=2*RADIUS*ZOOM, bg='black')
+    lens.pack(side='left', padx=(8, 0), anchor='n')
+    lens_photo = {}
     table = tk.Text(window, height=8, width=70, font=('Courier', 10))
     state = {'index': 0, 'pixels': [], 'ground': [], 'skipped': []}
 
@@ -227,10 +243,23 @@ def select_grid(frame, output, targets, photo_path=None):
             x, y = screen(u, v)
             canvas.create_oval(x-5, y-5, x+5, y+5, fill=color, outline='black')
             canvas.create_text(x+10, y-10, text=str(number), fill='white', anchor='w')
+        if hints is not None:
+            for number, (u, v) in enumerate(hints, 1):
+                if number - 1 < state['index'] or not (np.isfinite(u) and np.isfinite(v)):
+                    continue
+                x, y = screen(u, v)
+                current = number - 1 == state['index']
+                radius = 16 if current else 6
+                canvas.create_oval(x-radius, y-radius, x+radius, y+radius, width=3 if current else 1,
+                                   outline='magenta' if current else '#bbbbbb')
+                canvas.create_text(x+radius+3, y+radius, text=str(number), anchor='w',
+                                   fill='magenta' if current else '#dddddd')
         if state['index'] < len(targets):
             x_m, y_m = targets[state['index']]
-            prompt.set(f'Ponto {state["index"]+1}/{len(targets)}: clique na marca a {x_m:.2f} m a frente,'
-                       f' {abs(y_m):.2f} m {"a esquerda" if y_m > 0 else "a direita" if y_m < 0 else "no centro"}')
+            prompt.set(f'Ponto {state["index"]+1}/{len(targets)} (marcador {state["index"]+1}): clique no centro'
+                       f' a {x_m:.2f} m a frente,'
+                       f' {abs(y_m):.2f} m {"a esquerda" if y_m > 0 else "a direita" if y_m < 0 else "no centro"}'
+                       + ('  (circulo magenta: onde deve estar)' if hints is not None else ''))
             if len(pixels) >= 5:
                 matrix = fit_homography(ground, pixels)  # chao -> pixel: onde o proximo deve estar
                 if matrix is not None:
@@ -242,6 +271,22 @@ def select_grid(frame, output, targets, photo_path=None):
             prompt.set('Grade completa: confira os erros e salve.')
         table.delete('1.0', 'end')
         table.insert('end', '\n'.join(rows[::-1]) or 'Clique nos pontos na ordem pedida (Pular se nao aparece).')
+
+    def magnify(event):
+        u, v = event.x / scale, event.y / scale
+        x0, y0 = int(round(u)) - RADIUS, int(round(v)) - RADIUS
+        patch = np.zeros((2*RADIUS, 2*RADIUS, 3), np.uint8)
+        a, b = max(0, x0), max(0, y0)
+        c, d = min(width, x0 + 2*RADIUS), min(height, y0 + 2*RADIUS)
+        if c > a and d > b:
+            patch[b-y0:d-y0, a-x0:c-x0] = frame[b:d, a:c]
+        big = cv2.resize(patch, None, fx=ZOOM, fy=ZOOM, interpolation=cv2.INTER_NEAREST)
+        lens_photo['image'] = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(big, cv2.COLOR_BGR2RGB)))
+        lens.delete('all')
+        lens.create_image(0, 0, image=lens_photo['image'], anchor='nw')
+        middle = RADIUS*ZOOM
+        lens.create_line(middle-14, middle, middle+14, middle, fill='cyan')
+        lens.create_line(middle, middle-14, middle, middle+14, fill='cyan')
 
     def add_point(event):
         if state['index'] >= len(targets):
@@ -306,10 +351,33 @@ def select_grid(frame, output, targets, photo_path=None):
     tk.Button(buttons, text='Salvar calibracao', command=save).pack(side='left', padx=6)
     table.pack(padx=12, pady=(0, 12))
     canvas.bind('<Button-1>', add_point)
+    canvas.bind('<Motion>', magnify)
     window.bind('<BackSpace>', lambda event: undo())
     window.bind('<space>', lambda event: skip())
     redraw()
     window.mainloop()
+
+
+def grid_targets(args, image_size):
+    """(alvos, pixels previstos ou None). Padrao: a grade sugerida (a mesma do PDF
+    de marcadores; sem o arquivo, sugerida agora pela calibracao atual)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from grade_calibracao import load_grid, predict_pixels, suggest_grid
+    previous = None
+    try:
+        previous = GroundCalibration.from_file(args.output)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if args.grade_fixa or args.grade_x or args.grade_y:
+        targets = grid_points(args.grade_x or GRID_X, args.grade_y or GRID_Y)
+    else:
+        targets = load_grid()
+        if targets is None and previous is not None:
+            targets = suggest_grid(previous.homography, tuple(image_size)) or None
+        targets = targets or grid_points()
+    if previous is None or tuple(previous.image_size) != tuple(image_size):
+        return targets, None
+    return targets, [tuple(p) for p in predict_pixels(previous.homography, targets)]
 
 
 def main():
@@ -322,8 +390,10 @@ def main():
                         help='so tira a foto (no carro, sem janela) e sai')
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument('--livre', action='store_true', help='clicar e digitar cada medida (sem grade)')
-    parser.add_argument('--grade-x', type=float, nargs='+', default=GRID_X, help='distancias a frente (m)')
-    parser.add_argument('--grade-y', type=float, nargs='+', default=GRID_Y, help='laterais, esquerda + (m)')
+    parser.add_argument('--grade-x', type=float, nargs='+', help='distancias a frente (m); com --grade-y: grade fixa')
+    parser.add_argument('--grade-y', type=float, nargs='+', help='laterais, esquerda + (m)')
+    parser.add_argument('--grade-fixa', action='store_true',
+                        help='grade fixa de 30 pontos em vez da sugerida (calibracao/grade_sugerida.json)')
     args = parser.parse_args()
     try:
         if args.capturar:
@@ -344,7 +414,8 @@ def main():
             if args.livre:
                 select_points(frame, args.output)
             else:
-                select_grid(frame, args.output, grid_points(args.grade_x, args.grade_y), args.image)
+                targets, hints = grid_targets(args, frame.shape[1::-1])
+                select_grid(frame, args.output, targets, args.image, hints)
     except (ValueError, RuntimeError, OSError) as error:
         parser.exit(2, f'{error}\n')
 

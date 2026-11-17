@@ -156,6 +156,32 @@ para 215 de 246 (os 31 restantes não têm cones). O salto entre quadros caiu de
 33 cm / 30° para 0,9 cm / 0,6° (p90 do E2). O custo é de ~1,7 ms por quadro no
 notebook; meça no Pi com `tools/benchmark_visao.py --cones`.
 
+### Profundidade dos cones longe
+
+A distância de cada cone sai da **linha da base** na imagem (homografia do
+chão). Com a câmera quase nivelada, 3 m fica a ~5 linhas do horizonte: 1 px
+de linha vale 0,8 cm a 1 m, 3 cm a 2 m e 7 cm a 3 m na imagem cheia (640 px), e
+o dobro na imagem reduzida que o detector usa (`vision_width` 320). O que foi
+medido (novembro de 2026):
+
+- **Arfagem não é a causa.** Estimando a inclinação da câmera quadro a quadro
+  junto com o corredor, os ensaios de 10/11 deram ~1 px de desvio, e na pista
+  virtual não mudou nada. A ideia foi descartada.
+- **A resolução reduzida é.** Em cones sintéticos na posição exata (calibração
+  real, borda suave, desfoque), o erro de distância a 2-3 m foi o dobro a 320 px.
+  Nos 411 quadros reais de 10/11, a 320 px a distância dos cones a 1,7-2,6 m
+  diferia da de 640 px em 4-7 cm (mediana) e 8-14 cm (p90).
+- **Refino da base na imagem cheia** (`refine_bases` em `fva_car/cones.py`,
+  `cone_refine_bases` no `main.py`). Para cada cone a mais de 1,3 m, a base é
+  refeita na imagem de 640 px, numa janela pequena em volta dele, com a mesma
+  segmentação de cor e a mesma regra de base do detector. Nos quadros reais, a
+  diferença para 640 px caiu para 0 (mediana) e 3,6-4,9 cm (p90) a 1,7-2,6 m.
+  Custo: +0,7 ms por quadro no notebook (5,6 → 6,3 ms; 640 inteiro custa 14,5).
+
+O estimador já pesa cada cone pela incerteza da homografia (pequena na direção,
+grande na distância, crescendo com o quadrado da distância), então cones longe
+pesam menos. Com a base mais precisa, eles atrapalham menos o ajuste da curva.
+
 ### Largura da pista (aprendida em corrida)
 
 A pista muda de largura a cada dia, então `cone_settings.track_width_cm` é só
@@ -204,6 +230,56 @@ RMS, contra 7,5–9,4 cm do Stanley. O maior erro isolado é no grampo de R = 1,
 (~18 cm, folga de 58 cm até os cones). O `car.csv` ganha `pursuit_lookahead_m`,
 `pursuit_target_y_m`, `path_dkappa`, `preview_speed_m_s` e
 `preview_curvature_m_inv`.
+
+### Partida (sem "engasgo")
+
+Nos 11 ensaios de 10/11 o carro ficava 0,9-3,9 s preso a 0,35 m/s depois de
+ligar, e a velocidade oscilava entre 0,03 e 0,4 m/s. Havia três causas:
+
+1. **Velocidade de recuperação pelo eixo.** O estimador mandava ir devagar com
+   sigma do deslocamento **no eixo** > 0,1 m. Na partida os cones estão a 1,5 m
+   ou mais, e esse sigma só cai andando. Agora vale a incerteza do caminho **a
+   frente** (`slow_sigma_lateral`, sigma lateral a 1 m < 0,1 m) ou um eixo muito
+   incerto (`slow_sigma_e` 0,3 m), ou uma borda só com a largura ainda nunca
+   medida. Na **primeira** inicialização da corrida, o palpite do deslocamento e
+   do rumo no eixo é 0,5 m / 0,5 rad (`start_sigma_e/psi`; depois de uma perda,
+   0,6), porque o carro foi posto à mão no corredor. No replay dos mesmos
+   ensaios, a espera foi de 1,6-4,1 s (média 2,7) para 0-1,9 s (média 0,5). Em 4
+   deles, o critério antigo também segurava o carro em 70-100% do resto da volta.
+2. **Zona morta do ESC.** Em regime, o acelerador fica em ~0,4 a 0,3-0,6 m/s:
+   o carro só anda acima de ~0,35. O feedforward era `0,17*vref` (0,06 a 0,35
+   m/s), e o integrador levava 1-2 s para chegar lá, oscilando em volta da
+   zona morta (o motor ligava e desligava). Agora o ponto de partida é
+   `0,32 + 0,22*vref` (`THROTTLE_FF_OFFSET` e `THROTTLE_FF_GAIN` em
+   `fva_car/car.py`), e o carro **aprende** o acelerador de regime por faixa de
+   0,1 m/s (`fva_car/throttle.py`). Em regime (na velocidade pedida, sem saturar
+   e sem acelerar), o acelerador aplicado é o que aquela velocidade pede; o
+   feedforward passa a sair dessa tabela. Ela é salva entre corridas em
+   `logs/acelerador.json` (como o trim; a limpeza da GUI não apaga), com pelo
+   menos 3 s de regime. Assim outro carro, ESC ou carga de bateria se ajusta
+   sozinho. Um valor fixo (`--throttle-offset`, ou um número no campo da GUI)
+   desliga o aprendizado, para comparar.
+3. **Alvo do pure pursuit no ponto cego.** Com o eixo ainda incerto
+   (`near_sigma_e` 0,1 m), o alvo fica a pelo menos `check_distance_m` (1 m),
+   onde o caminho é conhecido, e não a 0,4 m. Antes a direção batia no fim de
+   curso parada em 6 de 11 ensaios. Além disso, a rampa da vref parte da
+   velocidade medida, e o portão de salto lateral se alarga por 3 sigma
+   enquanto o estimador converge.
+
+Na pista virtual, cada volta ficou ~1 s mais rápida nas 6 pistas, com o mesmo
+erro lateral e sem toques.
+
+**Ajustar e comparar na pista** (aba da missão da GUI, ou linha de comando):
+
+| GUI | `main.py` | o que faz |
+|---|---|---|
+| Acelerador mínimo: `auto` (padrão) | (nada) | o carro aprende e salva em `logs/acelerador.json` |
+| Acelerador mínimo: um número | `--throttle-offset 0.28` | fixo, sem aprender: tranco na partida, baixe; o motor liga e desliga, suba |
+| Partida nova (desmarcada) | `--old-start` | volta à partida antiga, inclusive o acelerador |
+| Refino da base dos cones longe (desmarcado) | `--no-refine` | base dos cones longe na imagem reduzida |
+
+O nome do log ganha `_acel0.28`, `_partida-antiga` ou `_sem-refino`, e o
+📋 Relatório mostra as opções e a seção de partida de cada volta.
 
 ### Atraso da visão
 
@@ -488,18 +564,44 @@ amarela dos ensaios de 10/11, o centro achado pelos cones fica a 1–4 cm da
 fita a 1 m (`tools/analisar_ensaio.py --linha`). Ainda assim, vale refazer a
 calibração com a grade:
 
-1. Com o carro parado, marque com fita no chão x = 0,6 / 1 / 1,5 / 2 / 2,5 / 3 m
-   (à frente do **eixo dianteiro**) e y = +1 / +0,5 / 0 / −0,5 / −1 m (esquerda
-   +).
-2. Na GUI, aba de testes: **📷 Foto p/ calibração**. O carro tira a foto (sem
-   janela no Pi), a GUI a traz para `calibracao/fotos/` e abre a calibração no
-   notebook.
-3. A janela pede um ponto por vez, na ordem. Clique nele, ou use **Pular**
-   (espaço) se ele não aparece. Backspace desfaz. Com 5 ou mais pontos, uma cruz
-   azul mostra onde o próximo deve estar. Cada ponto ganha uma cor pelo erro
-   **deixando-o fora do ajuste**: verde até 3 cm, amarelo até 6, vermelho acima
-   (clique ou medida errada).
-4. Salvar grava `calibracao/camera_lateral.json`, com o erro de cada ponto.
+**Cubra a faixa onde os cones são usados.** A homografia só vale onde houve
+pontos medidos; fora disso ela é extrapolada. A calibração de 05/11 tinha 12
+pontos de 0,75 a 1,65 m e ±0,3 m. Nos ensaios de 10/11 os cones até ~1,4 m
+erravam ~2 cm, e além de 1,5 m, ~20 cm, mas o carro usa cones até 3 m e a
+±0,6-0,9 m. O `main.py` agora avisa (`AVISO calibracao`) quando os pontos não
+chegam a 80% do alcance (2,4 m) ou a ±0,6 m.
+
+1. Na GUI, aba de testes: **🖨 Marcadores da grade**. Gera e abre
+   `calibracao/marcadores_grade.pdf` (`tools/grade_calibracao.py`):
+   - página 1: mapa visto de cima com os pontos que a câmera **vê** (previstos
+     pela calibração atual), numerados, e como medir;
+   - depois: um marcador xadrez por ponto, com número e coordenadas. O ponto é
+     onde os quadrados pretos se tocam.
+
+   No piso brilhante, papel branco e preto fosco aparece onde fita e caneta somem
+   no reflexo. Imprima em tamanho real. Os marcadores de 2 m em diante são
+   maiores. A câmera de 11/2026 está virada um pouco para a esquerda: dos 30
+   pontos da grade fixa, só 20 apareciam, e quase nenhum perto. A grade
+   sugerida tem 27, todos visíveis (a cada 25 cm onde a imagem é estreita).
+2. Com o carro parado e as rodas retas, estique uma trena do **centro do eixo
+   dianteiro** reta para a frente e marque os x. Em cada x, meça os y na
+   perpendicular (esquadro ou triângulo 30/40/50 cm). ESQ = +. Cole cada
+   marcador com o centro sobre o ponto.
+3. **📷 Foto p/ calibração**. O carro tira a foto (sem janela no Pi), a GUI a
+   traz para `calibracao/fotos/` e abre a calibração no notebook, com a
+   **mesma numeração** do PDF (`calibracao/grade_sugerida.json`).
+4. A janela pede um ponto por vez, na ordem:
+   - o círculo magenta mostra onde o marcador deve estar (pela calibração
+     anterior), e os cinza, os próximos;
+   - a **lupa** à direita amplia 5× em volta do mouse;
+   - clique no centro, ou use **Pular** (espaço) se ele não aparece; Backspace
+     desfaz;
+   - com 5 ou mais pontos, uma cruz azul mostra a previsão pelo ajuste novo;
+   - cada ponto ganha uma cor pelo erro **deixando-o fora do ajuste**: verde
+     até 3 cm, amarelo até 6, vermelho acima (clique ou medida errada).
+
+   `--grade-fixa` volta à grade antiga de 30 pontos.
+5. Salvar grava `calibracao/camera_lateral.json`, com o erro de cada ponto.
    Depois, **Enviar arquivos** leva o arquivo ao carro.
 
 Sem a GUI: `python3 tools/calibrar_camera_lateral.py --image foto.jpg` (grade)
@@ -538,7 +640,11 @@ contato no piso, não para o topo dos cones.
   - quadros por segundo e idade da imagem (metas: 15 q/s e 150 ms);
   - as paradas do ultrassom (eco isolado ou leituras seguidas);
   - o erro lateral e o rumo RMS (metas: 5 cm e 6°);
-  - o centro estimado em reta e nas curvas, as trocas de lado e o trim.
+  - o centro estimado em reta e nas curvas, as trocas de lado e o trim;
+  - as opções da volta (classificador, refino da base, partida nova ou
+    antiga, acelerador mínimo) e a **partida**: tempo até 80% da velocidade
+    de cruzeiro (meta 1,5 s), tempo preso a 0,35 m/s, quantas vezes o motor
+    parou nos primeiros 5 s e a maior esterçada com o carro parado.
 
   Com `--linha` e quadros gravados, mede também a posição real do carro pela
   fita e o desvio da calibração (centro dos cones − fita a 1 m). O relatório é
@@ -624,9 +730,21 @@ Fluxo (o que só a equipe pode fazer está em **negrito**):
 4. Medir antes e depois:
    `python3 veiculo_real/tools/benchmark_visao.py --cones --image logs/<ensaio>/vision_camera.jpg --classifier veiculo_real/modelos/cones.onnx`
    e `avaliar_cones.py` nos quadros rotulados que ficaram fora do treino.
-5. Usar no carro: `"cone_classifier": "veiculo_real/modelos/cones.onnx"` em
+5. Usar no carro: na GUI, marque **Classificador (rede)** na aba da missão (o
+   caminho padrão já é `modelos/cones.onnx`, que vai junto na sincronização).
+   Sem a GUI: `"cone_classifier": "veiculo_real/modelos/cones.onnx"` em
    `main.py`, ou `--classifier ...` na linha de comando (`--classifier none`
    desliga).
+
+**Primeiro modelo (17/11).** 3.779 recortes de 10/11 rotulados sim/não: 405
+não-cones, 1.538 cones verdes e 1.836 vermelhos. Os 511 palpites corrigidos
+eram, na maioria, batentes de porta e objetos vermelhos que o detector aceitava.
+- **Validação por quadro:** revocação de 0,82 (não-cone), 0,97 (verde) e 0,97
+  (vermelho).
+- **Ensaios inteiros fora do treino** (3 sorteios de 2 ensaios), a medida
+  honesta: 97-100% dos cones mantidos e 59-82% dos falsos descartados.
+
+Tudo vem de um só lugar e dia; dados de outro ambiente vão melhorar o modelo.
 
 O `.json` ao lado do `.onnx` guarda as classes, o recorte, os ajustes de cor
 dos candidatos usados no treino (aplicados automaticamente, salvo se
