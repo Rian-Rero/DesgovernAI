@@ -1,0 +1,38 @@
+{
+  "classes": [
+    "nao_cone",
+    "cone_verde",
+    "cone_vermelho"
+  ],
+  "crop": {
+    "size": 32,
+    "height_factor": 1.6,
+    "bottom_margin": 0.15,
+    "min_side": 12
+  },
+  "candidate_settings": {
+    "green_h_max": 105,
+    "green_chroma_min": 5,
+    "green_angle_high": 255
+  },
+  "min_confidence": 0.6,
+  "trained": {
+    "datasets": [
+      "/home/viper/fva_experimentos/cones_simnao.npz"
+    ],
+    "samples": 3779,
+    "validation_frames": 112,
+    "balanced_accuracy": 0.9232,
+    "precision": {
+      "nao_cone": 0.7467,
+      "cone_verde": 0.9639,
+      "cone_vermelho": 1.0
+    },
+    "recall": {
+      "nao_cone": 0.8235,
+      "cone_verde": 0.9726,
+      "cone_vermelho": 0.9734
+    },
+    "date": "2026-11-17 17:42"
+  }
+}
