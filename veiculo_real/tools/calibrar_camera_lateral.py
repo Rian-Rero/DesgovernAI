@@ -5,7 +5,10 @@ Pelo notebook (o carro so tira a foto; a GUI faz isso no botao "Foto p/ calibrac
 
     python3 tools/calibrar_camera_lateral.py --image calibracao/fotos/foto.jpg
 
-Modo grade (padrao): marque no chao, com fita, x = 0,6 / 1 / 1,5 / 2 / 2,5 / 3 m
+Por padrao, clique nos pontos medidos e digite suas coordenadas em metros
+a partir do centro do eixo dianteiro (frente e esquerda).
+
+Modo opcional --grade: marque no chao, com fita, x = 0,6 / 1 / 1,5 / 2 / 2,5 / 3 m
 (frente, a partir do eixo DIANTEIRO) e y = +1 / +0,5 / 0 / -0,5 / -1 m (esquerda +).
 A janela pede um ponto por vez, na ordem; clique nele ou "Pular" se nao aparece.
 Com 5+ pontos mostra onde o proximo deve estar e o erro de cada um (deixando o
@@ -389,7 +392,9 @@ def main():
     source.add_argument('--capturar', type=Path, metavar='FOTO.jpg',
                         help='so tira a foto (no carro, sem janela) e sai')
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument('--livre', action='store_true', help='clicar e digitar cada medida (sem grade)')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--livre', action='store_true', help='clicar e digitar cada medida (padrao)')
+    mode.add_argument('--grade', action='store_true', help='usar a grade sugerida')
     parser.add_argument('--grade-x', type=float, nargs='+', help='distancias a frente (m); com --grade-y: grade fixa')
     parser.add_argument('--grade-y', type=float, nargs='+', help='laterais, esquerda + (m)')
     parser.add_argument('--grade-fixa', action='store_true',
@@ -411,11 +416,11 @@ def main():
             frame = capture_frame(args.camera) if args.camera is not None else cv2.imread(str(args.image))
             if frame is None:
                 raise ValueError('Nao foi possivel ler a imagem.')
-            if args.livre:
-                select_points(frame, args.output)
-            else:
+            if not args.livre and (args.grade or args.grade_fixa or args.grade_x or args.grade_y):
                 targets, hints = grid_targets(args, frame.shape[1::-1])
                 select_grid(frame, args.output, targets, args.image, hints)
+            else:
+                select_points(frame, args.output)
     except (ValueError, RuntimeError, OSError) as error:
         parser.exit(2, f'{error}\n')
 

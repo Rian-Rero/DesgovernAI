@@ -588,9 +588,10 @@ chegam a 80% do alcance (2,4 m) ou a ±0,6 m.
    perpendicular (esquadro ou triângulo 30/40/50 cm). ESQ = +. Cole cada
    marcador com o centro sobre o ponto.
 3. **📷 Foto p/ calibração**. O carro tira a foto (sem janela no Pi), a GUI a
-   traz para `calibracao/fotos/` e abre a calibração no notebook, com a
-   **mesma numeração** do PDF (`calibracao/grade_sugerida.json`).
-4. A janela pede um ponto por vez, na ordem:
+   traz para `calibracao/fotos/` e abre a calibração manual no notebook.
+4. Clique nos pontos medidos e digite `x y` em metros. Para usar a grade
+   sugerida com a mesma numeração do PDF, abra a foto com `--grade`.
+   Nesse modo, a janela pede um ponto por vez, na ordem:
    - o círculo magenta mostra onde o marcador deve estar (pela calibração
      anterior), e os cinza, os próximos;
    - a **lupa** à direita amplia 5× em volta do mouse;
@@ -604,8 +605,8 @@ chegam a 80% do alcance (2,4 m) ou a ±0,6 m.
 5. Salvar grava `calibracao/camera_lateral.json`, com o erro de cada ponto.
    Depois, **Enviar arquivos** leva o arquivo ao carro.
 
-Sem a GUI: `python3 tools/calibrar_camera_lateral.py --image foto.jpg` (grade)
-ou `--livre` (o modo antigo, digitando cada medida). A homografia vale para o
+Abra uma foto existente com `python3 tools/calibrar_camera_lateral.py --image foto.jpg`
+para digitar as medidas. A homografia vale para o
 contato no piso, não para o topo dos cones.
 
 ## Coleta, limpeza e relógio do carro (aba de dados da GUI)

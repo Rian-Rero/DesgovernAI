@@ -1805,7 +1805,7 @@ class RsyncGUI(tk.Tk):
         open_file(pdf)
 
     def calibration_photo(self):
-        """Tira a foto no carro (sem janela la), traz e abre a calibracao por grade aqui."""
+        """Tira a foto no carro, baixa e abre a calibração manual."""
         targets = self.get_selected_devices()
         if not targets:
             messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado.")
@@ -1815,8 +1815,9 @@ class RsyncGUI(tk.Tk):
             return
         if not messagebox.askokcancel(
             "Foto para calibração",
-            "Carro parado, com os marcadores da grade no chão (🖨 Marcadores da grade: mapa e "
-            "numeração; x a partir do eixo dianteiro) e nenhuma missão rodando.\n\nTirar a foto agora?",
+            "Deixe o carro parado, com os pontos medidos visíveis no chão e nenhuma missão "
+            "rodando. Depois da foto, clique em cada ponto e digite as distâncias a partir "
+            "do centro do eixo dianteiro.\n\nTirar a foto agora?",
         ):
             return
         self.clear_test_log()
@@ -1846,10 +1847,10 @@ class RsyncGUI(tk.Tk):
                 sftp.close()
             self._queue_test_output(f"Foto salva em {local}")
             self._queue_test_output(
-                "Abrindo a calibração por grade. Ao salvar, envie ao carro (Enviar arquivos)."
+                "Abrindo a calibração manual. Ao salvar, envie ao carro (Enviar arquivos)."
             )
             subprocess.Popen([sys.executable, str(root / "tools" / "calibrar_camera_lateral.py"),
-                              "--image", str(local)], cwd=str(root))
+                              "--image", str(local), "--livre"], cwd=str(root))
         except Exception as exc:
             self._queue_test_output(f"Erro na foto para calibração: {exc}")
         finally:
