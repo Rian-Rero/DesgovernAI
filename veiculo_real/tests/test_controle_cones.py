@@ -240,7 +240,9 @@ class CenteringTests(unittest.TestCase):
 class MissionConfigTests(unittest.TestCase):
     def test_line_mode_and_legacy_cones_keep_stanley(self):
         config = dict(main.parameters)
-        self.assertEqual(main.follower_config(config, 'cones', {})['steering_law'], 'pure_pursuit')
+        self.assertEqual(main.follower_config(config, 'cones', {})['steering_law'], 'stanley')  # padrao
+        pursuit = dict(config, steering_law='pure_pursuit')
+        self.assertEqual(main.follower_config(pursuit, 'cones', {})['steering_law'], 'pure_pursuit')
         for mode, corridor in (('line', None), ('cones', None)):
             derived = main.follower_config(config, mode, corridor)
             self.assertEqual(derived['steering_law'], 'stanley')
@@ -250,3 +252,55 @@ class MissionConfigTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StanleySpeedTests(unittest.TestCase):
+    """Termo de deslocamento do Stanley com a velocidade MEDIDA filtrada (k fixo)."""
+    def follower(self, **extra):
+        return RealStanleyFollower(dict(FollowerTests.settings, steering_law='stanley', stanley_use_vref=False,
+                                        stanley_speed_filter_s=.3, **extra))
+
+    def test_noisy_encoder_is_smoothed_and_follows_the_real_speed(self):
+        follower = self.follower()
+        rng = np.random.default_rng(0)
+        speeds = []
+        for k in range(150):  # 3 s a 0,5 m/s com o encoder oscilando +-0,15 m/s
+            speeds.append(follower._filter_measured_speed(.5 + rng.normal(0., .15), .02))
+        tail = np.array(speeds[50:])
+        self.assertAlmostEqual(float(tail.mean()), .5, delta=.03)
+        self.assertLess(float(tail.std()), .05)   # 3x menos que o encoder
+        for _ in range(100):  # freou: acompanha (constante de 0,3 s)
+            value = follower._filter_measured_speed(.1, .02)
+        self.assertAlmostEqual(value, .1, delta=.01)
+
+    def test_stanley_uses_the_filtered_speed_not_the_reference(self):
+        follower = self.follower()
+        car = fake_car()
+        car.v, car.vref = .2, 1.  # partida/curva: o carro ainda esta lento
+        follower.apply(car, LineObservation(10., errors=(.1, 0., 0.)), 10.)
+        self.assertAlmostEqual(follower.last_state.get('stanley_speed_m_s', car.v), .2, delta=1e-6)
+        k, ks = follower.controller.gain, follower.controller.softening
+        self.assertAlmostEqual(follower.controller.cross_track_term, math.atan2(k*.1, .2 + ks), places=6)
+
+
+class CorridorRecoveryTests(unittest.TestCase):
+    def test_two_cones_restart_once_the_width_is_known(self):
+        from fva_car.corridor import CorridorEstimator, CorridorSettings
+        est = CorridorEstimator(CorridorSettings(track_width_m=1.3))
+        two = np.array([[1.2, -.65], [2., -.65]])
+        self.assertFalse(est.step(10., [], two, None).valid)   # largura nunca medida: precisa de 3
+        est = CorridorEstimator(CorridorSettings(track_width_m=1.3))
+        est.learned_width = 1.3
+        est.step(10., [], two, None)
+        self.assertIsNotNone(est.x)  # com a largura aprendida, 2 bastam
+
+    def test_memory_lasts_long_enough_for_a_slow_turn(self):
+        from fva_car.corridor import CorridorEstimator, CorridorSettings
+        est = CorridorEstimator(CorridorSettings(track_width_m=1.3))
+        left = np.c_[np.linspace(1., 2.2, 4), np.full(4, .65)]
+        right = np.c_[np.linspace(1., 2.2, 4), np.full(4, -.65)]
+        est.step(10., left, right, None)
+        state = None
+        for k in range(1, 9):  # 1,6 s sem cones a 0,15 m/s (24 cm): segue na memoria
+            state = est.step(10. + .2*k, [], [], (.03, 0., 0.)).state
+        self.assertEqual(state, 'MEMORIA')

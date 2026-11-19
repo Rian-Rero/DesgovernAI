@@ -35,7 +35,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cone_classifier import CLASSES, DEFAULT_CROP, LOOSE_COLOR, extract_crop  # noqa: E402
+from cone_classifier import CLASSES, CROP_CONE_HEIGHT_M, DEFAULT_CROP, LOOSE_COLOR, extract_crop  # noqa: E402
 from cone_path import ConePathDetector, ConeSettings  # noqa: E402
 from rotular_cones import DEFAULT_CALIBRATION, list_frames, load_calibration  # noqa: E402
 
@@ -85,7 +85,7 @@ def prepare(paths, out, calibration_path=DEFAULT_CALIBRATION, step=2, max_per_fr
     loose = ConeSettings(tracking=False, **LOOSE_COLOR)
     strict = ConeSettings(tracking=False)
     detector = ConePathDetector(calibration)
-    cone_height = loose.cone_height_cm/100
+    cone_height = CROP_CONE_HEIGHT_M  # recorte do classificador (cone_classifier.py)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     size, view_size = DEFAULT_CROP['size'], VIEW_CROP['size']
@@ -125,7 +125,9 @@ def prepare(paths, out, calibration_path=DEFAULT_CALIBRATION, step=2, max_per_fr
                 view.append(extract_crop(frame, point, px, cone_height, VIEW_CROP))
                 queue.append({'id': len(queue), 'ensaio': folder.name, 'pasta': str(folder.resolve()),
                               'quadro': path.name, 'cor': color, 'base': [round(float(v), 1) for v in point],
-                              'palpite': _near(point, guess[color])})
+                              'palpite': _near(point, guess[color]),
+                              # A camera muda de posicao entre dias: cada item guarda a sua.
+                              'calibracao': str(Path(calibration_path).resolve())})
                 count += 1
         if count:
             report(f'{folder.name}: {count} candidatos novos')
@@ -164,23 +166,25 @@ def export(out, target):
     chosen = [item for item in items if item['id'] in labels]
     if not chosen:
         raise ValueError('Nada rotulado ainda.')
-    frames = {}
-    X, y, group = [], [], []
+    frames, runs = {}, {}
+    X, y, group, run = [], [], [], []
     for item in chosen:
         is_cone = labels[item['id']]
         name = ('cone_verde' if item['cor'] == 'green' else 'cone_vermelho') if is_cone else 'nao_cone'
         X.append(crops[item['id']])
         y.append(CLASSES.index(name))
         group.append(frames.setdefault((item['pasta'], item['quadro']), len(frames)))  # validacao por quadro
+        run.append(runs.setdefault(item['pasta'], len(runs)))  # validacao por ensaio
     y = np.asarray(y, np.int64)
     counts = {name: int(np.sum(y == i)) for i, name in enumerate(CLASSES)}
     meta = {'classes': list(CLASSES), 'crop': DEFAULT_CROP, 'candidate_settings': LOOSE_COLOR,
+            'cone_height_m': CROP_CONE_HEIGHT_M,
             'match_px': MATCH_PX, 'sources': sorted({item['pasta'] for item in chosen}), 'counts': counts,
             'rotulagem': 'sim/nao (rotular_sim_nao.py)'}
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(target, X=np.asarray(X, np.uint8), y=y, group=np.asarray(group, np.int64),
-                        meta=json.dumps(meta))
+                        run=np.asarray(run, np.int64), meta=json.dumps(meta))
     return counts
 
 

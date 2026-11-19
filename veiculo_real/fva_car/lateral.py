@@ -59,6 +59,20 @@ class LineObservation:
             return False
 
 
+def fit_ground_homography(pixels, ground):
+    """Homografia pixel -> chao ajustada no espaco da IMAGEM (chao -> pixel, invertida).
+
+    O ruido esta no clique (pixels), nao nas medidas: ajustar direto pixel -> chao
+    minimiza metros, e os pontos longe (1 px = 7 cm a 3 m) puxam o ajuste. Na
+    calibracao de 17/11 (sem a fileira de 1,5 m), o erro de cada ponto deixado
+    fora do ajuste foi de 6,5 para 3,2 px (mediana) e de 16 para 7,7 px (p90).
+    """
+    matrix, _ = cv2.findHomography(np.asarray(ground, np.float64), np.asarray(pixels, np.float64), method=0)
+    if matrix is None or not np.all(np.isfinite(matrix)) or abs(np.linalg.det(matrix)) < 1e-12:
+        return None
+    return np.linalg.inv(matrix)
+
+
 @dataclass(frozen=True)
 class GroundCalibration:
     image_size: tuple
@@ -124,7 +138,7 @@ class GroundCalibration:
         if np.linalg.matrix_rank(np.asarray(design)) < 8:
             raise ValueError('Correspondencias de calibracao degeneradas; distribua pontos no piso.')
         try:
-            matrix, _ = cv2.findHomography(pixels, ground, method=0)
+            matrix = fit_ground_homography(pixels, ground)
         except cv2.error as error:
             raise ValueError('Nao foi possivel calcular a homografia da camera.') from error
         if matrix is None:
@@ -702,6 +716,15 @@ class RealStanleyFollower:
         self.use_vref = self.settings.get('stanley_use_vref', True)
         if not isinstance(self.use_vref, (bool, np.bool_)):
             raise ValueError('stanley_use_vref deve ser True ou False.')
+        # Velocidade do termo atan(k*e/(ks + v)): com use_vref False, a MEDIDA
+        # (encoder) passada por um passa-baixa de 1a ordem (constante de tempo
+        # stanley_speed_filter_s): a do encoder oscila e faria o ganho efetivo
+        # oscilar junto; a vref nao e a velocidade real (na partida e nas curvas,
+        # o carro esta mais lento que a vref e o termo ficava fraco). 0: sem filtro.
+        self.speed_filter_s = float(self.settings.get('stanley_speed_filter_s', 0.))
+        if not math.isfinite(self.speed_filter_s) or self.speed_filter_s < 0:
+            raise ValueError('stanley_speed_filter_s deve ser >= 0.')
+        self.speed_filtered = None
         self.steering_sign = self.settings.get('steering_sign', 1.)
         if self.steering_sign not in (-1., 1.):
             raise ValueError('steering_sign deve ser -1 ou +1; calibre o sinal do carro real.')
@@ -838,6 +861,17 @@ class RealStanleyFollower:
         if callable(setter) and (self.trim_sent is None or abs(trim - self.trim_sent) > 1e-4):
             setter(trim)
             self.trim_sent = trim
+
+    def _filter_measured_speed(self, speed, dt):
+        """|v| do encoder pelo passa-baixa (nao zera no reset: o carro nao para)."""
+        speed = abs(float(speed)) if isinstance(speed, (int, float, np.number)) and math.isfinite(speed) else math.nan
+        if not math.isfinite(speed):
+            return self.speed_filtered if self.speed_filtered is not None else math.nan
+        if self.speed_filtered is None or self.speed_filter_s <= 0:
+            self.speed_filtered = speed
+        else:
+            self.speed_filtered += (1. - math.exp(-float(dt)/self.speed_filter_s))*(speed - self.speed_filtered)
+        return self.speed_filtered
 
     def _filter_speed(self, target, dt, current=0.):
         """current: velocidade medida; a rampa parte dela (na partida e depois de
@@ -1069,7 +1103,7 @@ class RealStanleyFollower:
             speed_raw = min(speed_raw, limit)
             car.set_vel(min(self._filter_speed(speed_raw, car.dt, getattr(car, 'v', 0.)), limit))
             active = bool(getattr(car, 'encoder_valid', True))
-            stanley_speed = car.vref if self.use_vref else car.v
+            stanley_speed = car.vref if self.use_vref else self._filter_measured_speed(car.v, car.dt)
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
                                and math.isfinite(stanley_speed))
             active = active and reference_valid

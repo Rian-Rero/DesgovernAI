@@ -67,7 +67,15 @@ class CorridorSettings:
     pixel_sigma: float = 2.        # erro da base do cone, px (na resolucao calibrada)
     row_sigma: float = 4.          # px extras na vertical: arfagem do carro (~0,4 grau)
     model_sigma: float = .05       # cones fora da curva ideal (posicionamento), m
-    model_growth: float = .05      # m por m de caminho: o modelo vale perto
+    # Hierarquia dos cones: cada um pesa no ajuste pelo inverso da sua variancia,
+    # que cresce com a distancia (homografia, quadratica, + este termo linear).
+    # Desvio de um cone de borda numa reta (calibracao de 17/11): 0,8 m 13 cm,
+    # 1 m 15, 1,5 m 20, 2 m 25, 2,5 m 31, 3 m 36 -> peso relativo ao de 1 m: 1,34 /
+    # 1 / 0,56 / 0,36 / 0,25 / 0,18. Era 0,05/m (peso 0,24 a 3 m). Pista virtual
+    # (cones a 1 m, 7 q/s, ruido e erro de calibracao nos longe): 0,10/m tirou os
+    # toques (2 -> 0) e o pior erro (59 -> 35 cm); 0,2/m ou mais piora: com cones
+    # esparsos os longe ainda sao os que mostram a curva chegando.
+    model_growth: float = .10      # m por m de caminho: o modelo vale perto
     gate_sigma: float = 3.         # cone a mais de N sigma da previsao e descartado
     # Faixa de busca: depois do ajuste com todos os cones aceitos, cone a mais de
     # band_m (+ band_growth por m alem de 1 m) da borda AJUSTADA sai e o quadro e
@@ -98,7 +106,14 @@ class CorridorSettings:
     max_curvature: float = 2.      # 1/m
     max_dkappa: float = 3.         # 1/m^2
     memory_m: float = .8           # distancia maxima andada so com a previsao
-    memory_s: float = 1.           # tempo maximo sem cones aceitos
+    # Cones para (re)comecar quando a largura da pista ja foi aprendida nesta
+    # corrida (sem ela, sempre 3). Ver _initialize.
+    restart_cones: float = 2.
+    # Tempo maximo sem cones aceitos. Era 1 s: numa curva fechada os cones saem da
+    # imagem e o carro desacelera (MEMORIA, 0,1-0,4 m/s); no ensaio 20261117_205307
+    # o tempo venceu com 22 cm andados e o carro parou de vez. A distancia
+    # (memory_m) continua sendo o limite de seguranca.
+    memory_s: float = 2.5
     # Liberacao do controle: incerteza lateral da linha central a check_distance_m
     # a frente (onde o carro estara em ~1 s), nao no eixo. Com so cones distantes
     # (partida), e e psi no eixo sao incertos mas correlacionados: o caminho que
@@ -443,8 +458,13 @@ class CorridorEstimator:
                       width_sigma**2])
         keep = np.ones(len(points), bool)
         x, P = x0, P0
+        # Com a largura da pista ja aprendida nesta corrida, 2 cones bastam para
+        # recomecar (a largura vem da memoria; o portao de incerteza a frente
+        # ainda decide se vale). Antes exigia 3: nos ensaios de 17/11 o carro via
+        # 0-2 cones por cor e ficou ate 9 s parado com 2 a vista.
+        needed = int(cfg.restart_cones) if self.learned_width is not None else 3
         for _ in range(3):
-            if np.count_nonzero(keep) < 3:
+            if np.count_nonzero(keep) < needed:
                 return None
             x, P = self._solve(x0, P0, points[keep], sides[keep], covariance[keep], iterations=12)
             h, _, R, along = self._measure(x, points, sides, covariance)
@@ -457,8 +477,9 @@ class CorridorEstimator:
         if center:
             if center < 3:
                 return None
-        elif left + right < 3 or (min(left, right) == 0 and max(left, right) < 3):
-            return None
+        else:
+            if left + right < needed or (min(left, right) == 0 and max(left, right) < needed):
+                return None
         x, P = self._constrain(x, P)
         self.started = True
         return x, P, keep

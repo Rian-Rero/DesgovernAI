@@ -41,7 +41,7 @@ class MissionOptionsTests(unittest.TestCase):
                 self.assertEqual("stream_port" in settings, options["stream"])
                 self.assertEqual(settings.get("cone_estimator", True), options["estimator"])
                 if options["estimator"]:
-                    self.assertEqual(settings.get("steering_law", "pure_pursuit") == "pure_pursuit",
+                    self.assertEqual(settings.get("steering_law", "stanley") == "pure_pursuit",
                                      options["pure_pursuit"])
                     self.assertEqual(settings.get("speed_preview_m", 2.5) > 0, options["preview"])
                 self.assertEqual(settings.get("cone_debug", True), options["cone_debug"])
@@ -87,6 +87,12 @@ class MissionOptionsTests(unittest.TestCase):
         self.assertTrue(label.endswith("_sem-refino_partida-antiga"), label)
         self.assertTrue(gui.command_label(gui.build_main_command({"throttle_offset": "0.28"})).endswith("_acel0.28"))
 
+    def test_stanley_gain_reaches_main(self):
+        self.assertNotIn("stanley_gain", parsed(gui.build_main_command({})))  # 2.5: padrao do main.py
+        self.assertEqual(parsed(gui.build_main_command({"stanley_gain": "3,0"}))["stanley_gain"], 3.)
+        self.assertNotIn("--stanley-gain", gui.build_main_command({"stanley_gain": "3", "pure_pursuit": True}))
+        self.assertNotIn("--stanley-gain", gui.build_main_command({"stanley_gain": "abc"}))
+
     def test_only_main_lines_are_rewritten(self):
         self.assertEqual(gui.with_main_command("ls\npython3 -u main.py --speed 0.7\necho fim", "python3 -u main.py X"),
                          "ls\npython3 -u main.py X\necho fim")
@@ -101,7 +107,8 @@ if __name__ == "__main__":
 class TerminalLogTests(unittest.TestCase):
     def test_file_names_say_what_ran(self):
         cases = {
-            "python3 -u main.py --navigation cones --speed 0.7 --stream 8080": "missao_cones_0.7ms_purepursuit",
+            "python3 -u main.py --navigation cones --speed 0.7 --stream 8080": "missao_cones_0.7ms_stanley",
+            "python3 -u main.py --navigation cones --speed 0.7 --pure-pursuit": "missao_cones_0.7ms_purepursuit",
             "python3 -u main.py --navigation cones --speed 1.5 --stanley --no-preview":
                 "missao_cones_1.5ms_stanley_sem-previa",
             "python3 -u main.py --speed 1.0 --no-estimator --record-frames 3 --classifier modelos/cones.onnx":

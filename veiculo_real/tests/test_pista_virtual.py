@@ -9,6 +9,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools import pista_virtual as pv  # noqa: E402
 
+# A camera simulada usa uma calibracao FIXA (a de 19/11, origem no eixo dianteiro):
+# a do repositorio muda a cada recalibracao e mudava os limites destes testes.
+SIM_CALIBRATION = Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json'
+
+
+def setUpModule():
+    global _calibration
+    _calibration, pv.CALIBRATION = pv.CALIBRATION, SIM_CALIBRATION
+
+
+def tearDownModule():
+    pv.CALIBRATION = _calibration
+
 
 class VirtualTrackTests(unittest.TestCase):
     def test_short_track_is_completed_near_the_center(self):
@@ -44,14 +57,20 @@ class DecoyTests(unittest.TestCase):
             self.assertLessEqual(abs(error), half + .8 + 1e-6)
 
     def test_band_keeps_the_car_centered_with_objects_beside_the_track(self):
-        # Grampo, 15 objetos fixos fora da pista: sem a faixa o carro se desvia
-        # (~11 cm RMS); com ela, como numa pista limpa (~3 cm).
+        # Grampo, 15 objetos fixos fora da pista, Stanley (padrao), 3 sementes: sem
+        # a faixa o carro se desvia (media ~30 cm RMS, toques); com ela ~9 cm.
+        # Uma semente so variava demais com a calibracao da camera (que muda).
         results = {}
         for band in (0., .2):
-            track = pv.build_track(pv.TRACKS['grampo'], 1.8, None, .5, rng=np.random.default_rng(101))
-            config = pv.base_config({'steering_law': 'pure_pursuit', 'velocity_reference': 1.0,
-                                     'cone_estimator': {'band_m': band, 'band_growth': .1}})
-            results[band] = pv.run(track, config, seed=1, decoys=15)
-        self.assertTrue(results[.2]['finished'])
-        self.assertLess(results[.2]['rms_m'], .05)
-        self.assertGreater(results[0.]['rms_m'], 2*results[.2]['rms_m'])
+            runs = []
+            for seed in (1, 2, 3):
+                track = pv.build_track(pv.TRACKS['grampo'], 1.8, None, .5, rng=np.random.default_rng(100 + seed))
+                config = pv.base_config({'velocity_reference': 1.0,
+                                         'cone_estimator': {'band_m': band, 'band_growth': .1}})
+                runs.append(pv.run(track, config, seed=seed, decoys=15))
+            results[band] = runs
+        self.assertTrue(all(r['finished'] for r in results[.2]))
+        self.assertEqual(sum(r['hits'] for r in results[.2]), 0)
+        with_band = np.mean([r['rms_m'] for r in results[.2]])
+        self.assertLess(with_band, .12)
+        self.assertGreater(np.mean([r['rms_m'] for r in results[0.]]), 2*with_band)

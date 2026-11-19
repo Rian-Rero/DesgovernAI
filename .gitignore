@@ -13,3 +13,4 @@ logs/
 !veiculo_real/modelos/*.json
 !veiculo_real/tools/tests/dados/*.json
 !veiculo_real/calibracao/camera_lateral*.json
+!veiculo_real/tests/dados/*.json

@@ -25,6 +25,7 @@ mesma ordem e numeracao, mostra desde o inicio onde cada ponto deve aparecer
 """
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -46,8 +47,9 @@ def grid_points(xs=GRID_X, ys=GRID_Y):
 
 
 def fit_homography(pixels, ground):
-    matrix, _ = cv2.findHomography(np.asarray(pixels, np.float64), np.asarray(ground, np.float64), method=0)
-    return matrix
+    """pixel -> chao, ajustada no espaco da imagem (a mesma do carro, fva_car/lateral.py)."""
+    from fva_car.lateral import fit_ground_homography
+    return fit_ground_homography(pixels, ground)
 
 
 def to_ground(matrix, pixels):
@@ -84,6 +86,71 @@ def error_report(pixels, ground):
         mark = '' if not np.isfinite(b) or b <= .03 else ('  <- confira' if b <= .06 else '  <- ERRADO?')
         rows.append(f'{number:2d}  x={x:4.2f} y={y:+5.2f}  ajuste {100*a:4.1f} cm  fora {100*b:5.1f} cm{mark}')
     return rows, fitted, left_out
+
+
+def camera_geometry(homography, image_size=(640, 480)):
+    """Onde a calibracao poe a camera: posicao lateral (m, esquerda +), giro (graus,
+    + = virada para a DIREITA, com focal suposta de webcam 60 graus) e rolagem.
+
+    O giro nao e erro: a homografia ja o considera. Ele so tira campo de visao de
+    um lado (com a camera virada para a direita, a borda esquerda entra na imagem
+    mais longe).
+
+    A linha do chao que passa exatamente embaixo da camera, paralela ao eixo,
+    aparece VERTICAL na imagem (sem rolagem): a posicao lateral e o y dessa
+    linha. Com a camera no centro do carro e a trena saindo do centro do eixo
+    dianteiro, ela da ~0 (10/11: -0,02 m). Longe de 0 com a camera centrada, o
+    zero lateral das medidas esta deslocado e o carro anda deslocado do centro
+    da pista na mesma medida."""
+    G = np.linalg.inv(np.asarray(homography, float))  # chao -> pixel
+    project = lambda x, y: (lambda q: q[:2]/q[2])(G @ np.array([x, y, 1.]))
+    ys = np.linspace(-1., 1., 4001)
+    slant = np.array([project(1., y)[0] - project(4., y)[0] for y in ys])
+    lateral = float(ys[int(np.argmin(np.abs(slant)))])
+    vanish = [(lambda q: q[:2]/q[2])(G @ np.array([1., d, 0.])) for d in (0., .5, -.5)]
+    width = float(image_size[0])
+    focal = (width/2)/math.tan(math.radians(30.))
+    yaw = math.degrees(math.atan(((width - 1)/2 - vanish[0][0])/focal))
+    dx, dy = vanish[1] - vanish[2]
+    roll = math.degrees(math.atan2(dy, dx))
+    roll = (roll + 90.) % 180. - 90.
+    return {'lateral_m': lateral, 'yaw_deg': yaw, 'roll_deg': roll, 'vanishing_column': float(vanish[0][0])}
+
+
+def row_offsets(pixels, ground, min_points=3):
+    """Desvio medio (dx, dy, dp) de cada fileira x quando ela fica FORA do ajuste:
+    uma fileira inteira deslocada (trena fora do lugar so naquela distancia) tem
+    dy grande e dp pequeno."""
+    pixels, ground = np.asarray(pixels, float), np.asarray(ground, float)
+    result = {}
+    for x in sorted(set(np.round(ground[:, 0], 3))):
+        row = np.isclose(ground[:, 0], x)
+        if row.sum() < min_points or (~row).sum() < 6:
+            continue
+        matrix = fit_homography(pixels[~row], ground[~row])
+        if matrix is None:
+            continue
+        error = to_ground(matrix, pixels[row]) - ground[row]
+        result[float(x)] = (float(error[:, 0].mean()), float(error[:, 1].mean()), float(error[:, 1].std()))
+    return result
+
+
+def diagnose(pixels, ground, image_size=(640, 480)):
+    """Avisos legiveis sobre a calibracao (posicao da camera e fileiras deslocadas)."""
+    warnings = []
+    matrix = fit_homography(pixels, ground)
+    geometry = camera_geometry(matrix, image_size) if matrix is not None else None
+    if geometry is not None and abs(geometry['lateral_m']) > .05:
+        side = 'esquerda' if geometry['lateral_m'] > 0 else 'direita'
+        warnings.append(f"a camera fica {100*abs(geometry['lateral_m']):.0f} cm a {side} do zero lateral das medidas."
+                        " Se ela esta no centro do carro, a trena nao saiu do centro do eixo dianteiro e o carro"
+                        " andara deslocado do centro da pista na mesma medida (--revisar ... --origem-na-camera"
+                        " corrige).")
+    for x, (dx, dy, spread) in row_offsets(pixels, ground).items():
+        if abs(dy) > .06 and spread < .5*abs(dy):
+            warnings.append(f'a fileira de {x:.2f} m esta inteira {100*abs(dy):.0f} cm para a '
+                            f'{"esquerda" if dy > 0 else "direita"} das outras: remedir ou tirar')
+    return geometry, warnings
 
 
 def save_calibration(data, output):
@@ -328,6 +395,8 @@ def select_grid(frame, output, targets, photo_path=None, hints=None):
         bad = int(np.sum(left_out > .06))
         if bad:
             warnings.append(f'{bad} ponto(s) com erro > 6 cm (vermelhos)')
+        if len(state['pixels']) >= 8:
+            warnings.extend(diagnose(state['pixels'], state['ground'], (width, height))[1])
         if warnings and not messagebox.askyesno('Salvar assim?', '\n'.join(warnings) + '\n\nSalvar mesmo assim?',
                                                 parent=window):
             return
@@ -383,6 +452,51 @@ def grid_targets(args, image_size):
     return targets, [tuple(p) for p in predict_pixels(previous.homography, targets)]
 
 
+def review(args):
+    """--revisar: imprime o diagnostico e, com correcoes pedidas, grava a calibracao."""
+    data = json.loads(args.revisar.read_text(encoding='utf-8'))
+    pixels = np.asarray(data['image_points_px'], float)
+    ground = np.asarray(data['ground_points_m'], float)
+    size = tuple(data.get('image_size', (640, 480)))
+    _, left_out = reprojection_errors(pixels, ground)
+    print(f'{len(pixels)} pontos; erro de cada ponto fora do ajuste: mediana {100*np.nanmedian(left_out):.1f} cm,'
+          f' p90 {100*np.nanpercentile(left_out, 90):.1f} cm')
+    geometry, warnings = diagnose(pixels, ground, size)
+    if geometry:
+        print(f"camera: y={geometry['lateral_m']:+.2f} m (esquerda +), girada {abs(geometry['yaw_deg']):.1f} graus"
+              f" para a {'direita' if geometry['yaw_deg'] >= 0 else 'esquerda'} (focal suposta),"
+              f" rolagem {geometry['roll_deg']:+.1f} graus")
+    for x, (dx, dy, spread) in row_offsets(pixels, ground).items():
+        print(f'  fileira {x:.2f} m fora do ajuste: dx {100*dx:+.1f} cm, dy {100*dy:+.1f} cm (dp {100*spread:.1f})')
+    for warning in warnings:
+        print('AVISO', warning)
+    if not (args.origem_na_camera or args.tirar_fileira or args.da_frente_ao_eixo):
+        return
+    keep = np.ones(len(ground), bool)
+    for x in args.tirar_fileira:
+        keep &= ~np.isclose(ground[:, 0], x)
+    dropped = {'image_points_px': pixels[~keep].tolist(), 'ground_points_m': ground[~keep].tolist()}
+    pixels, ground = pixels[keep], ground[keep].copy()
+    if args.origem_na_camera:
+        shift = camera_geometry(fit_homography(pixels, ground), size)['lateral_m']
+        ground[:, 1] -= shift
+        print(f'origem lateral movida {100*shift:+.1f} cm: a camera fica em y=0')
+    if args.da_frente_ao_eixo:
+        ground[:, 0] += args.da_frente_ao_eixo
+        print(f'x medidos da ponta do carro: +{100*args.da_frente_ao_eixo:.1f} cm, origem no eixo dianteiro')
+    out = {key: value for key, value in data.items() if key not in ('image_points_px', 'ground_points_m',
+                                                                  'erro_fora_cm')}
+    out.update(image_points_px=pixels.tolist(), ground_points_m=ground.tolist())
+    if len(dropped['ground_points_m']):
+        out['pontos_descartados'] = {'fileiras_m': args.tirar_fileira, **dropped}
+    if args.origem_na_camera:
+        out['origem_lateral_movida_m'] = round(float(shift), 4)
+    if args.da_frente_ao_eixo:
+        out['x_somado_da_ponta_ao_eixo_m'] = round(float(args.da_frente_ao_eixo), 4)
+    out['erro_fora_cm'] = [round(100*float(e), 1) for e in reprojection_errors(pixels, ground)[1]]
+    print('salvo:', save_calibration(out, args.output))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -391,6 +505,17 @@ def main():
     source.add_argument('--points', type=Path, help='JSON com pares ja medidos, sem interface grafica')
     source.add_argument('--capturar', type=Path, metavar='FOTO.jpg',
                         help='so tira a foto (no carro, sem janela) e sai')
+    source.add_argument('--revisar', type=Path, metavar='CALIBRACAO.json',
+                        help='diagnostico de uma calibracao pronta (camera, fileiras); com --origem-na-camera'
+                             ' ou --tirar-fileira grava a corrigida em --output')
+    parser.add_argument('--origem-na-camera', action='store_true',
+                        help='com --revisar: desloca o y de todos os pontos para a camera ficar em y=0 (use se'
+                             ' a camera esta no centro do carro)')
+    parser.add_argument('--da-frente-ao-eixo', type=float, metavar='M',
+                        help='com --revisar: os x foram medidos da PONTA do carro; soma M (distancia da ponta'
+                             ' ao centro do eixo dianteiro) para a origem ir ao eixo, como o carro usa')
+    parser.add_argument('--tirar-fileira', type=float, action='append', default=[], metavar='X',
+                        help='com --revisar: descarta os pontos da fileira X m (guardados no arquivo)')
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--livre', action='store_true', help='clicar e digitar cada medida (padrao)')
@@ -407,6 +532,8 @@ def main():
             if not cv2.imwrite(str(args.capturar), frame):
                 raise OSError(f'Nao foi possivel gravar {args.capturar}')
             print(f'Foto: {args.capturar} ({frame.shape[1]}x{frame.shape[0]})')
+        elif args.revisar:
+            review(args)
         elif args.points:
             data = json.loads(args.points.read_text(encoding='utf-8'))
             saved = save_calibration(data, args.output)

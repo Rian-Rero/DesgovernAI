@@ -115,8 +115,12 @@ class ConeSettings:
     side_flip_frames: int = 3  # Quadros seguidos de evidencia contraria para trocar.
     path_prior_ms: int = 1000  # Idade maxima da trajetoria anterior usada como prioridade.
     max_range_cm: int = 300    # Cones usados ate esta distancia; acima do horizonte, ignora.
-    cone_height_cm: int = 20   # Cone da prova: define a margem da ROI e o tamanho esperado.
-    cone_base_cm: int = 15
+    # Cone da pista (medido em 11/2026): 18,5 cm de altura, 10,5 cm de base. Com
+    # o palpite antigo (20 x 15 cm, area ~1,5x a real) a area minima e o tamanho
+    # metrico descartavam cones reais: nos 19 ensaios de 17/11, 14 mil "pequeno"
+    # e 5 mil "tamanho", e o carro via em media 0,9 cone aceito por cor e quadro.
+    cone_height_cm: float = 18.5  # define a margem da ROI e o tamanho esperado
+    cone_base_cm: float = 10.5
     track_width_cm: int = 90   # Largura esperada do corredor (checagem da calibracao).
     cone_spacing_cm: int = 70  # Espacamento tipico entre cones da mesma borda.
     # Matiz em Lab: angulo de (a*, b*) em graus, pouco sensivel ao brilho. No
@@ -258,8 +262,21 @@ def _grow(strong, weak):
     return keep[labels]
 
 
-# Base observada / cone_base_cm nos cones do ensaio de 23/10 (vermelhos: ~0,7).
-PARTIAL_BASE_FRACTION = .7
+# Base observada / cone_base_cm. Era 0,7 com a base suposta de 15 cm (ensaio de
+# 23/10): 0,7 x 15 = 10,5 cm, a base real. Com cone_base_cm certo, 1.
+PARTIAL_BASE_FRACTION = 1.
+# Tolerancias do tamanho metrico do cone (fracoes do cone real), na imagem
+# reduzida: o borrao, a sombra e o reflexo deixam a mancha maior que o cone (o
+# pe chega a 3-4x a base de 10,5 cm a 320 px). Ajustadas pela matriz de confusao
+# contra os 3.779 rotulos humanos de 10/11 (tools/matriz_confusao.py), cone real:
+#     pe ate 2,2x, altura ate 2,5x (as de antes): precisao 0,953, revocacao 0,683
+#     pe ate 4x,   altura ate 3,5x:               precisao 0,948, revocacao 0,750
+# (com o cone suposto de 20 x 15 cm e as de antes: 0,952 / 0,731).
+SIZE_FOOT_MAX = 4.    # largura do terco de baixo / base do cone
+SIZE_FOOT_MIN = .4
+SIZE_HEIGHT_MIN = .3  # altura da mancha / altura do cone
+SIZE_HEIGHT_MAX = 3.5
+MIN_AREA_FRACTION = .125  # area minima / (base x altura) do cone naquela linha
 CLASS_GREEN, CLASS_RED = 1, 4  # bits da tabela de matiz/croma Lab
 STRAIGHT_MAX_CURVATURE = .25  # 1/m (raio 4 m): mesmo limiar de busca do Stanley.
 SIDE_MIN_SEPARATION_M = .15
@@ -558,7 +575,7 @@ class ConePathDetector:
                 px_rows = np.where(np.isfinite(px_rows) & (px_rows > 0), px_rows, math.nan)
             with np.errstate(invalid='ignore'):
                 # Cones longe sao pequenos: a area minima acompanha o tamanho esperado.
-                min_rows = np.maximum(4., np.minimum(min_area, .25*.5*cone_h*cone_w*px_rows*px_rows))
+                min_rows = np.maximum(4., np.minimum(min_area, MIN_AREA_FRACTION*cone_h*cone_w*px_rows*px_rows))
             min_rows = np.where(np.isfinite(px_rows), min_rows, min_area)
             _tables = (px_rows, min_rows, px_rows.tolist(), min_rows.tolist())
         px_rows, min_rows, px_list, min_list = _tables
@@ -608,8 +625,8 @@ class ConePathDetector:
                 # sombra sao finas e recusavam cones reais.
                 lower = np.flatnonzero(np.any(component[-max(2, h//3):], axis=0))
                 foot_m = (lower.max()-lower.min()+1)/px
-                foot_ok = foot_m <= 2.2*cone_w and (partial or foot_m >= .4*cone_w)
-                if not foot_ok or not .3*cone_h*px <= h <= 2.5*cone_h*px:
+                foot_ok = foot_m <= SIZE_FOOT_MAX*cone_w and (partial or foot_m >= SIZE_FOOT_MIN*cone_w)
+                if not foot_ok or not SIZE_HEIGHT_MIN*cone_h*px <= h <= SIZE_HEIGHT_MAX*cone_h*px:
                     reason[0] = reason[0] or "tamanho"
                     return None
             if (at_left or at_right) and not partial or y <= roi or y+h >= height:
@@ -847,8 +864,7 @@ class ConePathDetector:
         if self.classifier is not None and found['scale'] is not None:
             # A CNN confirma cada candidato pelo recorte em volta da base.
             started = time.perf_counter()
-            verdict = self.classifier.classify(frame, {'green': gp, 'red': rp}, found['scale'],
-                                               settings.cone_height_cm/100)
+            verdict = self.classifier.classify(frame, {'green': gp, 'red': rp}, found['scale'])
             for color in ('green', 'red'):
                 keep = verdict[color][0]
                 dropped = int(np.count_nonzero(~keep))

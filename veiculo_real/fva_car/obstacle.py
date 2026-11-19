@@ -23,7 +23,7 @@ MIN_CURVATURE = .15       # 1/m (R <= 6,7 m) em algum ponto do proximo 1,5 m de 
 CURVE_LOOKAHEAD_M = 1.5
 CAR_HALF_WIDTH_M = .13
 SIDE_MARGIN_M = .05       # folga lateral minima ate a borda, alem da meia largura do carro
-SENSOR_X_M = .05          # ultrassom a frente do eixo dianteiro
+SENSOR_X_M = 0.           # ultrassom (embaixo da camera) na linha do eixo dianteiro (medido em 19/11)
 MAX_AGE_S = .5            # estado da visao mais velho que isto nao serve
 ONE_OR_TWO_BORDERS = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA')
 

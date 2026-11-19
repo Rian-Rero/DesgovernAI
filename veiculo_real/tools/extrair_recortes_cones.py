@@ -27,11 +27,11 @@ import cv2
 import numpy as np
 
 if __package__:
-    from .cone_classifier import CLASSES, DEFAULT_CROP, LOOSE_COLOR, extract_crop
+    from .cone_classifier import CLASSES, CROP_CONE_HEIGHT_M, DEFAULT_CROP, LOOSE_COLOR, extract_crop
     from .cone_path import ConePathDetector, ConeSettings
     from .rotular_cones import DEFAULT_CALIBRATION, list_frames, load_calibration, load_labels
 else:
-    from cone_classifier import CLASSES, DEFAULT_CROP, LOOSE_COLOR, extract_crop
+    from cone_classifier import CLASSES, CROP_CONE_HEIGHT_M, DEFAULT_CROP, LOOSE_COLOR, extract_crop
     from cone_path import ConePathDetector, ConeSettings
     from rotular_cones import DEFAULT_CALIBRATION, list_frames, load_calibration, load_labels
 
@@ -49,7 +49,7 @@ def extract_folder(folder, calibration, *, candidate_settings=None, crop=None, m
     labels = load_labels(folder)
     X, y, groups = [], [], []
     counts = Counter()
-    cone_height = settings.cone_height_cm/100
+    cone_height = CROP_CONE_HEIGHT_M  # recorte do classificador (cone_classifier.py)
     frames = [path for path in list_frames(folder) if labels.get(path.name, {}).get('reviewed')]
     for number, path in enumerate(frames):
         frame = cv2.imread(str(path))
@@ -135,6 +135,7 @@ def main(argv=None):
     y = np.concatenate([p[1] for p in parts])
     group = np.concatenate([p[2] for p in parts])
     meta = {'classes': list(CLASSES), 'crop': DEFAULT_CROP, 'candidate_settings': LOOSE_COLOR,
+            'cone_height_m': CROP_CONE_HEIGHT_M,
             'match_px': args.match_px, 'sources': [str(p) for p in args.pastas], 'counts': dict(counts)}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(args.out, X=X, y=y, group=group, meta=json.dumps(meta))

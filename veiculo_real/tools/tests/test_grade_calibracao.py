@@ -72,3 +72,40 @@ class SuggestedGridTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CameraDiagnosisTests(unittest.TestCase):
+    """camera_geometry / diagnose: camera girada e zero lateral deslocado."""
+    @staticmethod
+    def synthetic(lateral=.1, yaw_right_deg=8., height=.15, pitch_down_deg=4.):
+        import math
+        f = 320/math.tan(math.radians(30.))
+        K = np.array([[f, 0, 319.5], [0, f, 239.5], [0, 0, 1.]])
+        yaw, pitch = math.radians(-yaw_right_deg), math.radians(pitch_down_deg)
+        forward = np.array([math.cos(yaw)*math.cos(pitch), math.sin(yaw)*math.cos(pitch), -math.sin(pitch)])
+        right = np.cross(forward, [0, 0, 1.])
+        right /= np.linalg.norm(right)
+        down = np.cross(forward, right)
+        R = np.vstack([right, down, forward])  # chao (x frente, y esq, z cima) -> camera
+        center = np.array([0., lateral, height])
+        ground = np.array([(x, y) for x in (.8, 1., 1.5, 2., 2.5) for y in (-.5, -.25, 0., .25, .5)])
+        cam = np.c_[ground, np.zeros(len(ground))] - center
+        q = (K @ (R @ cam.T)).T
+        return q[:, :2]/q[:, 2:3], ground
+
+    def test_lateral_position_and_yaw_are_recovered(self):
+        pixels, ground = self.synthetic()
+        geometry = calibrate.camera_geometry(calibrate.fit_homography(pixels, ground))
+        self.assertAlmostEqual(geometry['lateral_m'], .1, delta=.01)
+        self.assertAlmostEqual(geometry['yaw_deg'], 8., delta=.3)  # + = virada para a direita
+        self.assertAlmostEqual(geometry['roll_deg'], 0., delta=.3)
+
+    def test_offset_origin_and_shifted_row_are_reported(self):
+        pixels, ground = self.synthetic(lateral=.18)
+        _, warnings = calibrate.diagnose(pixels, ground)
+        self.assertTrue(any('18 cm a esquerda' in w for w in warnings), warnings)
+        pixels, ground = self.synthetic(lateral=0.)
+        shifted = ground.copy()
+        shifted[np.isclose(ground[:, 0], 1.5), 1] += .19
+        _, warnings = calibrate.diagnose(pixels, shifted)
+        self.assertTrue(any('fileira de 1.50 m' in w for w in warnings), warnings)

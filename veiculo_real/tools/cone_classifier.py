@@ -23,6 +23,11 @@ import numpy as np
 CLASSES = ('nao_cone', 'cone_verde', 'cone_vermelho')
 COLOR_CLASS = {'green': 'cone_verde', 'red': 'cone_vermelho'}
 DEFAULT_CROP = {'size': 32, 'height_factor': 1.6, 'bottom_margin': .15, 'min_side': 12}
+# Altura de cone que dimensiona o recorte (height_factor x esta altura). Fixa e
+# guardada no .json do modelo ('cone_height_m'): o recorte do treino e o do carro
+# tem de ser iguais, mesmo que o tamanho esperado do detector (ConeSettings) mude.
+# Os modelos ate 11/2026 foram treinados com 0,20 m.
+CROP_CONE_HEIGHT_M = .2
 # Cores mais largas para gerar candidatos quando ha classificador: pegam o verde
 # escuro/azulado na sombra (ensaio de 23/10) e o modelo descarta o ruido.
 LOOSE_COLOR = {'green_h_max': 105, 'green_chroma_min': 5, 'green_angle_high': 255}
@@ -86,6 +91,7 @@ class ConeClassifier:
         self.crop = {**DEFAULT_CROP, **meta.get('crop', {})}
         self.candidate_settings = dict(meta.get('candidate_settings', {}))
         self.min_confidence = float(meta.get('min_confidence', .6))
+        self.cone_height_m = float(meta.get('cone_height_m', CROP_CONE_HEIGHT_M))
         if net is None:
             if not Path(model_path).is_file():
                 raise FileNotFoundError(f'Modelo do classificador nao encontrado: {model_path}')
@@ -100,7 +106,7 @@ class ConeClassifier:
         self.net.setInput(to_blob(crops, int(self.crop['size'])))
         return softmax(np.asarray(self.net.forward()).reshape(len(crops), -1))
 
-    def classify(self, frame, bases, scale_rows, cone_height_m, min_confidence=None):
+    def classify(self, frame, bases, scale_rows, cone_height_m=None, min_confidence=None):
         """bases: {'green': Nx2, 'red': Mx2} em pixels de `frame`.
 
         Devolve {cor: (mascara de aceitos, confianca da classe da cor)}. Um
@@ -109,6 +115,7 @@ class ConeClassifier:
         calibracao naquele ponto), o candidato e mantido como antes.
         """
         threshold = self.min_confidence if min_confidence is None else float(min_confidence)
+        cone_height_m = self.cone_height_m  # a do treino (recorte igual), nao a do detector
         crops, owners = [], []
         output = {}
         last = len(scale_rows)-1

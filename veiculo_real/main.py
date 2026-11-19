@@ -31,7 +31,11 @@ MAIN_VEL = 0.7  # m/s: velocidade padrao da missao
 FAST_VEL = 1.5  # m/s: selecionada com --fast
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
-OBSTACLE_DISTANCE = 0.20
+OBSTACLE_DISTANCE = 0.20  # folga desejada ate o obstaculo, a partir da FRENTE do pneu
+# O ultrassom fica na linha do eixo dianteiro (embaixo da camera) e a frente do
+# pneu 7 cm adiante (medido em 19/11): a leitura do sensor tem 7 cm a mais que a
+# folga real da frente do carro.
+FRONT_OVERHANG_M = 0.07
 STOP_REACTION_TIME = 0.30
 STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 # Abaixo disto a leitura do ultrassom e falha do sensor (ensaio de 10/11: 0,00 m
@@ -73,9 +77,19 @@ parameters = {
     # pelo sigma no eixo > 0,1 m, alvo do pure pursuit sem minimo e acelerador
     # 0,17*vref sem offset. Tambem --old-start.
     "old_start": False,
-    "stanley_gain": 1.5,
+    # Stanley: esterco = rumo + atan(k*e/(ks + v)) + atan(L*kappa), k e ks fixos.
+    # Pista virtual com a pista de 17/11 (largura 1,3 m, cones a 1 m, visao a 7 e
+    # 11 quadros/s, velocidade medida filtrada): k 1,5 -> 7,8 cm RMS, k 2,5 -> 5,8 cm,
+    # sem toques; k 3 ainda melhor no simulador, mas o carro real tem mais ruido
+    # (poucos cones por quadro): 2,5 deixa margem. --stanley-gain ajusta na pista.
+    "stanley_gain": 2.5,
     "stanley_softening": 0.3,
-    "stanley_use_vref": True,  # True: vref no denominador; False: velocidade medida (car.v)
+    # Velocidade do termo de deslocamento do Stanley, atan(k*e/(ks + v)), com k e
+    # ks fixos: a MEDIDA pelo encoder, filtrada (1a ordem, stanley_speed_filter_s).
+    # A vref nao e a velocidade real (partida, curvas, frenagem); a do encoder
+    # sozinha oscila e faria o ganho efetivo oscilar. True volta a vref.
+    "stanley_use_vref": False,
+    "stanley_speed_filter_s": 0.3,
     "stanley_max_steer_deg": 20.0,
     # 60 graus/s levava 0,33 s (0,5 m a 1,5 m/s) para chegar ao batente:
     # quase todo o trecho visivel antes da curva.
@@ -129,16 +143,15 @@ parameters = {
     # (ex.: {"memory_m": 0.6}); False volta ao ajuste quadro a quadro.
     "cone_estimator": True,
     # Fita amarela no centro do corredor de cones (pista de 10/11): entra no
-    # estimador como linha central. Perto de y = 0 a calibracao e boa; os cones a
-    # +-0,6 m dependem da extrapolacao (centro estimado ~10 cm fora da fita).
-    # Sem fita na pista, nada muda (so o custo da busca, ~5 ms no notebook).
-    "cone_line_fusion": True,
-    # Com o estimador: direcao por pure pursuit no centro estimado (alvo a
-    # pursuit_min_lookahead_m + pursuit_lookahead_s*v do eixo dianteiro). Na pista
-    # virtual (tools/pista_virtual.py) teve metade do erro do Stanley, inclusive
-    # com erro de calibracao, visao lenta e servo lento. "stanley" volta ao antigo
-    # (tambem pela linha de comando: --stanley). Linha amarela: sempre Stanley.
-    "steering_law": "pure_pursuit",
+    # estimador como linha central. DESLIGADA: em 17/11 a pista nao tinha fita, mas
+    # o corredor tem uma linha amarela pintada no chao que nao e o centro da pista
+    # (estado LINHA em 1-16% dos quadros), e a busca custava ~105 ms no Raspberry
+    # a cada 2 quadros (geometria 124 ms contra 19 ms sem ela). --fita-amarela liga.
+    "cone_line_fusion": False,
+    # Lei de direcao com o estimador: Stanley no centro estimado (padrao, pedido do
+    # professor) ou pure pursuit (alvo a pursuit_min_lookahead_m +
+    # pursuit_lookahead_s*v; --pure-pursuit). Linha amarela: sempre Stanley.
+    "steering_law": "stanley",
     "pursuit_min_lookahead_m": 0.4,
     "pursuit_lookahead_s": 0.2,
     "pursuit_max_lookahead_m": 1.5,
@@ -353,6 +366,7 @@ def stopping_distance(velocity, confirm_s=0.0):
     speed = abs(velocity)
     return (
         OBSTACLE_DISTANCE
+        + FRONT_OVERHANG_M
         + speed * (STOP_REACTION_TIME + confirm_s)
         + speed**2 / (2.0 * STOP_DECELERATION)
     )
@@ -682,7 +696,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             (
                 "Stanley: velocidade de referencia (vref)"
                 if config["stanley_use_vref"]
-                else "Stanley: velocidade medida (encoder)"
+                else f"Stanley: velocidade medida filtrada (1a ordem, {config.get('stanley_speed_filter_s', 0):g} s)"
             ),
             flush=True,
         )
@@ -997,7 +1011,14 @@ def main():
     parser.add_argument("--no-estimator", action="store_true",
                         help="Cones: erros pelo ajuste quadro a quadro, sem o estimador do corredor")
     parser.add_argument("--stanley", action="store_true",
-                        help="Cones: Stanley no eixo em vez do pure pursuit no centro estimado")
+                        help="Cones: Stanley no centro estimado (o padrao; mantido por compatibilidade)")
+    parser.add_argument("--stanley-gain", type=float, metavar="K",
+                        help="Ganho k do termo de deslocamento do Stanley (padrao 2.5): oscila, baixe;"
+                             " passa reto da borda, suba")
+    parser.add_argument("--pure-pursuit", action="store_true",
+                        help="Cones: pure pursuit no centro estimado em vez do Stanley")
+    parser.add_argument("--fita-amarela", action="store_true",
+                        help="Cones: usa a fita amarela do centro da pista junto com os cones")
     parser.add_argument("--no-preview", action="store_true",
                         help="Cones: sem previa de curva (vref so pela curvatura no eixo)")
     parser.add_argument("--line-classic", action="store_true",
@@ -1048,6 +1069,14 @@ def main():
         settings["cone_estimator"] = False
     if args.stanley:
         settings["steering_law"] = "stanley"
+    if args.pure_pursuit:
+        settings["steering_law"] = "pure_pursuit"
+    if args.stanley_gain is not None:
+        if not 0 < args.stanley_gain <= 10:
+            parser.error("--stanley-gain deve estar entre 0 e 10")
+        settings["stanley_gain"] = args.stanley_gain
+    if args.fita_amarela:
+        settings["cone_line_fusion"] = True
     if args.line_classic:
         settings["line_birdseye"] = False
         settings["line_estimator"] = False

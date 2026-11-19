@@ -223,6 +223,8 @@ class RealConeDetector:
             default = getattr(ConeSettings(), name)
             if isinstance(default, bool):
                 valid = isinstance(value, bool)
+            elif isinstance(default, float):  # medidas do cone, cm
+                valid = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
             else:
                 valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
             if not valid:

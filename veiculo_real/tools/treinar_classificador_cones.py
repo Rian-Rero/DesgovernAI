@@ -32,6 +32,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cone_classifier import CLASSES, ConeClassifier  # noqa: E402
 
 
+def load_runs(paths):
+    """Ensaio de cada recorte (para validar em ensaios inteiros fora do treino).
+
+    Conjuntos sem a chave 'run' (antigos) caem no quadro de cada recorte."""
+    runs, offset = [], 0
+    for path in paths:
+        data = np.load(path, allow_pickle=False)
+        values = data['run'] if 'run' in data else data['group']
+        runs.append(values + offset)
+        offset = int(runs[-1].max()) + 1 if len(runs[-1]) else offset
+    return np.concatenate(runs)
+
+
 def load_datasets(paths):
     X, y, group, meta, offset = [], [], [], None, 0
     for path in paths:
@@ -111,6 +124,104 @@ def report(matrix):
     return '\n'.join(lines), precision, recall
 
 
+def tensor(torch, images):
+    """N x H x W x 3 uint8 BGR -> N x 3 x H x W float 0-1 (igual a to_blob)."""
+    return torch.from_numpy(images).permute(0, 3, 1, 2).float().div(255.)
+
+
+def fit(torch, X, y, train, val, epochs=40, batch=128, lr=3e-3, verbose=True):
+    """Treina com a validacao escolhendo a melhor epoca; (modelo, acuracia
+    balanceada, probabilidades na validacao)."""
+    Xt, yt = tensor(torch, X[train]), torch.from_numpy(y[train])
+    Xv, yv = tensor(torch, X[val]), y[val]
+    model = build_model(torch, len(CLASSES))
+    weights = torch.tensor(len(y[train])/np.maximum(np.bincount(y[train], minlength=len(CLASSES)), 1),
+                           dtype=torch.float32)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=weights/weights.mean())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=lr, total_steps=epochs*max(1, int(np.ceil(len(yt)/batch))))
+    best, best_state = -1., None
+    for epoch in range(epochs):
+        model.train()
+        order = torch.randperm(len(yt))
+        started, total = time.time(), 0.
+        for start in range(0, len(order), batch):
+            index = order[start:start+batch]
+            optimizer.zero_grad()
+            loss = loss_fn(model(augment(torch, Xt[index].clone())), yt[index])
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            total += loss.item()*len(index)
+        model.eval()
+        with torch.no_grad():
+            predicted = model(Xv).argmax(1).numpy()
+        matrix = confusion(yv, predicted, len(CLASSES))
+        balanced = float(np.mean(np.diag(matrix)/np.maximum(matrix.sum(1), 1)))
+        if balanced > best:
+            best, best_state = balanced, {k: v.clone() for k, v in model.state_dict().items()}
+        if verbose:
+            print(f'epoca {epoch+1:3d}  perda {total/len(yt):.4f}  acuracia balanceada {balanced:.3f}  '
+                  f'({time.time()-started:.1f} s)', flush=True)
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.no_grad():
+        probabilities = torch.softmax(model(Xv), 1).numpy()
+    return model, best, probabilities
+
+
+def cross_validate(torch, X, y, runs, folds, epochs, batch, lr, seed=0):
+    """Validacao por ensaio: cada ensaio fica fora do treino em uma das `folds`
+    rodadas. Devolve (matriz 3x3 somada, previsao de cada recorte).
+
+    A melhor epoca e escolhida num quadro de validacao separado do treino, nunca
+    no ensaio de teste (senao a medida fica otimista)."""
+    unique = np.unique(runs)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(unique)
+    assignment = {run: k % folds for k, run in enumerate(order)}
+    fold_of = np.array([assignment[r] for r in runs])
+    predicted = np.full(len(y), -1)
+    for fold in range(folds):
+        test = fold_of == fold
+        rest = np.flatnonzero(~test)
+        inner = rng.random(len(rest)) < .15
+        train, val = np.zeros(len(y), bool), np.zeros(len(y), bool)
+        train[rest[~inner]], val[rest[inner]] = True, True
+        model, _, _ = fit(torch, X, y, train, val, epochs, batch, lr, verbose=False)
+        with torch.no_grad():
+            predicted[test] = model(tensor(torch, X[test])).argmax(1).numpy()
+        held = sorted({int(r) for r in runs[test]})
+        hits = float(np.mean(predicted[test] == y[test])) if test.any() else float('nan')
+        print(f'rodada {fold+1}/{folds}: ensaios fora do treino {held}, {int(test.sum())} recortes,'
+              f' acerto {hits:.3f}', flush=True)
+    return confusion(y, predicted, len(CLASSES)), predicted
+
+
+def plot_matrix(matrix, path, title):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    share = matrix/np.maximum(matrix.sum(1, keepdims=True), 1)
+    fig, ax = plt.subplots(figsize=(5.4, 4.6))
+    ax.imshow(share, cmap='Blues', vmin=0, vmax=1)
+    names = ['não cone', 'cone verde', 'cone vermelho']
+    for i in range(len(names)):
+        for j in range(len(names)):
+            ax.text(j, i, f'{int(matrix[i, j])}\n{100*share[i, j]:.0f}%', ha='center', va='center',
+                    color='white' if share[i, j] > .55 else 'black')
+    ax.set_xticks(range(len(names)), names)
+    ax.set_yticks(range(len(names)), names)
+    ax.set_xlabel('previsto pela rede')
+    ax.set_ylabel('rótulo humano')
+    ax.set_title(title, fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('datasets', nargs='+', type=Path)
@@ -122,6 +233,10 @@ def main(argv=None):
     parser.add_argument('--min-confidence', type=float, default=.6,
                         help='probabilidade minima da classe de cone no carro')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--validacao-por-ensaio', type=int, metavar='K', default=0,
+                        help='antes do treino final: validacao cruzada em K rodadas, cada ensaio fora do treino'
+                             ' em uma delas (matriz de confusao honesta)')
+    parser.add_argument('--matriz', type=Path, help='PNG da matriz de confusao (validacao por ensaio)')
     args = parser.parse_args(argv)
     try:
         import torch
@@ -137,47 +252,22 @@ def main(argv=None):
           f'treino {train.sum()}, validacao {val.sum()} ({len(np.unique(group[val]))} quadros)', flush=True)
     if min(counts) == 0:
         parser.error('todas as classes precisam de exemplos; rotule mais quadros')
+    cross = None
+    if args.validacao_por_ensaio:
+        runs = load_runs(args.datasets)
+        folds = min(args.validacao_por_ensaio, len(np.unique(runs)))
+        print(f'\nValidacao por ensaio: {len(np.unique(runs))} ensaios em {folds} rodadas', flush=True)
+        cross, _ = cross_validate(torch, X, y, runs, folds, args.epochs, args.batch, args.lr, args.seed)
+        text, _, _ = report(cross)
+        print('\nMatriz de confusao, ensaios fora do treino (todas as rodadas somadas):\n' + text + '\n', flush=True)
+        if args.matriz:
+            balanced = float(np.mean(np.diag(cross)/np.maximum(cross.sum(1), 1)))
+            print('figura:', plot_matrix(cross, args.matriz, f'Rede de cones, ensaios fora do treino ({folds} rodadas)'
+                                         f'\nacurácia balanceada {balanced:.3f}'), flush=True)
 
-    def tensor(images):  # N x H x W x 3 uint8 BGR -> N x 3 x H x W float 0-1 (igual a to_blob)
-        return torch.from_numpy(images).permute(0, 3, 1, 2).float().div(255.)
-
-    Xt, yt = tensor(X[train]), torch.from_numpy(y[train])
-    Xv, yv = tensor(X[val]), y[val]
-    model = build_model(torch, len(CLASSES))
+    model, best, probabilities = fit(torch, X, y, train, val, args.epochs, args.batch, args.lr)
     print(f'parametros: {sum(p.numel() for p in model.parameters())}', flush=True)
-    weights = torch.tensor(len(y[train])/np.maximum(np.bincount(y[train], minlength=len(CLASSES)), 1),
-                           dtype=torch.float32)
-    loss_fn = torch.nn.CrossEntropyLoss(weight=weights/weights.mean())
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=args.lr, total_steps=args.epochs*max(1, int(np.ceil(len(yt)/args.batch))))
-    best, best_state = -1., None
-    for epoch in range(args.epochs):
-        model.train()
-        order = torch.randperm(len(yt))
-        started, total = time.time(), 0.
-        for start in range(0, len(order), args.batch):
-            index = order[start:start+args.batch]
-            optimizer.zero_grad()
-            loss = loss_fn(model(augment(torch, Xt[index].clone())), yt[index])
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            total += loss.item()*len(index)
-        model.eval()
-        with torch.no_grad():
-            predicted = model(Xv).argmax(1).numpy()
-        matrix = confusion(yv, predicted, len(CLASSES))
-        balanced = float(np.mean(np.diag(matrix)/np.maximum(matrix.sum(1), 1)))
-        if balanced > best:
-            best, best_state = balanced, {k: v.clone() for k, v in model.state_dict().items()}
-        print(f'epoca {epoch+1:3d}  perda {total/len(yt):.4f}  acuracia balanceada {balanced:.3f}  '
-              f'({time.time()-started:.1f} s)', flush=True)
-    model.load_state_dict(best_state)
-    model.eval()
-    with torch.no_grad():
-        logits = model(Xv)
-    probabilities = torch.softmax(logits, 1).numpy()
+    yv = y[val]
     text, precision, recall = report(confusion(yv, probabilities.argmax(1), len(CLASSES)))
     print('\nMelhor epoca na validacao:\n' + text)
 
@@ -195,10 +285,12 @@ def main(argv=None):
         torch.onnx.export(model, dummy, str(args.out), **export)
     info = {
         'classes': list(CLASSES), 'crop': meta['crop'], 'candidate_settings': meta['candidate_settings'],
+        'cone_height_m': float(meta.get('cone_height_m', .2)),
         'min_confidence': args.min_confidence,
         'trained': {'datasets': [str(p) for p in args.datasets], 'samples': int(len(y)),
                     'validation_frames': int(len(np.unique(group[val]))),
                     'balanced_accuracy': round(best, 4),
+                    'cross_validation_by_run': None if cross is None else cross.tolist(),
                     'precision': dict(zip(CLASSES, np.round(precision, 4).tolist())),
                     'recall': dict(zip(CLASSES, np.round(recall, 4).tolist())),
                     'date': time.strftime('%Y-%m-%d %H:%M')}}

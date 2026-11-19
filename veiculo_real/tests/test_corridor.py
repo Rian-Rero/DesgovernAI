@@ -207,9 +207,11 @@ class EstimatorTests(unittest.TestCase):
         for k in range(10):
             estimate = est.step(.15*k, left, right, (0., 0., 0.) if k else None)
         self.assertTrue(estimate.valid, estimate.reason)
-        # Antes partia a 0,35 m/s ate os cones chegarem perto (o "engasgo"). O
-        # caminho a 1 m ja e conhecido: parte normal, mirando longe (eixo incerto).
-        self.assertFalse(estimate.slow)
+        # So cones longe (1,5 m+): os perto pesam mais no ajuste (model_growth), entao
+        # o caminho a 1 m ainda e incerto -> parte devagar (sem engasgo desde o
+        # feedforward do acelerador), mirando longe. Com cones a partir de 0,8 m
+        # a partida e normal (StartupTests em test_controle_cones.py).
+        self.assertTrue(estimate.slow)
         self.assertTrue(estimate.near_uncertain)
         self.assertLess(abs(estimate.errors[0]), .2)
         self.assertLess(abs(estimate.errors[2]), .2)

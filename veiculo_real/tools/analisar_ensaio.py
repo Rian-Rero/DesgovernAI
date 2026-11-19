@@ -217,6 +217,22 @@ def report(folder, with_line=False):
     ok(age <= GOALS['idade_ms'], f'atraso da imagem: {age:.0f} ms mediana, p90 {1000*active["vision_age_s"].quantile(.9):.0f} ms'
        f' (meta <= {GOALS["idade_ms"]:.0f}) | captura {1000*frames["vision_capture_s"].median():.0f}'
        f' deteccao {1000*frames["vision_detection_s"].median():.0f} geometria {1000*frames["vision_geometry_s"].median():.0f} ms')
+    if len(active) > 1 and rate > 0:
+        # Pergunta do professor: o Stanley roda a quantos Hz e a imagem chega a cada quanto?
+        control_hz = 1/float(np.median(np.diff(active['t'])))
+        speed = float(active['v'][active['v'] > .1].mean()) if (active['v'] > .1).any() else 0.
+        lines.append(f'taxas: controle (Stanley) {control_hz:.0f} Hz, imagem nova {rate:.1f}/s -> cada imagem'
+                     f' serve ~{control_hz/rate:.0f} passos (entre elas, o erro e levado pela odometria);'
+                     f' com {age:.0f} ms de atraso, a {speed:.2f} m/s o carro anda {100*speed*age/1000:.0f} cm'
+                     f' entre a foto e o uso')
+    states_line = {}
+    for record in records:
+        state = ((record.get('vision') or {}).get('corridor') or {}).get('state')
+        if state:
+            states_line[state] = states_line.get(state, 0) + 1
+    if records and states_line.get('LINHA', 0) > .02*len(records):
+        warnings.append(f'ATENCAO fita amarela guiou {100*states_line["LINHA"]/len(records):.0f}% dos quadros:'
+                        ' sem fita no centro da pista, uma faixa amarela do chao vira o "centro" (--fita-amarela so com fita)')
     if (folder/'frames').exists() and any((folder/'frames').iterdir()):
         warnings.append('ATENCAO quadros gravados nesta corrida: a visao fica ~20% mais lenta (so em coleta)')
 

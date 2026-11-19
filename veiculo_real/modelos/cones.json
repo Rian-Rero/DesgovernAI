@@ -15,24 +15,42 @@
     "green_chroma_min": 5,
     "green_angle_high": 255
   },
+  "cone_height_m": 0.2,
   "min_confidence": 0.6,
   "trained": {
     "datasets": [
       "/home/viper/fva_experimentos/cones_simnao.npz"
     ],
-    "samples": 3779,
-    "validation_frames": 112,
-    "balanced_accuracy": 0.9232,
+    "samples": 6400,
+    "validation_frames": 202,
+    "balanced_accuracy": 0.9362,
+    "cross_validation_by_run": [
+      [
+        605,
+        134,
+        47
+      ],
+      [
+        56,
+        2852,
+        0
+      ],
+      [
+        79,
+        1,
+        2626
+      ]
+    ],
     "precision": {
-      "nao_cone": 0.7467,
-      "cone_verde": 0.9639,
-      "cone_vermelho": 1.0
+      "nao_cone": 0.7968,
+      "cone_verde": 0.9718,
+      "cone_vermelho": 0.9907
     },
     "recall": {
-      "nao_cone": 0.8235,
-      "cone_verde": 0.9726,
-      "cone_vermelho": 0.9734
+      "nao_cone": 0.8765,
+      "cone_verde": 0.9633,
+      "cone_vermelho": 0.9689
     },
-    "date": "2026-11-17 17:42"
+    "date": "2026-11-19 19:39"
   }
 }

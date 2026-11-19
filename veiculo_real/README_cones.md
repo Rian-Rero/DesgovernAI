@@ -182,6 +182,30 @@ O estimador já pesa cada cone pela incerteza da homografia (pequena na direçã
 grande na distância, crescendo com o quadrado da distância), então cones longe
 pesam menos. Com a base mais precisa, eles atrapalham menos o ajuste da curva.
 
+### Hierarquia: cones perto pesam mais
+
+O estimador ajusta as bordas por mínimos quadrados ponderados: cada cone pesa
+pelo inverso da sua variância, que cresce com a distância. Há dois termos: a
+incerteza da homografia (quadrática; 1 px de linha vale ~0,8 cm a 1 m e ~7 cm a
+3 m) e um erro de modelo linear (`model_growth`, 0,10 m por m desde 19/11;
+antes 0,05). Peso de um cone de borda numa reta, relativo ao de 1 m:
+
+| distância | 0,8 m | 1 m | 1,5 m | 2 m | 2,5 m | 3 m |
+|---|---|---|---|---|---|---|
+| desvio do cone | 13 cm | 15 | 20 | 25 | 31 | 36 |
+| peso (0,10/m, atual) | 1,34 | 1 | 0,56 | 0,36 | 0,25 | 0,18 |
+| peso (0,05/m, antes) | 1,25 | 1 | 0,63 | 0,43 | 0,31 | 0,24 |
+
+O Stanley usa o deslocamento e o rumo junto ao eixo, que saem principalmente
+dos cones perto. Os longe entram com pouco peso, mas não saem: com cones a ~1 m
+uns dos outros, são eles que mostram a curva chegando.
+
+Na pista virtual (cones a 1 m, 7 quadros/s), com ruído e erro de calibração
+nos cones longe (o caso real), 0,10/m tirou os toques (2 → 0) e o pior erro
+(59 → 35 cm). 0,2/m ou mais piorou (voltas incompletas): a curva à frente só
+aparece nos longe. Nos ensaios reais reprocessados, o custo é um pouco mais de
+velocidade lenta (21% → 28% dos quadros válidos; partida mediana 0,73 → 0,90 s).
+
 ### Largura da pista (aprendida em corrida)
 
 A pista muda de largura a cada dia, então `cone_settings.track_width_cm` é só
@@ -201,12 +225,38 @@ acusa largura fora de 0,4–2,5× o palpite. `cones_summary.json` traz
 
 ## Direção e velocidade com o estimador
 
-- **Pure pursuit** (`steering_law: "pure_pursuit"`, padrão nos cones com o
-  estimador). Mira o ponto do centro estimado a `0,4 m + 0,2 s·v` (teto 1,5 m)
+### Stanley (padrão desde 19/11)
+
+O professor pediu o Stanley. Ele roda no centro estimado, em metros no chão (os
+cones vêm projetados no piso pela homografia: é a "vista de cima" numérica):
+
+    esterço = rumo + atan(k·e / (ks + v)) + atan(L·κ)
+
+- `e` e `rumo`: deslocamento e rumo do centro estimado junto ao eixo dianteiro;
+  `κ`: curvatura (termo de regime, `stanley_curvature_ff`).
+- **k e ks fixos** (`stanley_gain` 2,5, `stanley_softening` 0,3).
+- **v = velocidade MEDIDA, filtrada** (`stanley_use_vref: False`,
+  `stanley_speed_filter_s` 0,3 s, passa-baixa de 1ª ordem). Antes era a vref:
+  na partida, nas curvas e freando, o carro está mais lento que a vref, e o
+  termo ficava fraco justamente ali. A do encoder sem filtro oscila e faria o
+  ganho efetivo oscilar junto.
+- **Escolha de k**, na pista virtual com a pista de 17/11 (largura 1,3 m, cones
+  a 1 m, visão a 7 e 11 quadros/s): k 1,5 → 7,8 cm RMS; k 2,5 → 5,8 cm; sem
+  toques. No simulador k 3 ainda melhora, mas o carro real é mais ruidoso
+  (poucos cones por quadro). `--stanley-gain` ou o campo "Ganho Stanley k" da
+  GUI ajustam na pista: oscila, baixe; passa reto da borda, suba.
+- **Taxas** (pergunta do professor): o Stanley roda no laço de controle a
+  **~48 Hz**, mas a imagem nova chegava a **6–8 por segundo**, com **~280 ms**
+  de atraso. Cada imagem serve ~7 passos; entre elas o erro é levado ao instante
+  atual pela odometria (compensação do atraso). O gargalo é a visão, não o
+  controle; o 📋 Relatório mostra essas taxas em cada volta.
+
+### Pure pursuit (opcional)
+
+- **Pure pursuit** (`--pure-pursuit`, ou a caixa na GUI). Mira o ponto do centro estimado a `0,4 m + 0,2 s·v` (teto 1,5 m)
   do eixo dianteiro, já deslocado para o caminho do eixo traseiro (em curva, ele
   anda por dentro: R − √(R² − L²)). O caminho junto ao carro vem da clotoide do
-  estimador (`path_dkappa` na observação). `--stanley` volta ao Stanley; a
-  linha amarela usa sempre Stanley.
+  estimador (`path_dkappa` na observação). A linha amarela usa sempre Stanley.
 - **Prévia de curva** (`speed_preview_m: 2.5`). O carro não freia: em neutro,
   perde 0,55–0,7 m/s² a partir de 1,5 m/s (logs de 20/10). Então a vref cai
   **antes** da curva, para a maior velocidade que ainda permite rolar até cada
@@ -629,6 +679,77 @@ contato no piso, não para o topo dos cones.
   senha da GUI) e salva no `fake-hwclock`, para o próximo boot começar perto
   da hora certa. Toda execução do `main.py` pela GUI confere o relógio e acerta
   sozinha se a diferença passar de 2 s.
+
+## Ensaios de 17/11: o que deu errado e o que mudou (19/11)
+
+19 voltas com Stanley, ~29 s cada. O carro batia em cones e não seguia bem a
+trajetória. Nos logs:
+
+| achado | evidência | correção |
+|---|---|---|
+| Faixa amarela do corredor virou o "centro" | estado LINHA em 1–16% dos quadros; ex.: largura 0,5 m, rumo +19°, direção no batente (`tools/vista_de_cima.py` mostra) | fusão com fita **desligada** (`cone_line_fusion: False`; `--fita-amarela` liga) |
+| Visão lenta | 6–8 quadros/s, 280 ms; a geometria custava 124 ms nos quadros com a fita contra 19 ms sem | idem: no Pi, ~142 → ~85 ms por quadro (estimado pelos tempos do próprio log) |
+| Poucos cones | 0–2 aceitos por cor e quadro (cones a ~1 m; câmera baixa e quase nivelada) | tamanho real do cone e tolerâncias pela matriz de confusão (abaixo) |
+| Parado com cones à vista | ficou até 9 s parado vendo 2 cones (recomeço exigia 3) | com a largura já aprendida, **2 cones** recomeçam |
+| Parou no meio da curva | memória de 1 s venceu com 22 cm andados (curva lenta) | `memory_s` 2,5 s (o limite de distância continua) |
+| Calibração de 17/11 | fileira de 1,5 m inteira 19 cm deslocada (desvio 0,7 cm entre os pontos) | fileira descartada (guardada em `pontos_descartados`); homografia ajustada **em pixels** (erro fora do ajuste 6,5 → 3,2 px) |
+| Origem em x na frente do pneu | a calibração foi medida com o carro encostado na parede (frente do pneu), mas o carro usa o eixo dianteiro, onde ficam a câmera e o ultrassom, 7 cm atrás | 0,07 m somados a todos os x (`--da-frente-ao-eixo 0.07`); ultrassom no eixo (`SENSOR_X_M` 0) e os 7 cm do pneu na distância de parada (`FRONT_OVERHANG_M`) |
+| Carro ~15 cm à esquerda do centro | a calibração punha a câmera (que está no centro do carro) 18 cm à esquerda do zero da trena; reprocessando os ensaios, o centro real da pista ficava 13–19 cm à direita do carro (mediana −12,7 cm), com o carro achando que estava centrado | origem lateral movida para a câmera (`--revisar ... --origem-na-camera`); folga de cada lado volta de ~34 para ~52 cm |
+
+**Cone real** (18,5 cm de altura, 10,5 cm de base; antes supunha 20 × 15). As
+tolerâncias de tamanho foram escolhidas pela matriz de confusão contra os 3.779
+rótulos humanos (`relatorios/matriz_confusao_detector.png`):
+
+| detector | precisão | revocação |
+|---|---|---|
+| antes (20 × 15 cm, pé até 2,2×) | 0,952 | 0,731 |
+| só o tamanho real (mesmas tolerâncias) | 0,953 | 0,683 |
+| agora (18,5 × 10,5, pé até 4×, altura até 3,5×) | 0,948 | 0,750 |
+
+Na imagem reduzida, o borrão, a sombra e o reflexo deixam a mancha do cone até
+3–4× mais larga que a base: com o tamanho real e as tolerâncias de antes,
+cones reais eram descartados. A rede usa sempre o recorte do treino
+(`cone_height_m` no `.json`), independente do tamanho do detector.
+
+**Rede** (`relatorios/matriz_confusao_rede.png`): validação cruzada por ensaio
+(5 rodadas, cada ensaio fora do treino em uma), a medida honesta.
+
+| modelo | cones verdes mantidos | vermelhos mantidos | não-cones descartados |
+|---|---|---|---|
+| só 10/11 (3.779 recortes, 11 ensaios) | 96% | 97% | 74% |
+| a de 10/11 testada nos 2.621 recortes de 17/11 (lugar novo) | 99,8% | 91,5% | 82% |
+| **10/11 + 17/11** (6.400 recortes, 29 ensaios; a do carro) | **98%** | **97%** | **77%** |
+
+A rede antiga perdia 8,5% dos cones vermelhos no corredor de 17/11; com os
+rótulos de lá, perde 3%. `treinar_classificador_cones.py --validacao-por-ensaio 5
+--matriz m.png` refaz.
+
+**Diagnóstico da calibração** (`calibrar_camera_lateral.py`, ao salvar e com
+`--revisar arquivo.json`): a linha do chão logo abaixo da câmera aparece
+vertical na imagem; o y dela é a posição lateral da câmera no referencial das
+medidas. Com a câmera no centro do carro, tem de dar ~0 (10/11: −0,02 m; 17/11:
++0,18 m, a trena não saiu do centro do eixo). Também mostra o giro (a câmera
+está ~10° para a direita: não é erro, a homografia o considera, só tira visão
+do lado esquerdo perto do carro) e avisa de fileiras inteiras deslocadas.
+`--origem-na-camera` e `--tirar-fileira X` corrigem e gravam.
+
+**Câmera (recomendação, sem código):** em 17/11 ela estava baixa e quase
+nivelada, com metade da imagem em parede e teto. O chão útil (0,75–3 m) ocupava
+só ~130 linhas (em 10/11 eram ~170), e cada linha a 3 m vale ~7 cm. Inclinar a
+câmera para baixo (horizonte perto do topo da imagem) dá mais linhas por metro:
+distância mais precisa e mais cones perto. Depois, recalibrar.
+
+**Para os próximos testes:** os 2.621 recortes de 17/11 já estão na fila de
+rotulagem (🏷 na GUI); rotular e retreinar adapta a rede ao lugar novo.
+
+### Ferramentas novas
+
+- `tools/matriz_confusao.py <rotulagem> [--variante NOME AJUSTE=VALOR ...]
+  [--modelo m.onnx] --png m.png`: detector (e rede) contra os rótulos humanos.
+  Cada item guarda a calibração do seu dia (a câmera muda de posição).
+- `tools/vista_de_cima.py <ensaio> [--video]`: por quadro gravado, a câmera
+  achatada no chão com os cones, as bordas e o centro estimados e a seta do erro
+  do Stanley (`<ensaio>/vista_de_cima/`, `vista_de_cima.mp4`).
 
 ## Relatório do ensaio e versão do código
 
