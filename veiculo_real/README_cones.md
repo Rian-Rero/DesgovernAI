@@ -751,6 +751,51 @@ rotulagem (🏷 na GUI); rotular e retreinar adapta a rede ao lugar novo.
   achatada no chão com os cones, as bordas e o centro estimados e a seta do erro
   do Stanley (`<ensaio>/vista_de_cima/`, `vista_de_cima.mp4`).
 
+## Ensaios de 19/11: carro colado na direita (corrigido no mesmo dia)
+
+**Causa:** a calibração de 17/11 foi medida com a trena **girada ~11°** em
+relação ao carro, cruzando o eixo dele ~0,9 m à frente. Na correção de 19/11
+de manhã, entrou só a metade lateral (origem 18 cm), sem o giro. Perto de 1–2 m,
+isso deslocou os cones ~28 cm para a direita, e o carro se "centralizava" colado
+nos cones da direita.
+
+**Como o giro foi medido sem recalibrar** (`tools/alinhamento_camera.py`): com
+o carro andando, um cone parado se desloca para trás exatamente ao longo do
+eixo do carro. Nos ~2.700 pares de cones dos ensaios de 17/11, ele se deslocava
+em diagonal: **−11,3°** (cones até 1,4 m e de 1,4 a 2,2 m concordam).
+Aplicado com `calibrar_camera_lateral.py --revisar ... --girar 11.3`, o resíduo
+fica em +1,4°. Com o giro, a câmera aponta para a frente do carro (0,4°): a
+impressão de "câmera virada para a direita" vinha da trena.
+
+O mesmo ajuste mediu uma **guinada que a odometria não vê**: a roda vira ~3,5°
+mais para a direita que o comando. O trim aprendido em 17/11 saiu com o sinal
+errado (−2°), porque a percepção girada também desloca o esterço médio nas retas.
+Agora o trim começa em **+3°** (`steering_trim_deg`), com teto de 6°, num
+arquivo novo (`logs/direcao_trim_v2.json`); o antigo não é mais lido.
+
+**Outras correções:**
+- **Partida com um cone de cada lado.** Em 19/11 (pista de ~1,9 m), duas voltas
+  não saíram do lugar vendo 1 verde e 1 vermelho. Agora o par basta, e o ponto
+  de partida do ajuste vem dele: centro no meio, largura entre os dois. Na
+  primeira partida, usa o par mais parecido com um portão (mesma distância à
+  frente).
+- **Trajetória de curva** (`racing_line_m` 0,10, `racing_inside` 1;
+  `--abrir-curva`, campo "Abrir na curva" na GUI). Com uma curva chegando (pela
+  clotoide do estimador, de 0,5 a 1,5 m), a referência vai até 10 cm para
+  **fora**: o carro abre antes da curva, vê mais cones dela e entra com folga do
+  lado de dentro; dentro da curva volta ao centro. Na pista virtual (1,3 m,
+  cones a 1 m, 12 q/s), a folga mínima até os cones foi de 20 para 27–29 cm,
+  com todas as voltas completas, também com ruído e erro de calibração. Em pista
+  larga (1,9 m) não ajudava (o carro perdia a borda de dentro de vista), então
+  o desvio diminui até sumir entre 1,3 e 1,7 m de largura. Fechar para dentro
+  na curva (`racing_inside` 1,5) não melhorou na pista estreita e piorou na larga.
+- **Visão:** com a fita amarela desligada, foi de 6–7 para **12–15 quadros/s**,
+  com 170–190 ms de atraso (era ~280).
+
+**Deixe "Debug de cones" ligado.** Os ensaios de 19/11 vieram sem o
+`cones_debug.jsonl`, e sem ele não há como medir o giro, a vista de cima nem a
+causa de cada batida.
+
 ## Relatório do ensaio e versão do código
 
 - `main.py` imprime `Codigo: versao xxxxxxxx` (hash dos `.py`) e grava esse

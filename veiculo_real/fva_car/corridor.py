@@ -452,6 +452,21 @@ class CorridorEstimator:
     def _initialize(self, points, sides, covariance):
         cfg = self.settings
         x0 = np.array([0., 0., 0., 0., self.nominal_width])
+        left, right = points[sides > 0], points[sides < 0]
+        if len(left) and len(right) and not self.started:
+            # So na PRIMEIRA partida (carro posto a mao, sem objetos estranhos a
+            # frente; num recomeco um falso pode ser o cone mais perto).
+            # Ponto de partida pelos cones dos dois lados (o mais perto de cada):
+            # centro no meio e, sem largura aprendida, a largura entre eles. Com o
+            # palpite fixo (0,9 m) numa pista de 1,9 m e 2 cones, o ajuste girava o
+            # corredor 17 graus em vez de alarga-lo (partida de 19/11).
+            # O par mais parecido com um portao (mesma distancia a frente), perto.
+            cost = np.abs(left[:, None, 0] - right[None, :, 0]) + .2*(left[:, None, 0] + right[None, :, 0])
+            i, j = np.unravel_index(int(np.argmin(cost)), cost.shape)
+            near_left, near_right = left[i], right[j]
+            x0[E] = float(np.clip((near_left[1] + near_right[1])/2, -1., 1.))
+            if self.learned_width is None:
+                x0[WIDTH] = float(np.clip(near_left[1] - near_right[1], cfg.min_width_m, cfg.max_width_m))
         width_sigma = cfg.init_width_sigma if self.learned_width is None else (cfg.width_prior_sigma or .2)
         sigma_e, sigma_psi = (.6, .6) if self.started else (cfg.start_sigma_e, cfg.start_sigma_psi)
         P0 = np.diag([sigma_e**2, sigma_psi**2, cfg.init_kappa_sigma**2, cfg.init_dkappa_sigma**2,
@@ -462,7 +477,10 @@ class CorridorEstimator:
         # recomecar (a largura vem da memoria; o portao de incerteza a frente
         # ainda decide se vale). Antes exigia 3: nos ensaios de 17/11 o carro via
         # 0-2 cones por cor e ficou ate 9 s parado com 2 a vista.
-        needed = int(cfg.restart_cones) if self.learned_width is not None else 3
+        # Um cone de CADA lado tambem basta: o par ja da o centro e a largura (em
+        # 19/11, pista de ~1,9 m, o carro ficou parado vendo 1 verde e 1 vermelho).
+        both_sides = bool(np.any(sides > 0) and np.any(sides < 0))
+        needed = int(cfg.restart_cones) if (self.learned_width is not None or both_sides) else 3
         for _ in range(3):
             if np.count_nonzero(keep) < needed:
                 return None

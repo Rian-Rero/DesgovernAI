@@ -14,7 +14,8 @@ from fva_car.lateral import BirdsEyeView, GroundCalibration, RealLineDetector, l
 from fva_car.odometry import PoseHistory  # noqa: E402
 import main  # noqa: E402
 
-CALIBRATION = GroundCalibration.from_file(ROOT/'calibracao'/'camera_lateral.json')
+# Calibracao FIXA dos testes (a do repositorio muda a cada correcao da camera).
+CALIBRATION = GroundCalibration.from_file(Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json')
 
 
 def floor_with_line(state, width=.05):

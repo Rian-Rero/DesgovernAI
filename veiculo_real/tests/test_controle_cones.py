@@ -136,7 +136,7 @@ class StartupTests(unittest.TestCase):
     def test_far_cones_do_not_hold_the_car_at_recovery_speed(self):
         from fva_car.corridor import CorridorEstimator, CorridorSettings
         from fva_car.lateral import GroundCalibration
-        calibration = GroundCalibration.from_file(Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+        calibration = GroundCalibration.from_file(Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json')
         estimator = CorridorEstimator(CorridorSettings(track_width_m=1.2), calibration.homography)
         x = np.array([.8, 1.2, 1.6, 2.1])  # partida: nenhum cone junto ao eixo
         estimate = estimator.step(10., np.c_[x, np.full(4, .6)], np.c_[x, np.full(4, -.6)], (0., 0., 0.))
@@ -304,3 +304,51 @@ class CorridorRecoveryTests(unittest.TestCase):
         for k in range(1, 9):  # 1,6 s sem cones a 0,15 m/s (24 cm): segue na memoria
             state = est.step(10. + .2*k, [], [], (.03, 0., 0.)).state
         self.assertEqual(state, 'MEMORIA')
+
+
+class RacingLineTests(unittest.TestCase):
+    """Curva a frente: referencia para fora (abre antes da curva), so em pista estreita."""
+    def follower(self, **extra):
+        settings = dict(FollowerTests.settings, steering_law='stanley', racing_line_m=.10, racing_inside=1.,
+                        racing_filter_s=0.)
+        settings.update(extra)
+        return RealStanleyFollower(settings)
+
+    def offset(self, follower, curvature_now, dkappa, width):
+        follower.path_dkappa = dkappa
+        return follower._racing_line_offset(curvature_now, SimpleNamespace(corridor_width_m=width), .02)
+
+    def test_opens_to_the_outside_before_a_left_curve(self):
+        follower = self.follower()
+        before = self.offset(follower, 0., .8, 1.3)   # reta agora, curva a esquerda a frente
+        self.assertAlmostEqual(before, -.10)          # carro para a DIREITA (fora)
+        inside = self.offset(follower, .8, 0., 1.3)   # ja na curva: volta ao centro (so abre)
+        self.assertAlmostEqual(inside, 0., places=6)
+        right = self.offset(follower, 0., -.8, 1.3)   # curva a direita: abre para a esquerda
+        self.assertAlmostEqual(right, .10)
+
+    def test_wide_track_and_missing_width_disable_it(self):
+        follower = self.follower()
+        self.assertEqual(self.offset(follower, 0., .8, 1.9), 0.)
+        self.assertAlmostEqual(self.offset(follower, 0., .8, 1.5), -.05)  # meio caminho
+        self.assertEqual(self.offset(follower, 0., .8, float('nan')), 0.)
+        self.assertEqual(self.offset(self.follower(racing_line_m=0.), 0., .8, 1.3), 0.)
+
+    def test_the_offset_moves_the_stanley_reference(self):
+        car = fake_car()
+        follower = self.follower(stanley_use_vref=False)
+        from fva_car.cones import ConeObservation
+        follower.apply(car, ConeObservation(10., errors=(0., 0., 0.), path_dkappa=.8, corridor_width_m=1.3), 10.)
+        self.assertLess(follower.controller.cross_track_term, 0.)  # esterca para a direita (abre)
+
+
+class GateStartTests(unittest.TestCase):
+    def test_one_cone_per_side_starts_with_the_pair_as_first_guess(self):
+        from fva_car.corridor import CorridorEstimator, CorridorSettings
+        estimator = CorridorEstimator(CorridorSettings(track_width_m=.9))
+        left, right = np.array([[1.7, .95]]), np.array([[1.75, -.95]])  # pista de 1,9 m, palpite 0,9
+        for k in range(3):
+            estimator.step(10. + .1*k, left, right, (0., 0., 0.) if k else None)
+        self.assertIsNotNone(estimator.x)
+        self.assertAlmostEqual(estimator.x[4], 1.9, delta=.15)
+        self.assertLess(abs(math.degrees(estimator.x[1])), 5.)  # nao gira o corredor para caber

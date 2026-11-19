@@ -75,12 +75,14 @@ MISSION_DEFAULTS = {
     "refine": True,               # False: --no-refine (base dos cones longe na imagem reduzida)
     "new_start": True,            # False: --old-start (partida como antes de 17/11, para comparar)
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
+    "racing_line": "0.10",        # --abrir-curva (m para fora antes da curva; 0.10 e o padrao do main.py)
     "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
 STANLEY_GAINS = ("1.5", "2.0", "2.5", "3.0", "3.5")
+RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
                      "curve_echo", "refine")
@@ -130,6 +132,13 @@ def build_main_command(options: dict) -> str:
             gain = None
         if gain is not None and 0 < gain <= 10 and abs(gain - float(MISSION_DEFAULTS["stanley_gain"])) > 1e-9:
             parts.append(f"--stanley-gain {gain:g}")
+    if o["navigation"] == "cones":
+        try:
+            racing = float(str(o["racing_line"]).replace(",", "."))
+        except ValueError:
+            racing = None
+        if racing is not None and 0 <= racing <= .5 and abs(racing - float(MISSION_DEFAULTS["racing_line"])) > 1e-9:
+            parts.append(f"--abrir-curva {racing:g}")
     if not o["new_start"]:
         parts.append("--old-start")  # ja traz o acelerador antigo
     else:
@@ -523,7 +532,7 @@ def remote_code_version(client, remote_dir: str):
 # nao faz a coleta baixar tudo de novo.
 COLLECT_MANIFEST = ".coletados.json"
 # Estado do carro dentro de logs/: vem na coleta, mas nunca e apagado do carro.
-COLLECT_KEEP = {"direcao_trim.json", "acelerador.json"}
+COLLECT_KEEP = {"direcao_trim.json", "direcao_trim_v2.json", "acelerador.json"}
 COLLECT_TAR_MIN_FILES = 8      # a partir disto, um fluxo tar (frames: milhares de arquivos pequenos)
 DELETE_MIN_AGE_S = 60          # arquivo mexido ha menos disso pode ser de uma corrida em andamento
 CLOCK_TOLERANCE_S = 2.0
@@ -1283,8 +1292,11 @@ class RsyncGUI(tk.Tk):
         self.gain_combo = ttk.Combobox(throttle, textvariable=self.mission_vars["stanley_gain"],
                                        values=STANLEY_GAINS, width=4)
         self.gain_combo.pack(side="left", padx=(4, 8))
+        ttk.Label(throttle, text="Abrir na curva (m):").pack(side="left", padx=(8, 0))
+        ttk.Combobox(throttle, textvariable=self.mission_vars["racing_line"], values=RACING_LINES,
+                     width=5).pack(side="left", padx=(4, 8))
         ttk.Label(throttle, foreground="#555",
-                  text="auto = o carro aprende | número fixo: tranco na partida, baixe; engasga, suba"
+                  text="(auto = o carro aprende)"
                   ).pack(side="left")
         ttk.Label(box, foreground="#b06000", wraplength=1000, justify="left",
                   text="Gravar quadros deixa a visão ~20% mais lenta: só para coleta, nunca em corrida "

@@ -83,6 +83,15 @@ parameters = {
     # sem toques; k 3 ainda melhor no simulador, mas o carro real tem mais ruido
     # (poucos cones por quadro): 2,5 deixa margem. --stanley-gain ajusta na pista.
     "stanley_gain": 2.5,
+    # Trajetoria de curva (fva_car/lateral.py, _racing_line_offset): com curva a
+    # frente, a referencia vai ate racing_line_m para FORA (abre antes da curva,
+    # ve mais cones dela) e volta ao centro dentro dela (racing_inside 1: so abre;
+    # 1,5 tambem fecha para dentro). Pista virtual, pista de 1,3 m, cones a 1 m,
+    # 12 q/s: folga minima ate os cones 20 -> 29 cm e todas as voltas completas
+    # (com ruido e erro de calibracao tambem). Em pista larga (>= 1,7 m) piorava:
+    # some sozinho acima de racing_full_width_m. 0 desliga.
+    "racing_line_m": 0.10,
+    "racing_inside": 1.0,
     "stanley_softening": 0.3,
     # Velocidade do termo de deslocamento do Stanley, atan(k*e/(ks + v)), com k e
     # ks fixos: a MEDIDA pelo encoder, filtrada (1a ordem, stanley_speed_filter_s).
@@ -199,7 +208,13 @@ parameters = {
     # comeca dele.
     "centering_steer_gain": 0.3,     # 1/s: trim += 0,3 * esterco comandado * dt, so em reta
     "centering_gain": 0.0,           # rad por (m*s) do erro lateral estimado (antigo: 0,15)
-    "steering_trim_deg": 0.0,        # trim inicial se ainda nao houver o arquivo
+    # Trim inicial se ainda nao houver o arquivo. Nos ensaios de 17/11 a roda virava
+    # ~3,5 graus mais para a direita que o comando (tools/alinhamento_camera.py,
+    # "curva nao vista"); o trim aprendido la saiu com o sinal errado (-2 graus)
+    # porque a percepcao estava girada 11 graus. Comeca em +3 e o aprendizado ajusta.
+    "steering_trim_deg": 3.0,
+    # Teto do trim aprendido (graus): 4 nao alcancava o vies medido.
+    "centering_limit_deg": 6.0,
     "steering_trim_learning": True,  # False: trim fixo (steering_trim_deg), sem aprender
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
@@ -293,7 +308,9 @@ def cone_calibration_warnings(calibration, detector):
 
 # Trim da direcao aprendido entre corridas (fva_car/lateral.py, centralizacao).
 # Em logs/: a limpeza do envio da GUI nao apaga e o Coletar Dados traz junto.
-TRIM_FILE = Path(__file__).resolve().parent / "logs" / "direcao_trim.json"
+# v2: o direcao_trim.json antigo foi aprendido com a percepcao girada (calibracao
+# de 17/11 antes da correcao de 19/11) e esta com o sinal errado; nao e mais lido.
+TRIM_FILE = Path(__file__).resolve().parent / "logs" / "direcao_trim_v2.json"
 TRIM_MIN_STRAIGHT_S = 3.0  # so salva se aprendeu em pelo menos isto de reta
 TRIM_BLEND = 0.5           # cada corrida move o trim salvo so metade do que aprendeu
 
@@ -1015,6 +1032,9 @@ def main():
     parser.add_argument("--stanley-gain", type=float, metavar="K",
                         help="Ganho k do termo de deslocamento do Stanley (padrao 2.5): oscila, baixe;"
                              " passa reto da borda, suba")
+    parser.add_argument("--abrir-curva", type=float, metavar="M",
+                        help="Quanto a referencia vai para fora antes de uma curva (padrao 0.10 m; 0 desliga;"
+                             " so age em pista estreita)")
     parser.add_argument("--pure-pursuit", action="store_true",
                         help="Cones: pure pursuit no centro estimado em vez do Stanley")
     parser.add_argument("--fita-amarela", action="store_true",
@@ -1071,6 +1091,10 @@ def main():
         settings["steering_law"] = "stanley"
     if args.pure_pursuit:
         settings["steering_law"] = "pure_pursuit"
+    if args.abrir_curva is not None:
+        if not 0 <= args.abrir_curva <= .5:
+            parser.error("--abrir-curva deve estar entre 0 e 0.5 m")
+        settings["racing_line_m"] = args.abrir_curva
     if args.stanley_gain is not None:
         if not 0 < args.stanley_gain <= 10:
             parser.error("--stanley-gain deve estar entre 0 e 10")

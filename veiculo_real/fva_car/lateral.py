@@ -780,6 +780,25 @@ class RealStanleyFollower:
         # tendia a virar tarde/pouco.
         self.one_border_steer_gain = positive('one_border_curve_steer_gain', 1.)
         self.one_border_rate_gain = positive('one_border_curve_rate_gain', 1.)
+        # Trajetoria de curva (fora-dentro): com uma curva chegando, a referencia
+        # e deslocada para o lado de FORA (o carro abre antes da curva, ve mais
+        # cones dela e entra com folga do lado de dentro); dentro da curva, para o
+        # lado de dentro (fecha). Deslocamento do carro em relacao ao centro, em m:
+        #     racing_line_m * (1,5*sat(kappa_agora) - sat(kappa_a_frente)),  sat = kappa/racing_curvature
+        # limitado a meia largura - meia largura do carro - racing_margin_m.
+        # kappa_a_frente: a maior curvatura entre racing_ahead_m (de 0,5 a 1,5 m)
+        # pela clotoide do estimador. 0 desliga.
+        self.racing_line = nonnegative('racing_line_m', 0.)
+        self.racing_curvature = positive('racing_curvature', .5)
+        self.racing_margin = nonnegative('racing_margin_m', .2)
+        self.racing_filter = nonnegative('racing_filter_s', .3)
+        self.racing_inside = nonnegative('racing_inside', 1.5)  # peso de "fechar" dentro da curva
+        # So em pista estreita: inteiro ate racing_full_width_m de largura, zero a
+        # partir de racing_zero_width_m (pista larga ja tem folga; abrir nela tirava
+        # a borda de dentro da imagem na pista virtual).
+        self.racing_full_width = positive('racing_full_width_m', 1.3)
+        self.racing_zero_width = positive('racing_zero_width_m', 1.7)
+        self.racing_offset = 0.
         # Centralizacao: integral do erro lateral vira um esterco de correcao
         # (trim), igual para Stanley e pure pursuit. Corrige vies fixo (centro
         # do servo, assimetria esquerda/direita): sem ela o carro ficava 2-12 cm
@@ -861,6 +880,29 @@ class RealStanleyFollower:
         if callable(setter) and (self.trim_sent is None or abs(trim - self.trim_sent) > 1e-4):
             setter(trim)
             self.trim_sent = trim
+
+    def _racing_line_offset(self, curvature, observation, dt):
+        """Deslocamento desejado do carro em relacao ao centro (m, esquerda +)."""
+        if self.racing_line <= 0 or not math.isfinite(self.path_dkappa):
+            self.racing_offset = 0.
+            return 0.
+        arcs = np.linspace(.5, 1.5, 6)
+        ahead = curvature + self.path_dkappa*arcs
+        ahead = float(ahead[np.argmax(np.abs(ahead))])
+        sat = lambda value: float(np.clip(value/self.racing_curvature, -1., 1.))
+        target = self.racing_line*(self.racing_inside*sat(curvature) - sat(ahead))
+        width = getattr(observation, 'corridor_width_m', math.nan)
+        known = isinstance(width, (int, float, np.number)) and math.isfinite(width)
+        room = max(0., width/2 - .13 - self.racing_margin) if known else 0.
+        if known and self.racing_zero_width > self.racing_full_width:
+            target *= float(np.clip((self.racing_zero_width - width)/(self.racing_zero_width - self.racing_full_width),
+                                    0., 1.))
+        target = float(np.clip(target, -room, room))
+        if self.racing_filter > 0:
+            self.racing_offset += (1. - math.exp(-float(dt)/self.racing_filter))*(target - self.racing_offset)
+        else:
+            self.racing_offset = target
+        return self.racing_offset
 
     def _filter_measured_speed(self, speed, dt):
         """|v| do encoder pelo passa-baixa (nao zera no reset: o carro nao para)."""
@@ -1055,6 +1097,11 @@ class RealStanleyFollower:
         search = 0.
         if active:
             lateral, heading, curvature = errors
+            offset = self._racing_line_offset(curvature, observation, car.dt)
+            if offset:
+                # Referencia = centro deslocado `offset` (carro a esquerda do centro: +).
+                lateral = lateral + offset
+                errors = (lateral, heading, curvature)
             if holding and self.search_direction:
                 # Perdeu a faixa numa curva para a esquerda: vira cada vez mais
                 # para a esquerda, onde ela provavelmente saiu da imagem.
@@ -1213,6 +1260,7 @@ class RealStanleyFollower:
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,
                 stanley_target_rad=self.controller.target_steer if active else invalid,
                 pursuit_lookahead_m=self.pursuit_target[0] if active and self.pursuit_target else invalid,
+                racing_offset_m=self.racing_offset if active else invalid,
                 pursuit_target_y_m=self.pursuit_target[2] if active and self.pursuit_target else invalid,
                 path_dkappa=self.path_dkappa,
                 one_border_curve=int(self.one_border_curve),

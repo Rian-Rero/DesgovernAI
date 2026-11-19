@@ -273,7 +273,7 @@ class CorridorSideTests(unittest.TestCase):
     def detector(self):
         from fva_car.lateral import GroundCalibration
         from fva_car.cones import RealConeDetector
-        calibration = GroundCalibration.from_file(Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+        calibration = GroundCalibration.from_file(Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json')
         return RealConeDetector(calibration, corridor=True)
 
     def test_side_evidence_pairs_cones_at_the_same_distance(self):
@@ -356,7 +356,7 @@ class FarBaseRefinementTests(unittest.TestCase):
         from fva_car.cones import refine_bases
         self.refine = refine_bases
         self.calibration = GroundCalibration.from_file(
-            Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+            Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json')
         self.inverse = np.linalg.inv(self.calibration.homography)
         self.frame = np.full((480, 640, 3), (150, 156, 158), np.uint8)
         self.detector = RealConeDetector(self.calibration, processing_width=320)

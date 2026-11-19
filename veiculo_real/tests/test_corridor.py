@@ -12,7 +12,7 @@ from fva_car.corridor import (CorridorEstimator, CorridorSettings, SPEED_FACTOR,
 from fva_car.lateral import GroundCalibration, RealStanleyFollower, LineObservation
 from test_lateral import fake_car
 
-CALIBRATION = Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json'
+CALIBRATION = Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json'  # fixa dos testes
 WIDTH = 1.8
 SPACING = .5
 

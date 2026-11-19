@@ -101,7 +101,7 @@ class VisionStreamTests(unittest.TestCase):
         from fva_car.cones import RealConeDetector
         from fva_car.lateral import GroundCalibration
         calibration = GroundCalibration.from_file(
-            Path(__file__).resolve().parents[1]/'calibracao'/'camera_lateral.json')
+            Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json')
         detector = RealConeDetector(calibration)
         frame = np.full((480, 640, 3), 120, np.uint8)
         observation = detector.observe_frame(frame, 1.)

@@ -470,7 +470,7 @@ def review(args):
         print(f'  fileira {x:.2f} m fora do ajuste: dx {100*dx:+.1f} cm, dy {100*dy:+.1f} cm (dp {100*spread:.1f})')
     for warning in warnings:
         print('AVISO', warning)
-    if not (args.origem_na_camera or args.tirar_fileira or args.da_frente_ao_eixo):
+    if not (args.origem_na_camera or args.tirar_fileira or args.da_frente_ao_eixo or args.girar):
         return
     keep = np.ones(len(ground), bool)
     for x in args.tirar_fileira:
@@ -484,6 +484,11 @@ def review(args):
     if args.da_frente_ao_eixo:
         ground[:, 0] += args.da_frente_ao_eixo
         print(f'x medidos da ponta do carro: +{100*args.da_frente_ao_eixo:.1f} cm, origem no eixo dianteiro')
+    if args.girar:
+        angle = math.radians(args.girar)
+        rotation = np.array([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+        ground = ground @ rotation.T
+        print(f'pontos girados {args.girar:+.1f} graus em torno da origem (eixo dianteiro)')
     out = {key: value for key, value in data.items() if key not in ('image_points_px', 'ground_points_m',
                                                                   'erro_fora_cm')}
     out.update(image_points_px=pixels.tolist(), ground_points_m=ground.tolist())
@@ -493,6 +498,8 @@ def review(args):
         out['origem_lateral_movida_m'] = round(float(shift), 4)
     if args.da_frente_ao_eixo:
         out['x_somado_da_ponta_ao_eixo_m'] = round(float(args.da_frente_ao_eixo), 4)
+    if args.girar:
+        out['girado_graus'] = round(float(args.girar) + float(data.get('girado_graus', 0.)), 2)
     out['erro_fora_cm'] = [round(100*float(e), 1) for e in reprojection_errors(pixels, ground)[1]]
     print('salvo:', save_calibration(out, args.output))
 
@@ -511,6 +518,9 @@ def main():
     parser.add_argument('--origem-na-camera', action='store_true',
                         help='com --revisar: desloca o y de todos os pontos para a camera ficar em y=0 (use se'
                              ' a camera esta no centro do carro)')
+    parser.add_argument('--girar', type=float, metavar='GRAUS',
+                        help='com --revisar: gira todos os pontos em torno da origem (+ = sentido anti-horario,'
+                             ' para a esquerda); o valor sai de tools/alinhamento_camera.py')
     parser.add_argument('--da-frente-ao-eixo', type=float, metavar='M',
                         help='com --revisar: os x foram medidos da PONTA do carro; soma M (distancia da ponta'
                              ' ao centro do eixo dianteiro) para a origem ir ao eixo, como o carro usa')

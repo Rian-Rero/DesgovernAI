@@ -39,7 +39,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from fva_car.cones import CONE_RECOVERY_SPEED  # noqa: E402
+from fva_car.cones import CONE_RECOVERY_SPEED, ConeObservation  # noqa: E402
 from fva_car.corridor import CorridorEstimator, CorridorSettings, STATES  # noqa: E402
 from fva_car.lateral import GroundCalibration, LineObservation, RealStanleyFollower  # noqa: E402
 from fva_car.odometry import PoseHistory  # noqa: E402
@@ -343,8 +343,9 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
                           path_dkappa=float(estimate.state_vector[3]) if estimate.valid else math.nan,
                           speed_limit=(CONE_RECOVERY_SPEED if estimate.valid and estimate.slow
                                        else settings.one_border_speed if one_border else math.inf))
-            pending.append((ready, LineObservation(now, errors=estimate.errors, reason=estimate.reason,
-                                                   reference_source='cones', **fields)))
+            pending.append((ready, ConeObservation(now, errors=estimate.errors, reason=estimate.reason,
+                                                   corridor_width_m=estimate.width_m if estimate.valid else math.nan,
+                                                   **fields)))
             next_capture = now + rng.normal(1./fps, .006)
         while pending and pending[0][0] <= now:
             observation = pending.pop(0)[1]
@@ -394,6 +395,9 @@ def base_config(changes=None):
     import main as vehicle_main
 
     config = dict(vehicle_main.parameters)
+    # O trim inicial do main.py e do carro REAL (vies da direcao dele); o carro
+    # simulado tem o proprio vies (SimCar) e comeca sem trim.
+    config['steering_trim_deg'] = 0.0
     config.update(changes or {})
     return config
 
