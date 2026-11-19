@@ -230,7 +230,7 @@ def main(argv=None):
     parser.add_argument('--batch', type=int, default=128)
     parser.add_argument('--lr', type=float, default=3e-3)
     parser.add_argument('--val', type=float, default=.2, help='fracao de quadros para validacao')
-    parser.add_argument('--min-confidence', type=float, default=.6,
+    parser.add_argument('--min-confidence', type=float, default=.5,
                         help='probabilidade minima da classe de cone no carro')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--validacao-por-ensaio', type=int, metavar='K', default=0,

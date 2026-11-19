@@ -916,7 +916,7 @@ Tudo vem de um só lugar e dia; dados de outro ambiente vão melhorar o modelo.
 O `.json` ao lado do `.onnx` guarda as classes, o recorte, os ajustes de cor
 dos candidatos usados no treino (aplicados automaticamente, salvo se
 `cone_settings` disser outra coisa) e a confiança mínima (`min_confidence`,
-padrão 0,6). O debug por quadro registra os candidatos, os aceitos e o tempo
+0,5 no modelo atual; o treino grava 0,5 por padrão). O debug por quadro registra os candidatos, os aceitos e o tempo
 do classificador em `vision.detection.classifier`, e os descartes como
 `classificador`. O modelo em `tools/tests/dados/` é **só de teste**: foi
 treinado com pseudo-rótulos.

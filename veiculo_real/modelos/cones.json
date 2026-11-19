@@ -16,7 +16,7 @@
     "green_angle_high": 255
   },
   "cone_height_m": 0.2,
-  "min_confidence": 0.6,
+  "min_confidence": 0.5,
   "trained": {
     "datasets": [
       "/home/viper/fva_experimentos/cones_simnao.npz"
