@@ -93,6 +93,14 @@ class MissionOptionsTests(unittest.TestCase):
         self.assertNotIn("--stanley-gain", gui.build_main_command({"stanley_gain": "3", "pure_pursuit": True}))
         self.assertNotIn("--stanley-gain", gui.build_main_command({"stanley_gain": "abc"}))
 
+    def test_steering_scales_and_curve_opening_reach_main(self):
+        self.assertFalse({"steering_left_scale", "steering_right_scale", "racing_line_m"}
+                         & set(parsed(gui.build_main_command({}))))
+        settings = parsed(gui.build_main_command({"steer_left": "90", "steer_right": "105", "racing_line": "0.15"}))
+        self.assertEqual((settings["steering_left_scale"], settings["steering_right_scale"], settings["racing_line_m"]),
+                         (.9, 1.05, .15))
+        self.assertNotIn("--esterco-esquerda", gui.build_main_command({"steer_left": "abc"}))
+
     def test_only_main_lines_are_rewritten(self):
         self.assertEqual(gui.with_main_command("ls\npython3 -u main.py --speed 0.7\necho fim", "python3 -u main.py X"),
                          "ls\npython3 -u main.py X\necho fim")

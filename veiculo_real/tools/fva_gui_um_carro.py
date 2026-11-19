@@ -76,6 +76,8 @@ MISSION_DEFAULTS = {
     "new_start": True,            # False: --old-start (partida como antes de 17/11, para comparar)
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
     "racing_line": "0.10",        # --abrir-curva (m para fora antes da curva; 0.10 e o padrao do main.py)
+    "steer_left": "100",          # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
+    "steer_right": "100",         # --esterco-direita
     "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
 }
 VISION_WIDTHS = ("0", "320", "480")
@@ -83,6 +85,7 @@ STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
 STANLEY_GAINS = ("1.5", "2.0", "2.5", "3.0", "3.5")
 RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20")
+STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
                      "curve_echo", "refine")
@@ -139,6 +142,13 @@ def build_main_command(options: dict) -> str:
             racing = None
         if racing is not None and 0 <= racing <= .5 and abs(racing - float(MISSION_DEFAULTS["racing_line"])) > 1e-9:
             parts.append(f"--abrir-curva {racing:g}")
+    for key, flag in (("steer_left", "--esterco-esquerda"), ("steer_right", "--esterco-direita")):
+        try:
+            value = float(str(o[key]).replace(",", "."))
+        except ValueError:
+            value = None
+        if value is not None and 50 <= value <= 150 and abs(value - 100.) > 1e-9:
+            parts.append(f"{flag} {value:g}")
     if not o["new_start"]:
         parts.append("--old-start")  # ja traz o acelerador antigo
     else:
@@ -1295,6 +1305,16 @@ class RsyncGUI(tk.Tk):
         ttk.Label(throttle, text="Abrir na curva (m):").pack(side="left", padx=(8, 0))
         ttk.Combobox(throttle, textvariable=self.mission_vars["racing_line"], values=RACING_LINES,
                      width=5).pack(side="left", padx=(4, 8))
+        steering = ttk.Frame(box)
+        steering.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(steering, text="Esterço à esquerda (%):").pack(side="left")
+        ttk.Combobox(steering, textvariable=self.mission_vars["steer_left"], values=STEER_SCALES,
+                     width=4).pack(side="left", padx=(4, 12))
+        ttk.Label(steering, text="à direita (%):").pack(side="left")
+        ttk.Combobox(steering, textvariable=self.mission_vars["steer_right"], values=STEER_SCALES,
+                     width=4).pack(side="left", padx=(4, 8))
+        ttk.Label(steering, foreground="#555",
+                  text="curva fecha demais para um lado: baixe esse lado (comando do servo)").pack(side="left")
         ttk.Label(throttle, foreground="#555",
                   text="(auto = o carro aprende)"
                   ).pack(side="left")

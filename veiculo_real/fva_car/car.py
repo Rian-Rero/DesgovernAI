@@ -77,6 +77,11 @@ class Car:
         # sem editar o codigo (main.py --throttle-offset / campo da GUI).
         self.ff_offset = float(parameters.get("throttle_ff_offset", THROTTLE_FF_OFFSET))
         self.ff_gain = float(parameters.get("throttle_ff_gain", THROTTLE_FF_GAIN))
+        # Escala do comando do SERVO por lado (direcao mais forte para um lado):
+        # o servo recebe esterco*escala; self.st (odometria) continua o esterco
+        # desejado, que e o que a roda faz com a escala certa. 1 = sem correcao.
+        self.steer_scale_left = float(parameters.get("steering_left_scale", 1.0))
+        self.steer_scale_right = float(parameters.get("steering_right_scale", 1.0))
         # Mapa aprendido do throttle de regime (fva_car/throttle.py); None: so a reta acima.
         self.throttle_map = None
         if parameters.get("throttle_learning", False):
@@ -554,8 +559,13 @@ class Car:
         # limita angulo de estercamento
         self.st = np.clip(st, -CAR["STEERMAX"], CAR["STEERMAX"])
 
-        # atua no volante
-        filtered = self.atuador.set_steer(self.st)
+        # atua no volante (escala por lado so no comando do servo, no automatico)
+        command = self.st
+        if self.sel_direcao != 0:
+            scale = (getattr(self, "steer_scale_left", 1.0) if command > 0
+                     else getattr(self, "steer_scale_right", 1.0))
+            command = float(np.clip(command*scale, -CAR["STEERMAX"], CAR["STEERMAX"]))
+        filtered = self.atuador.set_steer(command)
         self.st_filtered = (float(filtered) if isinstance(filtered, (int, float, np.number))
                             and np.isfinite(filtered) else float('nan'))
 

@@ -100,6 +100,12 @@ parameters = {
     "stanley_use_vref": False,
     "stanley_speed_filter_s": 0.3,
     "stanley_max_steer_deg": 20.0,
+    # Escala do comando do servo por lado (1 = igual). A roda pode virar mais para
+    # um lado que para o outro com o mesmo comando: em 19/11 as curvas a esquerda
+    # ficaram mais fechadas que as a direita. --esterco-esquerda/--esterco-direita
+    # ou os campos da GUI; tools/alinhamento_camera.py mede pelos logs.
+    "steering_left_scale": 1.0,
+    "steering_right_scale": 1.0,
     # 60 graus/s levava 0,33 s (0,5 m a 1,5 m/s) para chegar ao batente:
     # quase todo o trecho visivel antes da curva.
     "stanley_max_rate_deg_s": 120.0,
@@ -1032,6 +1038,10 @@ def main():
     parser.add_argument("--stanley-gain", type=float, metavar="K",
                         help="Ganho k do termo de deslocamento do Stanley (padrao 2.5): oscila, baixe;"
                              " passa reto da borda, suba")
+    parser.add_argument("--esterco-esquerda", type=float, metavar="PCT",
+                        help="Comando do servo nas curvas a ESQUERDA, em %% do pedido (padrao 100; vira demais: baixe)")
+    parser.add_argument("--esterco-direita", type=float, metavar="PCT",
+                        help="Comando do servo nas curvas a DIREITA, em %% do pedido (padrao 100)")
     parser.add_argument("--abrir-curva", type=float, metavar="M",
                         help="Quanto a referencia vai para fora antes de uma curva (padrao 0.10 m; 0 desliga;"
                              " so age em pista estreita)")
@@ -1091,6 +1101,12 @@ def main():
         settings["steering_law"] = "stanley"
     if args.pure_pursuit:
         settings["steering_law"] = "pure_pursuit"
+    for value, key, flag in ((args.esterco_esquerda, "steering_left_scale", "--esterco-esquerda"),
+                             (args.esterco_direita, "steering_right_scale", "--esterco-direita")):
+        if value is not None:
+            if not 50 <= value <= 150:
+                parser.error(f"{flag} deve estar entre 50 e 150 (%)")
+            settings[key] = value/100.0
     if args.abrir_curva is not None:
         if not 0 <= args.abrir_curva <= .5:
             parser.error("--abrir-curva deve estar entre 0 e 0.5 m")

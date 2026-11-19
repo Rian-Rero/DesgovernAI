@@ -792,6 +792,16 @@ arquivo novo (`logs/direcao_trim_v2.json`); o antigo não é mais lido.
 - **Visão:** com a fita amarela desligada, foi de 6–7 para **12–15 quadros/s**,
   com 170–190 ms de atraso (era ~280).
 
+**Direção assimétrica** (19/11, depois da correção: curvas à esquerda mais
+fechadas que à direita). `steering_left_scale` / `steering_right_scale`
+(`--esterco-esquerda`/`--esterco-direita` em %, campos "Esterço à esquerda/à
+direita" na GUI) escalam só o comando do servo de cada lado. A odometria
+continua com o esterço desejado, que é o que a roda faz com a escala certa.
+`tools/alinhamento_camera.py` mede pelos logs quanto da curva pedida a roda faz
+de cada lado (separa giro, viés e resposta esquerda/direita) e sugere os dois
+valores. Nos logs de 17/11: 89% à esquerda e 104% à direita, mas com outro trim
+e só 183 pares em curva à direita.
+
 **Deixe "Debug de cones" ligado.** Os ensaios de 19/11 vieram sem o
 `cones_debug.jsonl`, e sem ele não há como medir o giro, a vista de cima nem a
 causa de cada batida.

@@ -111,3 +111,36 @@ class CarControllerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SteeringScaleTests(unittest.TestCase):
+    """Escala do servo por lado: so o comando do servo muda; a odometria usa o desejado."""
+    def car(self, left=1., right=1., auto=True):
+        from unittest.mock import Mock
+        from test_rc_input import load_car
+        module = load_car()
+        car = module.Car.__new__(module.Car)
+        car._encoder_ready = lambda: True
+        car.emergencia = False
+        car.sel_direcao = 1 if auto else 0
+        car.rc_direcao = 0.
+        car.atuador = Mock()
+        car.atuador.set_steer = Mock(side_effect=lambda value: value)
+        car.steer_scale_left, car.steer_scale_right = left, right
+        return car
+
+    def test_each_side_scales_only_the_servo_command(self):
+        car = self.car(left=.9, right=1.1)
+        car.set_steer(.2)
+        self.assertAlmostEqual(car.st, .2)                              # odometria: o desejado
+        self.assertAlmostEqual(car.atuador.set_steer.call_args[0][0], .18)
+        car.set_steer(-.2)
+        self.assertAlmostEqual(car.atuador.set_steer.call_args[0][0], -.22)
+        car.set_steer(.34)  # perto do batente: nunca passa dele
+        self.assertLessEqual(abs(car.atuador.set_steer.call_args[0][0]), .3491)
+
+    def test_radio_mode_is_not_scaled(self):
+        car = self.car(left=.8, auto=False)
+        car.rc_direcao = .5
+        car.set_steer(0.)
+        self.assertAlmostEqual(car.atuador.set_steer.call_args[0][0], car.st)

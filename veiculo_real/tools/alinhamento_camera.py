@@ -43,8 +43,11 @@ WHEELBASE = .36   # m: da pose (eixo traseiro) ao eixo dianteiro, origem dos con
 MATCH_M = .2
 
 
-def cone_pairs(calibration, records, scale=2., x_range=(.6, 2.2), wheelbase=WHEELBASE):
-    """(avanco d, x do cone, residuo lateral) de cada cone visto em dois quadros seguidos."""
+def cone_pairs(calibration, records, scale=2., x_range=(.6, 2.2), wheelbase=WHEELBASE, with_curvature=False):
+    """(avanco d, x do cone, residuo lateral) de cada cone visto em dois quadros seguidos.
+
+    with_curvature: tambem a curvatura que a odometria usou (guinada/avanco, rad/m),
+    para medir a resposta da direcao de cada lado."""
     rows, previous = [], None
     for record in records:
         vision = record.get('vision') or {}
@@ -72,9 +75,10 @@ def cone_pairs(calibration, records, scale=2., x_range=(.6, 2.2), wheelbase=WHEE
                     distance = np.linalg.norm(before - expected, axis=1)
                     k = int(np.argmin(distance))
                     if distance[k] < MATCH_M:
-                        rows.append((dx, x, before[k][1] - expected[1]))
+                        row = (dx, x, before[k][1] - expected[1])
+                        rows.append(row + (dth/max(float(motion[0]), 1e-6),) if with_curvature else row)
         previous = current
-    return np.asarray(rows, float).reshape(-1, 3)
+    return np.asarray(rows, float).reshape(-1, 4 if with_curvature else 3)
 
 
 def fit(rows, wheelbase=WHEELBASE):
@@ -83,6 +87,16 @@ def fit(rows, wheelbase=WHEELBASE):
     design = np.c_[d, (x + wheelbase)*d]
     (sine, turn), *_ = np.linalg.lstsq(design, residual, rcond=None)
     return math.degrees(math.asin(float(np.clip(sine, -1, 1)))), float(turn)
+
+
+def fit_sides(rows, wheelbase=WHEELBASE):
+    """(giro graus, vies rad/m, resposta a esquerda, resposta a direita): a curvatura
+    real e resposta*curvatura do comando + vies, separada por lado."""
+    d, x, residual, curvature = rows.T
+    arm = (x + wheelbase)*d
+    design = np.c_[d, arm, arm*np.maximum(curvature, 0.), arm*np.minimum(curvature, 0.)]
+    (sine, bias, left, right), *_ = np.linalg.lstsq(design, residual, rcond=None)
+    return math.degrees(math.asin(float(np.clip(sine, -1, 1)))), float(bias), 1. + float(left), 1. + float(right)
 
 
 def load_records(folder):
@@ -103,25 +117,34 @@ def main(argv=None):
         if not (folder/'cones_debug.jsonl').exists():
             print(f'{folder.name}: sem cones_debug.jsonl (ligue "Debug de cones")')
             continue
-        rows = cone_pairs(calibration, load_records(folder))
+        rows = cone_pairs(calibration, load_records(folder), with_curvature=True)
         if len(rows) < 40:
             print(f'{folder.name}: so {len(rows)} pares de cones, pouco para medir')
             continue
-        angle, turn = fit(rows)
+        angle, turn = fit(rows[:, :3])
         per_run.append(angle)
         everything.append(rows)
         print(f'{folder.name}: {len(rows):4d} pares | giro {angle:+5.1f} graus | curva nao vista {turn:+.3f} rad/m')
     if not everything:
         return 1
     rows = np.vstack(everything)
-    angle, turn = fit(rows)
+    angle, turn = fit(rows[:, :3])
     steer = math.degrees(math.atan(WHEELBASE*turn))
     print(f'\nTODOS ({len(rows)} pares): giro {angle:+.1f} graus (mediana por ensaio {np.median(per_run):+.1f}),'
           f' curva nao vista {turn:+.3f} rad/m (roda {abs(steer):.1f} graus mais para a'
           f' {"esquerda" if steer > 0 else "direita"} que o comando)')
     for name, part in (('cones ate 1,4 m', rows[rows[:, 1] < 1.4]), ('cones de 1,4 a 2,2 m', rows[rows[:, 1] >= 1.4])):
         if len(part) >= 40:
-            print(f'  {name}: giro {fit(part)[0]:+.1f} graus')
+            print(f'  {name}: giro {fit(part[:, :3])[0]:+.1f} graus')
+    left_pairs, right_pairs = int(np.sum(rows[:, 3] > .3)), int(np.sum(rows[:, 3] < -.3))
+    if min(left_pairs, right_pairs) >= 100:
+        _, bias, left, right = fit_sides(rows)
+        print(f'direcao: a roda faz {100*left:.0f}% da curva pedida a ESQUERDA e {100*right:.0f}% a DIREITA'
+              f' (vies {bias:+.3f} rad/m; {left_pairs} e {right_pairs} pares em curva). Para igualar, o comando'
+              f' do servo: --esterco-esquerda {100/left:.0f} --esterco-direita {100/right:.0f}'
+              f' (multiplique pelo valor em uso)')
+    else:
+        print(f'direcao: poucas curvas para medir cada lado ({left_pairs} a esquerda, {right_pairs} a direita)')
     if abs(angle) > 2:
         print(f'\nA percepcao esta girada {abs(angle):.1f} graus para a {"esquerda" if angle > 0 else "direita"}'
               f' em relacao ao carro. Para corrigir a calibracao usada:\n'

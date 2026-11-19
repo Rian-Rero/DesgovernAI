@@ -26,6 +26,19 @@ class AlignmentTests(unittest.TestCase):
         angle, turn = tool.fit(self.synthetic_rows(0., 0., seed=1))
         self.assertAlmostEqual(angle, 0., delta=1.)
 
+    def test_left_and_right_steering_response(self):
+        rng = np.random.default_rng(3)
+        d = rng.uniform(.04, .1, 1500)
+        x = rng.uniform(.7, 2.1, 1500)
+        curvature = rng.uniform(-1., 1., 1500)
+        real = np.where(curvature > 0, 1.2, .9)*curvature - .1  # esquerda vira 20% a mais
+        residual = (x + tool.WHEELBASE)*d*(real - curvature) + rng.normal(0., .002, 1500)
+        angle, bias, left, right = tool.fit_sides(np.c_[d, x, residual, curvature])
+        self.assertAlmostEqual(left, 1.2, delta=.03)
+        self.assertAlmostEqual(right, .9, delta=.03)
+        self.assertAlmostEqual(bias, -.1, delta=.02)
+        self.assertAlmostEqual(angle, 0., delta=1.)
+
     def test_pairs_from_a_rotated_perception(self):
         from fva_car.lateral import GroundCalibration
         H = np.array([[0., 0., 100.], [-1., 0., 320.], [0., 1., -90.]])  # pixel -> chao (testes)
