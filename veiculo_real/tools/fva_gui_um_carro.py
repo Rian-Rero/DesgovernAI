@@ -83,7 +83,7 @@ MISSION_DEFAULTS = {
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
     "racing_line": "0.15",        # --abrir-curva (m para fora antes da curva; 0.15 e o padrao do main.py)
     "track_width": "",            # --largura-pista (m, medida na trena; vazio: o carro estima)
-    "mission_time": "180",        # --tempo (s): a missao acaba sozinha depois disto
+    "mission_time": "50",         # --tempo (s): a missao acaba sozinha depois disto
     "steer_left": "100",          # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
     "steer_right": "100",         # --esterco-direita
     "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
@@ -94,7 +94,7 @@ RECORD_RATES = ("1", "3", "5")
 STANLEY_GAINS = ("1.5", "2.0", "2.5", "3.0", "3.5")
 RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20", "0.25")
 TRACK_WIDTHS = ("", "1.0", "1.2", "1.3", "1.5", "1.7", "1.9")
-MISSION_TIMES = ("30", "60", "120", "180", "300", "600")
+MISSION_TIMES = ("30", "50", "60", "120", "180", "300", "600")
 STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
@@ -271,19 +271,39 @@ def mission_command(action: str, pid_file: str = MISSION_PID_FILE, cmd_file: str
                     ack_file: str = MISSION_ACK_FILE, wait_s: float = 3.0) -> str:
     """Comando (no carro) que pede `action` a missao e espera a confirmacao dela.
 
-    Escreve "<acao> <codigo>" no arquivo de comando (o laco de controle le a cada
-    0,1 s) e espera "<codigo> <resposta>". Sem resposta em wait_s, manda o sinal
-    (reserva: missao com codigo antigo). Imprime "PID resposta"."""
+    1. Acha o main.py: pelo arquivo de PID; sem ele (main.py antigo, que nao o
+       grava), pelos processos em execucao (/proc). Sem nenhum: diz o que viu.
+    2. Escreve "<acao> <codigo>" no arquivo de comando (o laco de controle le a
+       cada 0,1 s) e espera "<codigo> <resposta>".
+    3. Sem resposta em wait_s: sinal de reserva. "liberar" (SIGUSR1) so vai se o
+       processo trata esse sinal: num main.py antigo ele mataria o programa
+       sem parar os motores direito.
+    Imprime "PID resposta"."""
     signal_name = MISSION_SIGNALS[action]
     code = (
         "import os, signal, sys, time, uuid\n"
+        "def is_mission(pid):\n"
+        "    try:\n"
+        "        cmdline = open('/proc/%d/cmdline' % pid, 'rb').read().split(b'\\0')\n"
+        "    except OSError:\n"
+        "        return False\n"
+        "    return any(part.endswith(b'main.py') for part in cmdline) and b'python' in b' '.join(cmdline)\n"
+        "pid, source = None, ''\n"
         "try:\n"
-        f"    pid = int(open({pid_file!r}).read().split()[0])\n"
-        "    cmdline = open('/proc/%d/cmdline' % pid, 'rb').read()\n"
+        f"    candidate = int(open({pid_file!r}).read().split()[0])\n"
+        "    if is_mission(candidate):\n"
+        "        pid, source = candidate, 'arquivo de PID'\n"
+        "    else:\n"
+        f"        source = 'o arquivo {pid_file} aponta para um processo que ja acabou'\n"
         "except (OSError, ValueError, IndexError):\n"
-        f"    sys.exit({MISSION_NONE})\n"
-        "if b'main.py' not in cmdline:\n"
-        f"    sys.exit({MISSION_NONE})\n"
+        f"    source = 'sem o arquivo {pid_file} (main.py antigo ou missao ainda iniciando)'\n"
+        "if pid is None:\n"
+        "    found = sorted((p for p in (int(n) for n in os.listdir('/proc') if n.isdigit())\n"
+        "                    if p != os.getpid() and is_mission(p)), reverse=True)\n"
+        "    if not found:\n"
+        "        print(0, 'nenhum main.py rodando no carro; ' + source)\n"
+        f"        sys.exit({MISSION_NONE})\n"
+        "    pid, source = found[0], source + '; achado pelos processos'\n"
         "nonce = uuid.uuid4().hex[:8]\n"
         f"tmp = {cmd_file!r} + '.tmp'\n"
         f"open(tmp, 'w').write({action!r} + ' ' + nonce + '\\n')\n"
@@ -302,12 +322,24 @@ def mission_command(action: str, pid_file: str = MISSION_PID_FILE, cmd_file: str
         f"    os.remove({cmd_file!r})\n"
         "except OSError:\n"
         "    pass\n"
+        "caught = 0\n"
+        "try:\n"
+        "    for line in open('/proc/%d/status' % pid):\n"
+        "        if line.startswith('SigCgt:'):\n"
+        "            caught = int(line.split()[1], 16)\n"
+        "except OSError:\n"
+        "    pass\n"
+        f"number = int(signal.{signal_name})\n"
+        "if not caught >> (number - 1) & 1:\n"
+        "    print(pid, 'o main.py rodando (' + source + ') nao responde a este botao: e o codigo antigo;'\n"
+        "          ' envie os arquivos para o carro')\n"
+        "    sys.exit(3)\n"
         "try:\n"
         f"    os.kill(pid, signal.{signal_name})\n"
         "except OSError as error:\n"
         "    print(pid, 'sem resposta e sem permissao para sinalizar:', error)\n"
         "    sys.exit(1)\n"
-        "print(pid, 'sem resposta do laco de controle; sinal enviado')\n"
+        "print(pid, 'sem resposta do laco de controle (' + source + '); sinal enviado')\n"
         f"sys.exit({MISSION_SIGNAL_ONLY})\n"
     )
     return f"python3 -c {shlex.quote(code)}"
@@ -3130,7 +3162,7 @@ class RsyncGUI(tk.Tk):
                 answer = text.split(" ", 1)[1] if " " in text else ""
                 pid = int(text.split()[0]) if text.split() and text.split()[0].isdigit() else None
                 if code == MISSION_NONE:
-                    report(f"ℹ️ {name.upper()}: nenhuma missão rodando no carro.")
+                    report(f"ℹ️ {name.upper()}: {answer or 'nenhuma missão rodando no carro'}.")
                     if action == "reiniciar":
                         report(f"🔄 {name.upper()}: iniciando com o comando da aba Comandos.")
                         self.ui(self.run_cmds_on_selected)

@@ -1055,7 +1055,7 @@ Botões no quadro "Missão" da aba da câmera, junto do vídeo:
 
 A resposta do carro aparece ao lado dos botões e no terminal da aba Comandos.
 
-**Tempo da missão:** campo "Tempo da missão (s)" na GUI, padrão 180 s (`--tempo`;
+**Tempo da missão:** campo "Tempo da missão (s)" na GUI, padrão 50 s (`--tempo`;
 sem ele, o `main.py` usa 30 min).
 
 **Como chega ao carro** (24/11, depois de os botões "não funcionarem"):
@@ -1063,10 +1063,16 @@ sem ele, o `main.py` usa 30 min).
 2. O laço de controle lê esse arquivo a cada 0,1 s e responde em
    `/tmp/fva_missao.ack`.
 3. Na GUI aparece "✅ … recebido pelo carro".
-4. Sem resposta em 3 s, a GUI manda o sinal como reserva (`SIGUSR1`/`SIGTERM`)
-   e avisa: "o carro não respondeu; o código no carro está atualizado?". O
-   código antigo no carro não tinha o canal, então **enviem os arquivos** (aba
-   Enviar Arquivos) antes de testar.
+4. Sem resposta em 3 s, a GUI manda o sinal como reserva (`SIGUSR1`/`SIGTERM`),
+   mas **só se o processo trata esse sinal**. Num `main.py` antigo, o `SIGUSR1`
+   mataria o programa sem parar os motores direito; nesse caso a GUI recusa e
+   diz "é o código antigo; envie os arquivos para o carro".
+5. A missão é achada pelo arquivo `/tmp/fva_missao.pid`. Sem ele (o `main.py`
+   antigo não o grava), a GUI procura o `main.py` entre os processos do carro.
+   Se não achar nenhum, diz o motivo ("nenhum main.py rodando…").
+
+O código antigo no carro não tinha o canal, então **enviem os arquivos** (aba
+Enviar Arquivos) antes de testar.
 
 **Liberar com o cone ainda na frente:** o carro quase sempre para encostado no
 cone. Antes, ao liberar, o ultrassom via o mesmo cone e travava de novo em

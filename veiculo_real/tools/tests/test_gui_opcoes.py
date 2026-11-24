@@ -30,7 +30,7 @@ class MissionOptionsTests(unittest.TestCase):
         # A rede treinada em 19/11 vem ligada por padrao.
         self.assertEqual(gui.build_main_command({}),
                          "python3 -u main.py --navigation cones --vision-width 320 --steering-filter 3"
-                         " --speed 0.7 --tempo 180 --stream 8080 --classifier modelos/cones.onnx")
+                         " --speed 0.7 --tempo 50 --stream 8080 --classifier modelos/cones.onnx")
 
     def test_map_and_speed_cap_options_reach_main(self):
         self.assertIn("4.0", gui.SPEED_PRESETS)
@@ -386,7 +386,7 @@ class MissionControlTests(unittest.TestCase):
     """Botoes Encerrar / Liberar parada: o comando roda no carro (aqui, localmente)."""
     ROOT = Path(__file__).resolve().parents[2]
 
-    def start(self, answers=True):
+    def start(self, answers=True, pid_file=True, handlers=True):
         import subprocess
         import tempfile
         self.folder = Path(tempfile.mkdtemp())
@@ -407,15 +407,18 @@ class MissionControlTests(unittest.TestCase):
             "import os, signal, sys\n"
             f"sys.path.insert(0, {str(self.ROOT)!r})\n"
             "import main as mission\n"
-            f"open({self.files['pid']!r}, 'w').write(str(os.getpid()))\n"
-            f"signal.signal(signal.SIGUSR1, lambda *_: open({str(self.folder/'sinal')!r}, 'w').write('1'))\n"
-            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n" + loop)
+            + (f"open({self.files['pid']!r}, 'w').write(str(os.getpid()))\n" if pid_file else "")
+            + (f"signal.signal(signal.SIGUSR1, lambda *_: open({str(self.folder/'sinal')!r}, 'w').write('1'))\n"
+               "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n" if handlers else "") + loop)
         self.process = subprocess.Popen([sys.executable, str(self.folder/"main.py")])
         self.addCleanup(self.process.wait, 5)
         self.addCleanup(self.process.kill)
         deadline = time.monotonic() + 20
-        while not Path(self.files["pid"]).exists() and time.monotonic() < deadline:
+        ready = (lambda: Path(self.files["pid"]).exists()) if pid_file else (lambda: True)
+        while not ready() and time.monotonic() < deadline:
             time.sleep(.05)
+        if not pid_file:
+            time.sleep(1.)  # import do main.py
 
     def run_remote(self, command):
         import subprocess
@@ -447,15 +450,26 @@ class MissionControlTests(unittest.TestCase):
         self.assertTrue((self.folder/"sinal").exists())
         self.assertFalse(Path(self.files["cmd"]).exists())  # pedido sem resposta nao fica para depois
 
+    def test_old_main_without_pid_file_is_found_and_unsafe_signal_refused(self):
+        # main.py antigo: nao grava o PID nem le o arquivo de comando, nem trata SIGUSR1.
+        self.start(answers=False, pid_file=False, handlers=False)
+        result = self.run_remote(self.command("liberar", wait_s=.3))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("codigo antigo", result.stdout)
+        self.assertEqual(int(result.stdout.split()[0]), self.process.pid)   # achado pelos processos
+        self.assertIsNone(self.process.poll())                              # nao morreu com o sinal
+
     def test_nothing_running(self):
         self.start()
         self.process.kill()
         self.process.wait(5)
-        self.assertEqual(self.run_remote(self.command("encerrar")).returncode, gui.MISSION_NONE)
+        result = self.run_remote(self.command("encerrar"))
+        self.assertEqual(result.returncode, gui.MISSION_NONE)
+        self.assertIn("nenhum main.py rodando", result.stdout)
         self.assertEqual(self.run_remote(gui.mission_signal_command("liberar", str(self.folder/"nada.pid"))).returncode,
                          gui.MISSION_NONE)
 
     def test_mission_time_reaches_main(self):
-        self.assertEqual(parsed(gui.build_main_command({}))["ts"], 180.)
+        self.assertEqual(parsed(gui.build_main_command({}))["ts"], 50.)
         self.assertEqual(parsed(gui.build_main_command({"mission_time": "60"}))["ts"], 60.)
         self.assertNotIn("--tempo", gui.build_main_command({"mission_time": ""}))
