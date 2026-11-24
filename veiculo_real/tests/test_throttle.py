@@ -144,3 +144,131 @@ class SteeringScaleTests(unittest.TestCase):
         car.rc_direcao = .5
         car.set_steer(0.)
         self.assertAlmostEqual(car.atuador.set_steer.call_args[0][0], car.st)
+
+
+class SpeedLimitTests(unittest.TestCase):
+    """Teto de 4 m/s: o automatico pode pedir, o radio continua em 2 e o ultrassom limita."""
+    def test_car_limits(self):
+        from test_rc_input import load_car
+        module = load_car()
+        self.assertGreaterEqual(module.CAR["VELMAX"], 4.0)
+        self.assertEqual(module.CAR["RC_VELMAX"], 2.0)
+
+    def test_ultrasonic_cap_stops_inside_the_sensor_range(self):
+        cap = main.ultrasonic_speed_cap(.15)
+        self.assertAlmostEqual(main.stopping_distance(cap, .15), 3.7, places=3)
+        self.assertTrue(2.5 < cap < 3.)
+        self.assertGreater(main.stopping_distance(4., .15), 4.)  # a 4 m/s nao para no alcance
+        config = main.with_safety_speed({"velocity_reference": 4., "obstacle_confirm_s": .15})
+        self.assertAlmostEqual(config["safe_speed_m_s"], cap)
+        self.assertNotIn("safe_speed_m_s", main.with_safety_speed({"ultrasonic_speed_cap": False}))
+
+    def test_follower_respects_the_cap(self):
+        from fva_car.lateral import RealStanleyFollower
+        self.assertEqual(RealStanleyFollower({}).safe_speed, float('inf'))
+        self.assertEqual(RealStanleyFollower({"safe_speed_m_s": 2.5}).safe_speed, 2.5)
+        with self.assertRaises(ValueError):
+            RealStanleyFollower({"safe_speed_m_s": 0})
+
+    def test_speed_argument_accepts_up_to_four(self):
+        from unittest.mock import patch
+        with patch.object(sys, "argv", ["main.py", "--speed", "4"]), patch.object(main, "run_mission") as run:
+            main.main()
+        self.assertEqual(run.call_args[0][0]["velocity_reference"], 4.)
+        with patch.object(sys, "argv", ["main.py", "--speed", "5"]), self.assertRaises(SystemExit):
+            main.main()
+
+
+class SteeringResponseOdometryTests(unittest.TestCase):
+    def test_yaw_rate_is_scaled_by_the_measured_response(self):
+        from unittest.mock import Mock
+        from test_rc_input import load_car
+        module = load_car()
+        car = module.Car.__new__(module.Car)
+        car.odometer = Mock(get_vel=Mock(return_value=(1., True)))
+        car.v_filt = Mock(filter=lambda v: v)
+        car.w_filt = Mock(filter=lambda w: w)
+        car.v, car.st = 1., .2
+        car.steer_response = .89
+        _, w = car.get_vel()
+        self.assertAlmostEqual(w, .89*np.tan(.2)/module.CAR["L"])
+        self.assertEqual(main.parameters["steering_response"], .89)
+
+
+def load_servos():
+    """fva_car/servos.py com um ServoKit falso (sem a placa PCA9685)."""
+    import importlib.util
+    from types import ModuleType
+    from unittest.mock import MagicMock, patch
+    root = Path(__file__).resolve().parents[1]/'fva_car'
+    fake = ModuleType('adafruit_servokit')
+    fake.ServoKit = MagicMock()
+    spec = importlib.util.spec_from_file_location('_servos_test', root/'servos.py')
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {'adafruit_servokit': fake}):
+        sys.path.insert(0, str(root))
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.remove(str(root))
+    return module
+
+
+class ServoThrottleLimitTests(unittest.TestCase):
+    """Ate 24/11 o PWM do acelerador era preso em 1,5 m/s (velmax cortado em 1,5)."""
+    def servos(self, velmax):
+        module = load_servos()
+        servos = module.Servos(velmax=velmax, dt=.05)  # placa falsa (MagicMock)
+        servos.stop.set()
+        servos.thread.join(1.)
+        return module, servos
+
+    def test_command_one_keeps_the_old_pwm_and_more_reaches_velmax(self):
+        module, servos = self.servos(4.5)
+        self.assertAlmostEqual(np.rad2deg(servos.throttle_unit), 18.1, places=1)  # o 1,0 de sempre
+        self.assertAlmostEqual(servos.max_command, 2.80, places=2)
+        servos.set_throttle(.5)
+        self.assertAlmostEqual(servos.th_pwm, .5*servos.throttle_unit)
+        servos.set_throttle(10.)
+        self.assertAlmostEqual(np.rad2deg(servos.th_pwm + module.ZERO_THROTTLE_ANGLE), 145.6, places=1)
+
+    def test_old_cap_is_the_default_one(self):
+        _, servos = self.servos(1.5)
+        self.assertAlmostEqual(servos.max_command, 1.)
+
+
+class CarThrottleCommandTests(unittest.TestCase):
+    def car(self, auto=True, max_command=2.8):
+        from unittest.mock import Mock
+        from test_rc_input import Gear, load_car
+        module = load_car()
+        car = module.Car.__new__(module.Car)
+        car._encoder_ready = lambda: True
+        car.emergencia, car.gear = False, Gear.FORWARD
+        car.sel_tracao = 1 if auto else 0
+        car.rc_acelerador = 1.
+        car.v = car.vref = car.u = car.a = 0.
+        car.dt = car.sample_rate = .02
+        car.vel_error_integral = 0.
+        car.atuador = Mock(max_command=max_command)
+        car._set_ref = lambda value: setattr(car, 'vref', value)
+        car.throttle_map = None
+        return car
+
+    def test_auto_can_go_past_the_old_full_throttle(self):
+        car = self.car()
+        car.v = 1.5
+        car.set_vel(4.)
+        self.assertGreater(car.u, 1.)
+        self.assertLessEqual(car.u, 2.8)
+
+    def test_radio_keeps_the_old_full_throttle(self):
+        car = self.car(auto=False)
+        car.v = 0.
+        car.set_vel(0.)
+        self.assertLessEqual(car.u, 1.)
+
+    def test_map_feedforward_can_pass_one(self):
+        throttle_map = ThrottleMap(.32, .22, u_max=2.8)
+        self.assertGreater(throttle_map.feedforward(4.), 1.)
+        self.assertEqual(ThrottleMap(.32, .22).feedforward(4.), 1.)

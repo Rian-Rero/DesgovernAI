@@ -29,6 +29,16 @@ ZERO_THROTTLE_ANGLE = np.deg2rad(95.0)
 GAIN_TORQUE_FORWARD = 0.4 # [rad/s] por unidade de pseudo-torque
 GAIN_TORQUE_REVERSE = 1.2 # [rad/s] por unidade de pseudo-torque
 GEAR_SHIFTING_TIME  = 2.5  # tempo para a troca de marcha [s]
+# Throttle: comando 1,0 = PWM da curva v = 0,092294 PWM - 8,937 em 1,5 m/s (113 graus,
+# 18 acima do neutro), como sempre foi: o feedforward (0,32 + 0,22 v) e o mapa
+# aprendido (logs/acelerador.json) estao nesta unidade. Acima de 1,5 m/s o comando
+# passa de 1,0, ate o PWM de velmax.
+THROTTLE_UNIT_VEL   = 1.5  # m/s do comando 1,0
+THROTTLE_VELMAX     = 4.5  # m/s: maior velmax aceito (PWM ~146 graus)
+
+def throttle_pwm_deg(velocity):
+	"""PWM (graus) que a curva experimental associa a velocidade (m/s)."""
+	return (velocity + 8.9370) / 0.092294
 
 class Gear(Enum):
     FORWARD = "forward"
@@ -76,13 +86,16 @@ class Servos:
 		#########################
 		# throttle
 		#########################
-		# definir limite pratico de velocidade do carro
-		self.velmax = np.clip(abs(float(velmax)), 0.3, 1.5)
+		# definir limite pratico de velocidade do carro (ate 24/11 era preso em
+		# 1,5 m/s: com o acelerador no maximo o carro nao passava de ~1,5 m/s)
+		self.velmax = np.clip(abs(float(velmax)), 0.3, THROTTLE_VELMAX)
 		#v =  0.092294 PWM - 8.9370 (curva interpolada com experimentos (PWM em deg))
-		max_pwm_deg = (self.velmax + 8.9370) / 0.092294
-		self.max_pwm_throttle = np.deg2rad(max_pwm_deg)
+		self.max_pwm_throttle = np.deg2rad(throttle_pwm_deg(self.velmax))
 		self.min_pwm_throttle = (2.0 * ZERO_THROTTLE_ANGLE - self.max_pwm_throttle)
 		self.max_throttle = (self.max_pwm_throttle - ZERO_THROTTLE_ANGLE)
+		# PWM do comando 1,0 (fixo) e o maior comando aceito (velmax)
+		self.throttle_unit = np.deg2rad(throttle_pwm_deg(THROTTLE_UNIT_VEL)) - ZERO_THROTTLE_ANGLE
+		self.max_command = float(self.max_throttle / self.throttle_unit)
 		
 		# derivada do pwm
 		self.dth_pwm = 0.0
@@ -222,10 +235,10 @@ class Servos:
 			self.dth_pwm = self.gain_torque * T
 
 	########################################
-	# seta diretamente a fracao de throttle entre 0 e 1
+	# seta diretamente o throttle: 1 = PWM de 1,5 m/s; ate max_command (velmax)
 	def set_throttle(self, command):
 
-		command = float(np.clip(command, 0.0, 1.0))
+		command = float(np.clip(command, 0.0, self.max_command))
 
 		if command == 0.0:
 			# envia neutro imediatamente, sem esperar o proximo ciclo do atuador
@@ -239,9 +252,9 @@ class Servos:
 		with self.lock:
 			self.dth_pwm = 0.0
 			if self.gear == Gear.FORWARD:
-				self.th_pwm = command * self.max_throttle
+				self.th_pwm = min(command * self.throttle_unit, self.max_throttle)
 			else:
-				self.th_pwm = -command * self.max_throttle
+				self.th_pwm = -min(command, 1.0) * self.throttle_unit
 	
 	########################################
 	# seta steer do veiculo (st in rad)		

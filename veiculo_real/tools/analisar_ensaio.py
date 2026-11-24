@@ -183,6 +183,18 @@ def report(folder, with_line=False):
         warnings.append('ATENCAO controle com Stanley: o plano usa pure pursuit (metade do erro na pista virtual)')
 
     options = summary.get('options') or {}
+
+    def map_flag(options, records):
+        """Mapa SLAM + SVM: ligado? e em quantos quadros o tracado dele foi usado."""
+        maps = [(r.get('vision') or {}).get('mapa') for r in records]
+        maps = [m for m in maps if m]
+        if 'cone_map' not in options and not maps:
+            return ''
+        used = sum(bool(m.get('usado')) for m in maps)
+        mode = options.get('cone_map', bool(maps))
+        text = ' | mapa SLAM+SVM ' + ('substitui' if mode == 'substituir' else flag(bool(mode)))
+        return text + (f' (assumiu em {used} quadros, ate {max(m.get("marcos", 0) for m in maps)} cones no mapa)'
+                       if maps else '')
     refined = [((r.get('vision') or {}).get('detection') or {}).get('refined_bases') for r in records]
     refined = [v for v in refined if v is not None]
     classified = any(((r.get('vision') or {}).get('detection') or {}).get('classifier') for r in records)
@@ -190,10 +202,32 @@ def report(folder, with_line=False):
     lines.append('opcoes: classificador ' + flag(options.get('classifier', classified if records else None))
                  + ' | refino da base ' + flag(options.get('refine_bases', bool(refined) if records else None))
                  + (f' ({np.mean(refined):.1f} cones/quadro)' if refined else '')
+                 + map_flag(options, records)
                  + ' | partida ' + {True: 'ANTIGA', False: 'nova'}.get(options.get('old_start'), '?')
                  + ('' if 'throttle_ff_offset' not in options or options.get('old_start') else
                     ' | acelerador aprendido' if options.get('throttle_learning') else
                     f' | acelerador minimo fixo {options["throttle_ff_offset"]:.2f}'))
+    imu = summary.get('imu') or {}
+    if imu:
+        response = imu.get('resposta_direcao') or {}
+        text = ', '.join(f'{k} {v:.2f}' for k, v in response.items() if v is not None)
+        lines.append('imu: ' + ('ativa' if imu.get('ativa') else 'NAO usada (' + str(imu.get('motivo')) + ')')
+                     + (f' | {imu.get("falhas_i2c", 0)} falhas I2C' if imu.get('leituras_usadas') else '')
+                     + (f' | resposta da direcao {text}' if text else ''))
+        if imu.get('leituras_usadas') and not imu.get('ativa'):
+            warnings.append('ATENCAO IMU desligada no meio da volta: ' + str(imu.get('motivo')))
+    pi = summary.get('raspberry') or {}
+    if pi:
+        cores = options.get('cpu_cores') or {}
+        lines.append('raspberry: ' + ' | '.join(part for part in (
+            f'ate {pi["temp_max_c"]:.0f} C' if pi.get('temp_max_c') is not None else '',
+            f'clock minimo {pi["freq_min_mhz"]:.0f}/{pi["freq_max_mhz"]:.0f} MHz'
+            if pi.get('freq_min_mhz') is not None and pi.get('freq_max_mhz') else '',
+            f'governor {pi["governor"]}' if pi.get('governor') else '',
+            'limitado: ' + ', '.join(pi['problems_during_run']) if pi.get('problems_during_run') else 'sem limitacao',
+            f'nucleos controle {cores.get("control")} visao {cores.get("vision")}' if cores else '') if part))
+        for warning in pi.get('warnings', []):
+            warnings.append('ATENCAO Raspberry: ' + warning)
     start = startup(car, records)
     if start is not None:
         reached = start['ate_80_s']

@@ -26,9 +26,23 @@ def parsed(command):
 
 class MissionOptionsTests(unittest.TestCase):
     def test_default_command_is_unchanged(self):
+        # A rede treinada em 19/11 vem ligada por padrao.
         self.assertEqual(gui.build_main_command({}),
                          "python3 -u main.py --navigation cones --vision-width 320 --steering-filter 3"
-                         " --speed 0.7 --stream 8080")
+                         " --speed 0.7 --stream 8080 --classifier modelos/cones.onnx")
+
+    def test_map_and_speed_cap_options_reach_main(self):
+        self.assertIn("4.0", gui.SPEED_PRESETS)
+        command = gui.build_main_command({"cone_map": False, "speed_cap": False, "speed": "4.0"})
+        self.assertIn("--sem-mapa", command)
+        self.assertIn("--sem-teto-ultrassom", command)
+        settings = parsed(command)
+        self.assertIs(settings["cone_map"], False)
+        self.assertIs(settings["ultrasonic_speed_cap"], False)
+        self.assertEqual(settings["velocity_reference"], 4.0)
+        self.assertIn("sem-mapa", gui.command_label(command))
+        # Sem o estimador o mapa nao existe: nem pede --sem-mapa.
+        self.assertNotIn("--sem-mapa", gui.build_main_command({"cone_map": False, "estimator": False}))
 
     def test_every_checkbox_combination_is_accepted_by_main(self):
         keys = ("stream", "estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",

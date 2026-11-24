@@ -49,6 +49,9 @@ class LineObservation:
     # salto enquanto o estimador ainda converge). 0 / nan: sem efeito.
     min_lookahead_m: float = 0.
     lateral_sigma_m: float = math.nan
+    # De onde veio o horario da foto: "v4l2" (marcado pelo driver ao chegar o
+    # quadro) ou "leitura" (antes do read(), inclui a espera pelo quadro).
+    capture_clock: str = ''
 
     @property
     def valid(self):
@@ -432,7 +435,7 @@ class RealLineDetector:
 
 class StanleyController:
     def __init__(self, gain=1.5, softening=0.3, max_steer=math.radians(20),
-                 max_rate=math.radians(60), wheelbase=.36, curvature_gain=0.):
+                 max_rate=math.radians(60), wheelbase=.36, curvature_gain=0., yaw_damping=0.):
         if not all(math.isfinite(x) and x > 0
                    for x in (gain, softening, max_steer, max_rate, wheelbase)):
             raise ValueError('Parametros Stanley devem ser finitos e positivos.')
@@ -440,6 +443,14 @@ class StanleyController:
             raise ValueError('max_steer deve ser menor que pi/2 radianos.')
         if not math.isfinite(curvature_gain) or curvature_gain < 0:
             raise ValueError('O ganho de curvatura deve ser finito e nao negativo.')
+        if not math.isfinite(yaw_damping) or yaw_damping < 0:
+            raise ValueError('O amortecimento de guinada deve ser finito e nao negativo.')
+        # Amortecimento pela guinada MEDIDA (giroscopio), em s: esterco -=
+        # k*(guinada medida - v*curvatura do caminho). A imagem chega ~220 ms
+        # atrasada; o giroscopio ve o carro comecando a oscilar na hora
+        # (Stanley para carros RC de corrida, arXiv 2408.15152). 0 desliga;
+        # sem giroscopio valido o termo e zero.
+        self.yaw_damping = yaw_damping
         self.gain, self.softening = gain, softening
         self.max_steer, self.max_rate = max_steer, max_rate
         self.wheelbase, self.curvature_gain = wheelbase, curvature_gain
@@ -452,16 +463,18 @@ class StanleyController:
         self.heading_term = 0.
         self.cross_track_term = 0.
         self.feedforward_term = 0.
+        self.damping_term = 0.
         self.search_term = 0.
         self.raw_steer = 0.
         self.target_steer = 0.
 
-    def update(self, cross_track, heading_error, speed, dt, curvature=0., search=0.):
+    def update(self, cross_track, heading_error, speed, dt, curvature=0., search=0., yaw_rate=math.nan):
         """cross_track: linha a esquerda do eixo dianteiro (+), em metros.
 
         heading_error = direcao da linha - direcao do carro, em radianos.
         curvature: da linha, positiva para a esquerda, em 1/m.
         search: esterco extra (rad) para reencontrar uma faixa perdida.
+        yaw_rate: guinada medida pelo giroscopio (rad/s, esquerda +); nan sem IMU.
         """
         if (not all(math.isfinite(x) for x in (cross_track, heading_error, speed, dt, curvature, search))
                 or dt <= 0):
@@ -473,8 +486,13 @@ class StanleyController:
         # depois de acumular erro, tarde demais em velocidade alta.
         self.feedforward_term = math.atan(self.curvature_gain * self.wheelbase * curvature)
         self.search_term = search
+        self.damping_term = 0.
+        if self.yaw_damping > 0 and math.isfinite(yaw_rate):
+            # Guinada que o caminho pede no eixo: v*curvatura.
+            self.damping_term = float(np.clip(-self.yaw_damping*(yaw_rate - speed*curvature),
+                                              -self.max_steer/2, self.max_steer/2))
         return self.steer_to(self.heading_term + self.cross_track_term + self.feedforward_term
-                             + self.search_term, dt, self.gain_scale, self.rate_scale)
+                             + self.damping_term + self.search_term, dt, self.gain_scale, self.rate_scale)
 
     def steer_to(self, raw_steer, dt, gain=1., rate=1.):
         """Satura no batente e limita a taxa (comum ao Stanley e ao pure pursuit).
@@ -734,7 +752,8 @@ class RealStanleyFollower:
             max_steer=math.radians(min(20., positive('stanley_max_steer_deg', 20.))),
             max_rate=math.radians(positive('stanley_max_rate_deg_s', 60.)),
             wheelbase=positive('wheelbase', .36),
-            curvature_gain=nonnegative('stanley_curvature_ff', 1.))
+            curvature_gain=nonnegative('stanley_curvature_ff', 1.),
+            yaw_damping=nonnegative('stanley_yaw_damping', 0.))
         # Constantes de tempo dos filtros; 0 desliga. O alvo de velocidade
         # oscilava com o erro angular e a curvatura medidos em ~0,5 m de faixa;
         # o carro, que nao freia, so dava trancos no acelerador. O esterco usa
@@ -772,6 +791,13 @@ class RealStanleyFollower:
         # Velocidade pelo atraso da imagem: o carro anda as cegas v*idade entre a
         # foto e o comando; limita a no maximo este trecho (m). 0 desliga.
         self.latency_budget = nonnegative('latency_speed_budget_m', 0.)
+        # Teto de seguranca (m/s): a maior velocidade que ainda para antes de um
+        # obstaculo visto no alcance do ultrassom (main.py ultrasonic_speed_cap).
+        self.safe_speed = self.settings.get('safe_speed_m_s', math.inf)
+        if (isinstance(self.safe_speed, (bool, np.bool_)) or not isinstance(self.safe_speed, (int, float, np.number))
+                or math.isnan(self.safe_speed) or self.safe_speed <= 0):
+            raise ValueError('safe_speed_m_s deve ser positivo (inf: sem teto).')
+        self.safe_speed = float(self.safe_speed)
         self.age_average = None
         self.odometry = None  # PoseHistory do laco de controle (compensacao exata)
         self.exact_compensation = self.settings.get('exact_latency_compensation', True)
@@ -1146,7 +1172,7 @@ class RealStanleyFollower:
                 self.age_average = (age if self.age_average is None
                                     else self.age_average + .05*(age - self.age_average))
                 speed_raw = min(speed_raw, max(self.min_speed, self.latency_budget/max(self.age_average, .05)))
-            limit = min(speed_limit, self.line_speed_limit)
+            limit = min(speed_limit, self.line_speed_limit, self.safe_speed)
             speed_raw = min(speed_raw, limit)
             car.set_vel(min(self._filter_speed(speed_raw, car.dt, getattr(car, 'v', 0.)), limit))
             active = bool(getattr(car, 'encoder_valid', True))
@@ -1182,7 +1208,11 @@ class RealStanleyFollower:
                 car.set_steer(self.steering_sign * steer)
                 active = bool(getattr(car, 'encoder_valid', True))
             elif active:
-                steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature, search)
+                gyro = getattr(car, 'w_imu', math.nan)
+                gyro = (self.steering_sign*float(gyro) if isinstance(gyro, (int, float, np.number))
+                        and math.isfinite(gyro) else math.nan)
+                steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature, search,
+                                               yaw_rate=gyro)
                 car.set_steer(self.steering_sign * steer)
                 # O setter revalida a serial antes de enviar a direcao.
                 active = bool(getattr(car, 'encoder_valid', True))
@@ -1250,6 +1280,7 @@ class RealStanleyFollower:
                 stanley_heading_rad=self.controller.heading_term if active else invalid,
                 stanley_cross_track_rad=self.controller.cross_track_term if active else invalid,
                 stanley_feedforward_rad=self.controller.feedforward_term if active else invalid,
+                stanley_damping_rad=self.controller.damping_term if active else invalid,
                 line_search_rad=search,
                 hold_speed_factor=self.hold_speed_factor if active else invalid,
                 vision_compensated_s=compensated,

@@ -102,17 +102,39 @@ class VisionPipelineTests(unittest.TestCase):
         times = iter((1., 1.02, 2., 2.02, 3., 3.02))
         mission.capture_func(car, frames, stop, clock=lambda: next(times))
         self.assertEqual(frames.qsize(), 1)
-        frame, timestamp, duration, error = frames.get_nowait()
+        frame, timestamp, duration, error, source = frames.get_nowait()
         self.assertIs(frame, images[-1])
         self.assertEqual(timestamp, 3.)
         self.assertAlmostEqual(duration, .02)
         self.assertIsNone(error)
+        self.assertEqual(source, 'leitura')  # camera sem horario do driver
+
+    def test_driver_timestamp_is_used_when_plausible(self):
+        """Horario V4L2: o da chegada do quadro, sem a espera do read() (24/11)."""
+        from fva_car.vision_process import frame_time
+        car = SimpleNamespace(frame_time=10.95)
+        self.assertEqual(frame_time(car, 10.92, 11.), (10.95, 11. - 10.95, 'v4l2'))
+        for bad in (None, 0., 11.2, 9., float('nan')):  # ausente, futuro ou velho demais
+            self.assertEqual(frame_time(SimpleNamespace(frame_time=bad), 10.92, 11.)[2], 'leitura')
+        stop = threading.Event()
+        frames = queue.Queue(maxsize=1)
+        camera = SimpleNamespace(frame_time=None)
+        def capture(gray=False):
+            camera.frame_time = 2.97
+            stop.set()
+            return np.zeros((4, 4, 3), np.uint8)
+        camera.get_image = capture
+        times = iter((2.95, 3.01))
+        mission.capture_func(camera, frames, stop, clock=lambda: next(times))
+        _, timestamp, duration, _, source = frames.get_nowait()
+        self.assertEqual((timestamp, source), (2.97, 'v4l2'))
+        self.assertAlmostEqual(duration, .04)
 
     def test_processing_uses_capture_time_without_refreshing_old_images(self):
         stop = threading.Event()
         frames = queue.Queue(maxsize=1)
         frame = np.zeros((4, 4, 3), np.uint8)
-        frames.put((frame, 10., .04, None))
+        frames.put((frame, 10., .04, None, 'v4l2'))
         observation = mission.LineObservation(10., errors=(.1, 0., 0.))
         def observe(image, timestamp):
             self.assertIs(image, frame)
@@ -128,6 +150,7 @@ class VisionPipelineTests(unittest.TestCase):
         self.assertEqual(actual.timestamp, 10.)
         self.assertAlmostEqual(actual.capture_seconds, .04)
         self.assertAlmostEqual(actual.processing_seconds, .35)
+        self.assertEqual(actual.capture_clock, 'v4l2')
         self.assertEqual(actual.sequence, 1)
         car.get_image.assert_not_called()
         follower = mission.RealStanleyFollower({})

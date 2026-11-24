@@ -197,7 +197,7 @@ class ConeObservation(LineObservation):
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
-                 classifier=None, corridor=None, line_fusion=False, refine_bases=True):
+                 classifier=None, corridor=None, line_fusion=False, refine_bases=True, cone_map=False):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
 
         corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
@@ -207,6 +207,10 @@ class RealConeDetector:
         Com classificador, os ajustes de cor usados para gerar o conjunto de
         treino (candidate_settings do .json) valem por padrao; chaves dadas
         explicitamente em settings tem prioridade.
+
+        cone_map: mapa de cones (SLAM, fva_car/cone_slam.py) com tracado pelo SVM
+        (fva_car/svm_path.py) quando o estimador perde o corredor; "substituir"
+        usa o tracado do mapa sempre (experimento). Precisa do estimador.
         """
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('Cones requerem calibracao metrica da camera fixa.')
@@ -267,6 +271,12 @@ class RealConeDetector:
             self.corridor = CorridorEstimator(
                 corridor_settings, image_homography(calibration, self.processing_size[::-1]),
                 pixel_scale=self.processing_size[0]/w)
+        self.map = None
+        if cone_map and self.corridor is not None:
+            from .map_path import MapPath
+            self.map = MapPath(wheelbase=self.corridor.settings.pose_offset_m,
+                               default_width=self.corridor.settings.track_width_m,
+                               replace=cone_map == 'substituir')
         # Linha amarela no centro do corredor (se houver): entra no estimador como
         # linha central junto com os cones. Ela fica perto de y = 0, onde a
         # calibracao e boa; os cones (+-0,6 m) dependem da extrapolacao.
@@ -378,6 +388,8 @@ class RealConeDetector:
         if estimate is not None:
             debug.update(corridor=dict(estimate.debug(), sides=self.corridor_sides,
                                        line_points=int(self.corridor.used_center)), legacy_errors=legacy)
+            if self.map is not None:
+                debug['mapa'] = dict(self.map.last)
         debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
                      recovery=bool(valid and recovery),
                      confidence=round(float(result.confidence), 3), branch=bool(result.branch),
@@ -403,6 +415,8 @@ class RealConeDetector:
             # Estado montado com as cores trocadas nao serve: recomeca, sem a largura.
             self.corridor.reset()
             self.corridor.learned_width = None
+            if self.map is not None:
+                self.map.reset()
         return green_left, info
 
     def _line_points(self, frame, timestamp):
@@ -431,7 +445,11 @@ class RealConeDetector:
             # Sem odometria: o deslocamento estimado pelo fluxo optico do piso,
             # ja no referencial dos cones.
             motion = (result.debug.get('tracking') or {}).get('motion_m')
-        return self.corridor.step(float(timestamp), left, right, motion, pose_frame, center=center)
+        estimate = self.corridor.step(float(timestamp), left, right, motion, pose_frame, center=center)
+        if self.map is not None:
+            estimate = self.map.step(float(timestamp), ground['green'], ground['red'], green_left, motion,
+                                     pose_frame, estimate, self.corridor._point_covariance)
+        return estimate
 
     def roi_row(self):
         """Primeira linha util na grade de processamento: acima, so o que fica alem

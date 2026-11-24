@@ -52,7 +52,7 @@ class RCInputTests(unittest.TestCase):
     def test_rc_traction_replaces_reference_but_still_uses_local_pi(self):
         self.car.sel_tracao = 0
         self.car.set_vel(1.8)
-        expected = .25 * self.module.CAR['VELMAX']
+        expected = .25 * self.module.CAR['RC_VELMAX']  # o radio continua ate 2 m/s
         self.assertAlmostEqual(self.car.vref, expected)
         self.assertGreater(self.car.u, 0.)
         self.car.atuador.set_throttle.assert_called_once_with(self.car.u)

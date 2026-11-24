@@ -425,7 +425,9 @@ class VisionProcessMissionTests(unittest.TestCase):
         path.write_text(json.dumps({'image_size':[640,480],
             'image_points_px':[[160,400],[480,400],[260,200],[380,200]],
             'ground_points_m':[[.4,.3],[.4,-.3],[1.5,.3],[1.5,-.3]]}))
-        self.settings={'camera_calibration_file':str(path),'ts':3.,'save':False,'navigation_mode':'cones'}
+        # Sem fixar nucleos nem ler a saude do Pi: o processo dos testes nao muda de afinidade.
+        self.settings={'camera_calibration_file':str(path),'ts':3.,'save':False,'navigation_mode':'cones',
+                       'cpu_cores':False,'health_monitor':False}
         self.events=[]
 
     def fake_vision(self, fail=False):

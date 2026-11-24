@@ -20,18 +20,35 @@ from .lateral import LineObservation
 
 # Mascaras so servem ao detector; o preview e o debug usam pontos e curvas.
 _EMPTY_MASK = np.zeros((0, 0), np.uint8)
+# Horario do driver aceito se o quadro chegou ate isto antes do fim do read().
+MAX_DRIVER_DELAY_S = 0.5
+
+
+def frame_time(car, read_started, read_ended):
+    """(horario da foto, atraso ate o fim da leitura, origem).
+
+    Antes de 24/11 o horario era o de ANTES do read(), que espera o proximo
+    quadro (~38 ms nos logs de 19/11): a idade da imagem incluia essa espera, e
+    nao o tempo real desde a foto. A camera USB marca cada quadro (V4L2,
+    mesmo relogio de time.monotonic); fora do plausivel, volta ao antigo."""
+    stamp = getattr(car, "frame_time", None)
+    if (isinstance(stamp, (int, float)) and np.isfinite(stamp)
+            and 0.0 <= read_ended - stamp <= MAX_DRIVER_DELAY_S):
+        return float(stamp), read_ended - float(stamp), "v4l2"
+    return read_started, read_ended - read_started, "leitura"
 
 
 def capture_func(car, frames, stop_event, clock=time.monotonic):
     """Captura continuamente; a fila guarda somente o frame mais recente."""
     while not stop_event.is_set():
-        captured_at = clock()
+        read_started = clock()
         error = None
         try:
             frame = car.get_image(gray=False)
         except Exception as failure:
             frame, error = None, str(failure)
-        sample = (frame, captured_at, clock() - captured_at, error)
+        captured_at, capture_seconds, source = frame_time(car, read_started, clock())
+        sample = (frame, captured_at, capture_seconds, error, source)
         try:
             frames.put_nowait(sample)
         except queue.Full:
@@ -54,14 +71,14 @@ def vision_func(
     while not stop_event.is_set():
         if frames is not None:
             try:
-                frame, captured_at, capture_seconds, capture_error = frames.get(
+                frame, captured_at, capture_seconds, capture_error, source = frames.get(
                     timeout=0.1
                 )
             except queue.Empty:
                 continue
         else:
             captured_at = clock()
-            capture_seconds, capture_error = float("nan"), None
+            capture_seconds, capture_error, source = float("nan"), None, "leitura"
         try:
             if capture_error is not None:
                 raise RuntimeError(capture_error)
@@ -76,6 +93,7 @@ def vision_func(
                 capture_seconds=capture_seconds,
                 processing_seconds=clock() - processing_at,
                 sequence=sequence,
+                capture_clock=source,
             )
         except Exception as error:
             vision_data["observation"] = LineObservation(
@@ -110,20 +128,85 @@ def _build_detector(mode, calibration_file, detector_kwargs):
     return RealLineDetector(calibration, render_preview=False, **detector_kwargs)
 
 
+class SharedFrames:
+    """Anel de quadros BGR em memoria compartilhada entre os processos.
+
+    Mandar o quadro (640x480x3 = 900 KB) dentro da observacao custava 2,9 ms
+    no notebook so no pipe (0,4 sem ele), mais no Pi, com o envio travando o
+    processo de visao ate o controle ler e a copia disputando o GIL do laco de
+    controle. Aqui o filho copia o quadro numa vaga e manda so (vaga, numero);
+    o principal copia de volta. Trava entre processos: no ARM a ordem das
+    escritas nao e garantida sem ela (como SharedPoseHistory)."""
+    def __init__(self, shape, slots=4, context=None):
+        context = context or multiprocessing.get_context("spawn")
+        self.shape = tuple(int(v) for v in shape)
+        self.slots = int(slots)
+        self.size = int(np.prod(self.shape))
+        self.buffer = context.RawArray("B", self.size * self.slots)
+        self.numbers = context.RawArray("q", self.slots)
+        self.lock = context.Lock()
+
+    def _view(self, slot):
+        return np.frombuffer(self.buffer, np.uint8, self.size, slot * self.size).reshape(self.shape)
+
+    def put(self, frame, number):
+        """Guarda o quadro; devolve a vaga, ou None se o formato nao cabe."""
+        if not isinstance(frame, np.ndarray) or frame.shape != self.shape or frame.dtype != np.uint8:
+            return None
+        slot = int(number) % self.slots
+        with self.lock:
+            self._view(slot)[...] = frame
+            self.numbers[slot] = int(number)
+        return slot
+
+    def get(self, slot, number):
+        """Copia do quadro `number`, ou None se a vaga ja foi reescrita."""
+        with self.lock:
+            if self.numbers[slot] != number:
+                return None
+            return self._view(slot).copy()
+
+
+def _frame_shape(calibration_file):
+    """(altura, largura, 3) da calibracao, ou None."""
+    try:
+        from .lateral import GroundCalibration
+
+        width, height = GroundCalibration.from_file(calibration_file).image_size
+        return int(height), int(width), 3
+    except Exception:
+        return None
+
+
 class _Sender:
-    """Faz o papel de vision_data no processo filho: cada quadro vai ao pipe."""
-    def __init__(self, connection):
+    """Faz o papel de vision_data no processo filho: cada quadro vai ao pipe
+    (a imagem, pelo anel compartilhado quando ha um)."""
+    def __init__(self, connection, frames=None):
         self.connection = connection
+        self.frames = frames
+        self.number = 0
 
     def __setitem__(self, key, observation):
-        self.connection.send(("obs", _compact(observation)))
+        observation = _compact(observation)
+        reference = None
+        if self.frames is not None and observation.source_frame is not None:
+            self.number += 1
+            slot = self.frames.put(observation.source_frame, self.number)
+            if slot is not None:
+                reference = (slot, self.number)
+                observation = replace(observation, source_frame=None)
+        self.connection.send(("obs", observation, reference))
 
 
 def _vision_main(connection, stop, mode, calibration_file, detector_kwargs, camera_settings, poses,
-                 camera_factory=None):
+                 camera_factory=None, shared_frames=None, cpu_cores=None):
     """Processo filho: abre a camera, captura em thread e detecta."""
     # Ctrl+C chega ao grupo inteiro: so o processo principal decide parar.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Nucleos proprios antes de criar threads (elas herdam a afinidade).
+    from .system_health import pin_process
+
+    cores = pin_process(cpu_cores) if cpu_cores else None
     import cv2
 
     cv2.setNumThreads(2)
@@ -144,7 +227,7 @@ def _vision_main(connection, stop, mode, calibration_file, detector_kwargs, came
             camera.close()
         connection.close()
         return
-    connection.send(("ready", None))
+    connection.send(("ready", cores))
     halt = threading.Event()
 
     def watchdog():
@@ -160,7 +243,7 @@ def _vision_main(connection, stop, mode, calibration_file, detector_kwargs, came
     for thread in threads:
         thread.start()
     try:
-        vision_func(camera, _Sender(connection), halt, detector, frames=frames)
+        vision_func(camera, _Sender(connection, shared_frames), halt, detector, frames=frames)
     except (BrokenPipeError, EOFError, OSError):
         pass  # principal encerrou
     finally:
@@ -177,17 +260,20 @@ class VisionProcess:
     Iniciar antes dos motores: start() espera a camera abrir e falha cedo.
     """
     def __init__(self, vision_data, mode, calibration_file, detector_kwargs=None,
-                 camera_settings=None, poses=None, start_timeout=30., camera_factory=None):
+                 camera_settings=None, poses=None, start_timeout=30., camera_factory=None, cpu_cores=None):
         """camera_factory: funcao de modulo (picklavel) que cria a camera; padrao Camera."""
         context = multiprocessing.get_context("spawn")
         self.vision_data = vision_data
         self.start_timeout = float(start_timeout)
         self._receiver_end, sender_end = context.Pipe(duplex=False)
         self._stop = context.Event()
+        shape = _frame_shape(calibration_file)
+        self.shared_frames = SharedFrames(shape, context=context) if shape is not None else None
         self.process = context.Process(
             target=_vision_main, name="visao",
             args=(sender_end, self._stop, mode, str(calibration_file), dict(detector_kwargs or {}),
-                  dict(camera_settings or {}), poses, camera_factory),
+                  dict(camera_settings or {}), poses, camera_factory, self.shared_frames,
+                  list(cpu_cores) if cpu_cores else None),
             daemon=True)
         self._sender_end = sender_end
         # Process.start() descarta os args: sem esta referencia a trava do
@@ -195,6 +281,8 @@ class VisionProcess:
         self.poses = poses
         self.receiver = None
         self.frames_received = 0
+        self.frames_lost = 0
+        self.cpu_cores = None  # nucleos aplicados no filho (None: sem fixar)
 
     def start(self):
         self.process.start()
@@ -203,12 +291,13 @@ class VisionProcess:
             self.stop()
             raise RuntimeError(f"Processo de visao nao respondeu em {self.start_timeout:.0f} s")
         try:
-            kind, message = self._receiver_end.recv()
+            kind, message = self._receiver_end.recv()[:2]
         except EOFError:
             kind, message = "error", "processo encerrou ao iniciar"
         if kind != "ready":
             self.stop()
             raise RuntimeError(f"Camera/visao: {message}")
+        self.cpu_cores = message
         self.receiver = threading.Thread(target=self._receive, daemon=True, name="visao-recebe")
         self.receiver.start()
         return self
@@ -216,10 +305,16 @@ class VisionProcess:
     def _receive(self):
         while True:
             try:
-                kind, observation = self._receiver_end.recv()
+                kind, observation, *extra = self._receiver_end.recv()
             except (EOFError, OSError):
                 return
             if kind == "obs":
+                reference = extra[0] if extra else None
+                if reference is not None and self.shared_frames is not None:
+                    frame = self.shared_frames.get(*reference)
+                    if frame is None:
+                        self.frames_lost += 1  # vaga reescrita: segue sem a imagem
+                    observation = replace(observation, source_frame=frame)
                 self.frames_received += 1
                 self.vision_data["observation"] = observation
 

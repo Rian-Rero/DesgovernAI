@@ -12,15 +12,19 @@ import numpy as np
 import json
 from pathlib import Path
 
-# try import smbus2 then fallback to smbus
+# try import smbus2 then fallback to smbus. Sem nenhum dos dois o modulo ainda
+# importa (o Car segue sem IMU); o erro aparece so ao criar a IMU.
 try:
     import smbus2 as smbus
 except ImportError:
     try:
         import smbus
-    except ImportError as e:
-        raise ImportError("No smbus package found. Install 'python3-smbus' via apt or 'smbus2' via pip.") from e
-        
+    except ImportError:
+        smbus = None
+
+# WHO_AM_I (0x75) dos chips desta familia: outro valor = chip ausente ou queimado.
+KNOWN_CHIPS = {0x71: "MPU-9250", 0x73: "MPU-9255", 0x70: "MPU-6500", 0x68: "MPU-6050"}
+
 ########################################
 # classe da IMU
 ########################################
@@ -35,6 +39,10 @@ class IMU:
 	"""
 	
 	# MPU registers
+	WHO_AM_I = 0x75
+	SMPLRT_DIV = 0x19
+	CONFIG = 0x1A
+	GYRO_CONFIG = 0x1B
 	PWR_MGMT_1 = 0x6B
 	INT_PIN_CFG = 0x37
 	ACCEL_XOUT_H = 0x3B
@@ -63,8 +71,14 @@ class IMU:
 					sample_delay=0.01, 
 					do_wake=True,
 					auto_calibrate=True,
-					mag_cal_file=None):
-						
+					mag_cal_file=None,
+					gyro_range_dps=None):
+		"""gyro_range_dps: None mantem o padrao do driver (+-250 graus/s);
+		500 ou 1000 para o carro (a 3 m/s numa curva de 1 m sao ~170 graus/s).
+		Configurar tambem liga o filtro passa-baixa de 41 Hz e amostra a 100 Hz."""
+		if smbus is None:
+			raise ImportError("Sem smbus: instale 'python3-smbus' (apt) ou 'smbus2' (pip).")
+
 		self.address = address
 		self.bus_id = bus_id
 		self.samples = samples
@@ -103,6 +117,14 @@ class IMU:
 			except Exception as e:
 				raise RuntimeError(f"Error waking IMU at address 0x{self.address:02x}: {e}")
 
+		# chip que responde mas nao e um MPU (ou queimado): falha aqui, nao no meio da volta
+		who = self.bus.read_byte_data(self.address, self.WHO_AM_I)
+		if who not in KNOWN_CHIPS:
+			raise RuntimeError(f"IMU nao reconhecida em 0x{self.address:02x} (WHO_AM_I=0x{who:02X})")
+		self.chip = KNOWN_CHIPS[who]
+		if gyro_range_dps is not None:
+			self._configure(gyro_range_dps)
+
 		# init magnetometer			
 		try:
 			self._init_mag()
@@ -118,6 +140,35 @@ class IMU:
 		# calibrate accel and gyro
 		if auto_calibrate:
 			self._calibrate_accel_and_gyro()
+
+	########################################
+	# filtro, taxa e escala do giroscopio
+	def _configure(self, gyro_range_dps):
+		ranges = {250: 0x00, 500: 0x08, 1000: 0x10, 2000: 0x18}
+		if gyro_range_dps not in ranges:
+			raise ValueError("gyro_range_dps deve ser 250, 500, 1000 ou 2000")
+		self.bus.write_byte_data(self.address, self.CONFIG, 0x03)      # DLPF 41 Hz
+		self.bus.write_byte_data(self.address, self.SMPLRT_DIV, 0x09)  # 1 kHz / 10 = 100 Hz
+		self.bus.write_byte_data(self.address, self.GYRO_CONFIG, ranges[gyro_range_dps])
+		self.LSB_PER_DPS = 32768.0 / gyro_range_dps
+		self.gyro_range_dps = float(gyro_range_dps)
+		time.sleep(0.02)
+
+	########################################
+	# acelerometro (g) e giroscopio (graus/s) numa so transacao I2C, sem offsets
+	def read_motion(self):
+		"""(ax, ay, az) em g e (gx, gy, gz) em graus/s, brutos (sem vies).
+
+		Um bloco de 14 bytes (acel, temperatura, giro): os eixos saem do mesmo
+		instante e custa uma transacao, nao 12."""
+		data = self.bus.read_i2c_block_data(self.address, self.ACCEL_XOUT_H, 14)
+		words = []
+		for i in (0, 2, 4, 8, 10, 12):
+			value = (data[i] << 8) | data[i + 1]
+			words.append(value - 65536 if value >= 0x8000 else value)
+		accel = tuple(v / self.LSB_PER_G for v in words[:3])
+		gyro = tuple(v / self.LSB_PER_DPS for v in words[3:])
+		return accel, gyro
 
 	########################################
 	# low level helpers

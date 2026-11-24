@@ -27,7 +27,10 @@ except ImportError:
 ########################################
 # parametros do carro
 CAR = {
-    "VELMAX": 2,  # m/s
+    # Teto do automatico (a missao pede ate 4 m/s; acima disto o throttle e cortado).
+    "VELMAX": 4.5,  # m/s
+    # Radio (RC): o manche cheio continua pedindo 2 m/s, como antes.
+    "RC_VELMAX": 2.0,  # m/s
     "ACCELMAX": 1.0,  # m/s^2
     "STEERMAX": np.deg2rad(20.0),  # rad
     "MASS": 5.16,  # kg
@@ -82,6 +85,9 @@ class Car:
         # desejado, que e o que a roda faz com a escala certa. 1 = sem correcao.
         self.steer_scale_left = float(parameters.get("steering_left_scale", 1.0))
         self.steer_scale_right = float(parameters.get("steering_right_scale", 1.0))
+        # Resposta da direcao na odometria: a guinada real e esta fracao da do
+        # modelo tan(esterco)/L (pneu escorrega, folga do servo). 1 = modelo puro.
+        self.steer_response = float(parameters.get("steering_response", 1.0))
         # Mapa aprendido do throttle de regime (fva_car/throttle.py); None: so a reta acima.
         self.throttle_map = None
         if parameters.get("throttle_learning", False):
@@ -144,6 +150,9 @@ class Car:
         self.v_filt = filter.MovingAverage(n=VELOCITY_FILTER_SIZE)
         self.a_filt = filter.MovingAverage(n=30)
         self.w_filt = filter.MovingAverage(n=10)
+        # Giroscopio ja passa pelo filtro de 41 Hz do chip: media curta, sem os
+        # ~100 ms de atraso da media de 10 usada no modelo.
+        self.w_gyro_filt = filter.MovingAverage(n=2)
         self.vel_error_integral = 0.0
 
         # logs de salvamento
@@ -161,8 +170,11 @@ class Car:
         # atuadores de estercamento, aceleracao e ultrasom/camera
         try:
             self.atuador = servos.Servos(
+                velmax=CAR["VELMAX"],
                 steering_filter_size=self.parameters.get('steering_filter_size', 10)
             )
+            if self.throttle_map is not None:
+                self.throttle_map.u_max = self._u_max()
         except Exception as e:
             print(f"\033[31mErro nos servos: {e}\033[0m", flush=True)
             raise
@@ -176,8 +188,14 @@ class Car:
             print(f"\033[31mErro no velocimetro: {e}\033[0m", flush=True)
             raise
 
-        # IMU desativada para operar sem o sensor no barramento I2C.
-        # self.imu = imu.IMU()
+        # IMU (giroscopio): guinada medida na odometria. Opcional: sem o chip,
+        # com ele queimado ou sem smbus, segue com o modelo da direcao
+        # (fva_car/yaw_rate.py). "imu": False no main.py desliga.
+        try:
+            from .yaw_rate import start_gyro
+        except ImportError:
+            from yaw_rate import start_gyro
+        self.imu, self.gyro, self.imu_status = start_gyro(self.parameters, log=lambda text: print(text, flush=True))
 
         # ultrasom
         try:
@@ -397,14 +415,22 @@ class Car:
         else:
             vf = self.v
 
-        # velocidade angular pelo modelo cinematico
-        self.w_model = (vf / CAR["L"]) * np.tan(self.st)
+        # velocidade angular pelo modelo cinematico (comando sem e com a resposta medida)
+        w_command = (vf / CAR["L"]) * np.tan(self.st)
+        self.w_model = w_command * getattr(self, "steer_response", 1.0)
 
-        # _, _, g_z = self.imu.get_gyro()
-        self.w_imu = float('nan')
+        # giroscopio, quando ha IMU valida; nan: este passo usa o modelo
+        gyro = getattr(self, "gyro", None)
+        self.w_imu = gyro.read(vf, w_command, self.dt) if gyro is not None else float('nan')
+        measured = bool(np.isfinite(self.w_imu))
+        self.yaw_source = "imu" if measured else "modelo"
+        w = self.w_imu if measured else self.w_model
 
-        # filtra velocidade angular
-        wf = self.w_filt.filter(self.w_model)
+        # filtra velocidade angular (os dois filtros recebem a mesma serie: trocar
+        # de fonte no meio da volta nao da salto)
+        wf_model = self.w_filt.filter(w)
+        wf_gyro = self.w_gyro_filt.filter(w) if hasattr(self, "w_gyro_filt") else wf_model
+        wf = wf_gyro if measured else wf_model
 
         return vf, wf
 
@@ -469,7 +495,7 @@ class Car:
 
         # Em RC, o receptor escolhe a referencia; em AUTO, preserva o PI local.
         if self.sel_tracao == 0:
-            vref = self.rc_acelerador * CAR["VELMAX"]
+            vref = self.rc_acelerador * CAR["RC_VELMAX"]
 
         # define referencia e marcha
         self._set_ref(vref)
@@ -488,7 +514,7 @@ class Car:
         else:
             feedforward = offset + gain * vref_abs if vref_abs > 0.05 else 0.0
         u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
-        u_sat = np.clip(u, 0.0, 1.0)
+        u_sat = np.clip(u, 0.0, self._u_max())
 
         # anti-windup: integra apenas fora da saturacao ou para sair dela
         if (u == u_sat) or (u > u_sat and error < 0.0) or (u < u_sat and error > 0.0):
@@ -500,8 +526,17 @@ class Car:
         # Em regime (na referencia, sem saturar, sem acelerar): o throttle aplicado
         # e o que esta velocidade pede. So no automatico (no RC a vref e do radio).
         if (throttle_map is not None and self.sel_tracao != 0 and vref_abs > 0.15 and abs(error) < 0.04
-                and 0.0 < self.u < 1.0 and abs(getattr(self, "a", 0.0)) < 0.4):
+                and 0.0 < self.u < self._u_max() and abs(getattr(self, "a", 0.0)) < 0.4):
             throttle_map.update(v_abs, self.u, min(self.dt, 2.0 * self.sample_rate))
+
+    ########################################
+    # maior comando de throttle: 1 = PWM de 1,5 m/s (o maximo ate 24/11). No
+    # automatico vai ate o PWM de VELMAX; no radio continua 1, como antes.
+    def _u_max(self):
+        if getattr(self, "sel_tracao", 1) == 0:
+            return 1.0
+        value = getattr(getattr(self, "atuador", None), "max_command", 1.0)
+        return float(value) if isinstance(value, (int, float)) and value >= 1.0 else 1.0
 
     ########################################
     # seta throttle dos motores do veiculo
@@ -516,7 +551,7 @@ class Car:
             u = 0.0
 
         # limita comando entre neutro e throttle maximo
-        self.u = float(np.clip(u, 0.0, 1.0))
+        self.u = float(np.clip(u, 0.0, self._u_max()))
 
         # acima do limite, corte o throttle
         if np.abs(self.v) > CAR["VELMAX"]:
@@ -609,6 +644,7 @@ class Car:
             "a_x": self.a_x,
             "w_model": self.w_model,
             "w_imu": self.w_imu,
+            "yaw_from_imu": int(getattr(self, "yaw_source", "modelo") == "imu"),
             "yaw_mag": self.yaw_mag,
             "rc_direcao": self.rc_direcao,
             "rc_acelerador": self.rc_acelerador,
@@ -698,7 +734,11 @@ class Car:
         self.odometer.close()
         self.atuador.close()
         self.us.close()
-        # self.imu.close()
+        if getattr(self, "imu", None) is not None:
+            try:
+                self.imu.close()
+            except Exception:  # noqa: BLE001 - fechar nunca impede o fim da missao
+                pass
         if self.parameters["camera"]:
             self.cam.close()
         if self.gps is not None:

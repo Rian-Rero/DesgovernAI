@@ -48,7 +48,7 @@ DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
 # m/s; nos cones e a velocidade MAXIMA NAS RETAS (o carro reduz sozinho antes
 # das curvas e pelo limite de visibilidade, ~1,6 m/s com curva de R = 1,5 m).
-SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0")
+SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "4.0")
 CURVE_RADII = ("1.2", "1.5", "2.0", "3.0")  # m: curva mais fechada da pista (--min-radius)
 STREAM_PORT = 8080  # main.py --stream
 
@@ -64,7 +64,7 @@ MISSION_DEFAULTS = {
     "cone_debug": True,           # False: --no-cone-debug
     "record_frames": False,       # --record-frames HZ (coleta para a rede)
     "record_hz": "3",
-    "classifier": False,          # --classifier CAMINHO
+    "classifier": True,           # --classifier CAMINHO (rede de 19/11: 93,6% de acuracia balanceada)
     "classifier_path": "modelos/cones.onnx",
     "vision_width": "320",
     "steering_filter": "3",
@@ -74,6 +74,10 @@ MISSION_DEFAULTS = {
     "line_highcam": True,         # linha amarela com a camera alta; False: --line-classic
     "refine": True,               # False: --no-refine (base dos cones longe na imagem reduzida)
     "new_start": True,            # False: --old-start (partida como antes de 17/11, para comparar)
+    "cone_map": True,             # False: --sem-mapa (mapa SLAM + tracado SVM de reserva)
+    "speed_cap": True,            # False: --sem-teto-ultrassom (teto ~2,8 m/s pela parada no ultrassom)
+    "cpu_cores": True,            # False: --sem-nucleos (controle e visao sem nucleos fixos)
+    "imu": True,                  # False: --sem-imu (guinada pelo modelo da direcao)
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
     "racing_line": "0.10",        # --abrir-curva (m para fora antes da curva; 0.10 e o padrao do main.py)
     "steer_left": "100",          # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
@@ -88,7 +92,7 @@ RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20")
 STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
-                     "curve_echo", "refine")
+                     "curve_echo", "refine", "cone_map")
 LINE_ONLY_OPTIONS = ("line_highcam",)
 
 
@@ -128,6 +132,14 @@ def build_main_command(options: dict) -> str:
             parts.append(f"--classifier {shlex.quote(str(o['classifier_path']).strip())}")
         if not o["refine"]:
             parts.append("--no-refine")
+        if o["estimator"] and not o["cone_map"]:
+            parts.append("--sem-mapa")
+    if not o["speed_cap"]:
+        parts.append("--sem-teto-ultrassom")
+    if not o["cpu_cores"]:
+        parts.append("--sem-nucleos")
+    if not o["imu"]:
+        parts.append("--sem-imu")
     if o["navigation"] == "cones" and not o["pure_pursuit"]:
         try:
             gain = float(str(o["stanley_gain"]).replace(",", "."))
@@ -258,6 +270,12 @@ def command_label(command: str) -> str:
                 parts.append("rede")
             if "--no-refine" in options:
                 parts.append("sem-refino")
+            if "--sem-mapa" in options:
+                parts.append("sem-mapa")
+        if "--sem-teto-ultrassom" in options:
+            parts.append("sem-teto")
+        if "--sem-imu" in options:
+            parts.append("sem-imu")
         if "--old-start" in options:
             parts.append("partida-antiga")
         elif options.get("--throttle-offset"):
@@ -1270,6 +1288,10 @@ class RsyncGUI(tk.Tk):
             ("line_highcam", "Linha: câmera alta (vista de cima)"),
             ("refine", "Refino da base dos cones longe"),
             ("new_start", "Partida nova (sem engasgo)"),
+            ("cone_map", "Mapa SLAM + traçado SVM (reserva)"),
+            ("speed_cap", "Teto pelo ultrassom (~2,8 m/s)"),
+            ("cpu_cores", "Controle e visão em núcleos separados"),
+            ("imu", "IMU: guinada pelo giroscópio"),
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])
@@ -1343,7 +1365,7 @@ class RsyncGUI(tk.Tk):
         cones = options.get("navigation") == "cones"
         for key, check in self.mission_checks.items():
             enabled = (cones or key not in CONE_ONLY_OPTIONS) and (not cones or key not in LINE_ONLY_OPTIONS)
-            if key in ("pure_pursuit", "preview"):
+            if key in ("pure_pursuit", "preview", "cone_map"):
                 enabled = enabled and options.get("estimator", True)
             check.state(["!disabled"] if enabled else ["disabled"])
         self.record_combo.state(["!disabled"] if cones and options.get("record_frames") else ["disabled"])

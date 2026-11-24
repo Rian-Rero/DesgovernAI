@@ -127,8 +127,16 @@ def add_decoys(track, count, rng, gap=(.2, .8)):
 
 class SimCar:
     """Mesma interface que o RealStanleyFollower usa do Car real."""
-    def __init__(self, pose, rng, coast=.5, scale_error=.02, steer_bias_deg=.5, servo_tau=.06, fixed_bias_deg=0.):
+    def __init__(self, pose, rng, coast=.5, scale_error=.02, steer_bias_deg=.5, servo_tau=.06, fixed_bias_deg=0.,
+                 steer_response=1., model_response=1., gyro=False):
+        """steer_response: fracao da guinada do modelo que o carro faz de verdade
+        (0,88-0,90 no carro de 19/11); model_response: a que a odometria supoe
+        (steering_response do main.py). gyro: odometria pela guinada medida
+        (IMU), com ruido e vies pequenos, em vez do modelo."""
         self.servo_tau = servo_tau
+        self.steer_response, self.model_response, self.gyro = steer_response, model_response, gyro
+        self.gyro_bias = rng.normal(0., .005) if gyro else 0.
+        self.w_imu = math.nan
         self.trim = 0.
         self.X, self.Y, self.th = pose          # verdade, eixo traseiro
         self.odo = list(pose)                   # odometria do Car (encoder + esterco)
@@ -189,11 +197,17 @@ class SimCar:
         self.v_true = max(self.v_true, 0.)
         self.X += self.v_true*math.cos(self.th)*dt
         self.Y += self.v_true*math.sin(self.th)*dt
-        self.th += self.v_true/WHEELBASE*math.tan(steer)*dt
+        true_rate = self.v_true/WHEELBASE*math.tan(steer)*self.steer_response
+        self.th += true_rate*dt
         self.t += dt
-        # Sensores do Car: encoder com erro de escala, w pelo modelo com o comando.
+        # Sensores do Car: encoder com erro de escala; w pelo giroscopio (IMU) ou
+        # pelo modelo com o comando.
         self.v = max(0., self.v_true*self.scale + self.rng.normal(0., .015))
-        self.w = self.v/WHEELBASE*math.tan(self.st)
+        if self.gyro:
+            self.w_imu = true_rate + self.gyro_bias + self.rng.normal(0., .005)
+            self.w = self.w_imu
+        else:
+            self.w = self.v/WHEELBASE*math.tan(self.st)*self.model_response
         self.odo[0] += self.v*math.cos(self.odo[2])*dt
         self.odo[1] += self.v*math.sin(self.odo[2])*dt
         self.odo[2] += self.w*dt
@@ -289,8 +303,13 @@ def track_error(track, point, hint):
 
 
 def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), duration=None, coast=.5,
-        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False, decoys=0):
-    """Uma volta; devolve dicionario de metricas (e a serie, com trace)."""
+        camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False, decoys=0,
+        steer_response=None):
+    """Uma volta; devolve dicionario de metricas (e a serie, com trace).
+
+    steer_response: None (padrao) = carro ideal (roda faz a curva pedida, odometria
+    pelo modelo puro); um numero = a roda faz essa fracao e a odometria usa o
+    steering_response da configuracao. config['sim_gyro']: odometria pelo giroscopio."""
     import main as vehicle_main
 
     rng = np.random.default_rng(seed)
@@ -303,14 +322,23 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
     settings = CorridorSettings.from_value(
         corridor, track_width_m=config['cone_settings'].get('track_width_cm', 90)/100, max_range_m=3.)
     estimator = CorridorEstimator(settings, calibration.homography)
+    map_path = None
+    if config.get('cone_map', False) and not line:
+        from fva_car.map_path import MapPath
+        map_path = MapPath(wheelbase=WHEELBASE, default_width=settings.track_width_m,
+                           replace=config.get('cone_map') == 'substituir')
     follower = RealStanleyFollower(vehicle_main.follower_config(config, 'cones', corridor))
     run.last_follower = follower  # trim aprendido (corridas seguidas)
     poses = PoseHistory()
     if config.get('exact_compensation', False):
         follower.odometry = poses  # como no carro: compensacao exata do atraso
     start = -WHEELBASE  # eixo dianteiro no inicio da pista
+    real = steer_response is not None
     car = SimCar((start*math.cos(track.heading[0]), start*math.sin(track.heading[0]), track.heading[0]),
-                 rng, coast=coast, servo_tau=servo_tau, fixed_bias_deg=steer_bias_deg)
+                 rng, coast=coast, servo_tau=servo_tau, fixed_bias_deg=steer_bias_deg,
+                 steer_response=float(steer_response) if real else 1.,
+                 model_response=float(config.get('steering_response', 1.)) if real else 1.,
+                 gyro=bool(config.get('sim_gyro', False)))
     duration = duration or (track.length/.25 + 5.)
     pending, observation = [], None
     next_capture, last_capture = 0., None
@@ -332,6 +360,9 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
             else:
                 left, right = camera.observe(car, track)
                 estimate = estimator.step(now, left, right, motion, pose_frame=True)
+                if map_path is not None:  # como no carro: verde = esquerda aqui
+                    estimate = map_path.step(now, left, right, True, motion, True, estimate,
+                                             estimator._point_covariance)
             last_capture = now
             frames += 1
             states[estimate.state] += 1

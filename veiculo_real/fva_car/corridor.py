@@ -41,8 +41,9 @@ import numpy as np
 
 
 # LINHA: pontos da linha central (linha amarela), no fim para nao mudar os indices do car.csv.
-STATES = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA', 'PERDIDO', 'LINHA')
-SPEED_FACTOR = {'LINHA': 1., 'AMBAS': 1., 'SO_EXTERNA': .8, 'SO_INTERNA': .8, 'UMA_BORDA_RETA': .85,
+# MAPA: tracado pelo mapa (SLAM + SVM, map_path.py) com o estimador sem cones suficientes.
+STATES = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA', 'PERDIDO', 'LINHA', 'MAPA')
+SPEED_FACTOR = {'MAPA': .7, 'LINHA': 1., 'AMBAS': 1., 'SO_EXTERNA': .8, 'SO_INTERNA': .8, 'UMA_BORDA_RETA': .85,
                 'MEMORIA': .6, 'PERDIDO': 0.}
 E, PSI, KAPPA, DKAPPA, WIDTH = range(5)
 # Linha central amostrada de -1 a 4,5 m de caminho (a camera ve ate ~3 m).

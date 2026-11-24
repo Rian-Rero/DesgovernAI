@@ -344,11 +344,68 @@ Nos ensaios de 10/11 a imagem chegava ao controle com 260–290 ms (p90 até
   estimador (clotoide inteira) é levado do instante da foto até o do comando,
   pela velocidade e guinada atuais, até 0,5 s. Antes: curvatura constante, até
   0,25 s.
-- **Velocidade pelo atraso** (`latency_speed_budget_m: 0.3`): v ≤ 0,3 m ÷ idade
-  média da imagem. Com 0,3 s de atraso, isso dá 1 m/s; com a visão rápida, o
-  teto sobe sozinho. 0 desliga.
+- **Velocidade pelo atraso** (`latency_speed_budget_m: 0.5`, era 0,3 até
+  24/11): v ≤ 0,5 m ÷ idade média da imagem. Com os 220 ms dos ensaios de 19/11,
+  isso dá ~2,3 m/s (com 0,3 eram 1,4); com a visão mais rápida, o teto sobe
+  sozinho. Na pista virtual (10 q/s, 220 ms), 0,5 teve pior erro de 22 cm
+  contra 37 com 0,3, e nenhuma volta a menos. 0 desliga.
 - **Gravar quadros** (`--record-frames`) deixa a visão ~20% mais lenta: use só
   em coleta.
+
+**De onde vem o atraso** (25 voltas de 19/11 à noite, medianas, carro andando):
+
+| trecho | ms |
+|---|---|
+| espera do `read()` pelo próximo quadro (contava como idade) | 38 |
+| processamento (detecção 66 + geometria 16 + resto) | 89 |
+| fila + pipe até o controle + laço de 48 Hz pegar | 42 |
+| **idade quando o quadro chega ao controle** | **176** |
+| idade média durante o uso (o mesmo quadro serve ~5 passos) | 225 |
+
+O detector leva ~6–7 ms por quadro no notebook e ~89 ms no Pi (12×). O custo
+está nos laços em Python, não no OpenCV. Mudanças de 24/11:
+- **Horário real da foto** (`fva_car/vision_process.py` `frame_time`). Antes
+  era o horário de antes do `read()`, que inclui a espera por um quadro que nem
+  existia ainda. Agora vale o horário que o driver da câmera marca quando o
+  quadro chega (V4L2, mesmo relógio de `time.monotonic`). Fora do plausível
+  (ausente, no futuro ou mais de 0,5 s antes), volta ao antigo. A compensação
+  do atraso e a idade usam esse horário. O `vision_status.json` mostra
+  `capture_clock` (`v4l2` ou `leitura`), e `vision_capture_s` no `car.csv`
+  passa a ser o atraso do driver até o fim da leitura.
+- **Imagem por memória compartilhada** (`SharedFrames`). Cada observação
+  levava o quadro de 900 KB pelo pipe: 2,9 ms no notebook contra 0,4 ms sem ele
+  (no Pi, mais). O `send` travava o processo de visão até o controle ler, e a
+  cópia disputava o GIL do laço de controle. Agora o quadro vai para um anel de
+  4 vagas compartilhadas e pelo pipe só vai o número da vaga.
+- **SLAM vetorizado**. Antes, a associação calculava um marco por vez em
+  Python: 1,4 ms por quadro no notebook. Vetorizada, dá o mesmo resultado
+  (diferença de 1e-13) e o mapa custa 0,3 ms por quadro.
+
+**Saúde do Raspberry e núcleos** (24/11, `fva_car/system_health.py`). O Pi 4
+reduz o clock sozinho quando esquenta (a partir de ~80 °C) ou com subtensão
+(bateria fraca), e isso não aparecia em lugar nenhum. A diferença de 12× para o
+notebook é maior que a usual entre os dois.
+- **Saúde:** a cada 2 s, a volta lê a temperatura, o clock e o
+  `vcgencmd get_throttled`. O terminal mostra o estado na partida e o pior da
+  volta no fim, com avisos (aquecimento, subtensão, clock caindo sem o governor
+  `performance`). Isso fica em `saude_raspberry.json`, no `cones_summary.json`
+  e na linha `raspberry:` do relatório do ensaio. `health_monitor: false`
+  desliga.
+- **Núcleos** (`cpu_cores`): o processo do controle (com gravação e
+  transmissão) fica nos núcleos 0–1, e o da visão (captura + detecção) nos
+  núcleos 2–3. Assim um não rouba o núcleo do outro. Vale só com a visão em
+  processo e 4+ núcleos. `--sem-nucleos` ou a caixa "Controle e visão em
+  núcleos separados" na GUI devolvem a escolha ao sistema, para comparar.
+
+Se o relatório acusar limitação: dissipador/ventoinha no Pi e bateria
+carregada. Para fixar o clock no máximo:
+`echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
+(volta ao normal ao religar).
+
+**Próximo passo, se ainda faltar velocidade:** o resto do atraso é
+processamento em Python no Pi. Dá para rodar dois processos de detecção
+alternando quadros (dobra a taxa, não reduz o atraso de cada um) ou levar os
+laços de `tools/cone_path.py` (`_bases`/`contact`) para operações do OpenCV.
 
 ### Rápido nas retas, cuidado nas curvas
 
@@ -372,7 +429,38 @@ calibração +8 px, visão a 10 quadros/s com servo lento) também ficaram sem
 toques, com erro máximo de 16 cm. Sem o limite de visibilidade, o carro chegava
 no grampo com 0,57 m/s².
 
-**No carro, subam aos poucos:** 0,7 → 1,0 → 1,5 → 2,0. Confiram em cada passo se
+**Até 4 m/s** (24/11): `--speed` aceita até 4,0 e a GUI tem 3,0 e 4,0. O `Car`
+corta o acelerador só acima de 4,5 m/s; o rádio continua indo até 2 m/s com o
+manche cheio (`RC_VELMAX`).
+
+**A trava de verdade estava no servo do acelerador.** `fva_car/servos.py`
+cortava `velmax` em 1,5 m/s, e o `Car` nem passava a velocidade. Com isso, o PWM
+máximo era 113° (18° acima do neutro), e com o acelerador em 100% o carro não
+passava de ~1,5 m/s (logs de 19/11: máximo 1,56 m/s; saturado, 1,0–1,2 m/s).
+- **Agora:** o `Car` cria os servos com `velmax` 4,5 m/s (PWM até ~146°).
+- **A unidade do comando não mudou:** `u = 1` continua sendo os mesmos 18°. Por
+  isso o feedforward (0,32 + 0,22 v) e o mapa aprendido (`logs/acelerador.json`)
+  valem como antes.
+- **Acima de ~1,5 m/s o comando passa de 1**, até 2,8 no automático. No rádio,
+  o comando continua parando em 1. Na prática, quem decide a velocidade é o menor de:
+
+| limite | valor hoje | de onde vem |
+|---|---|---|
+| teto pedido (GUI / `--speed`) | até 4,0 m/s | nas retas |
+| curva (`curve_lateral_accel` 0,4 m/s²) | √(0,4·R): R = 2 m → 0,9 m/s | prévia de 2,5 m |
+| atraso da visão (0,5 m ÷ idade) | 220 ms → ~2,3 m/s | `latency_speed_budget_m` |
+| parada no alcance do ultrassom | **~2,8 m/s** | `ultrasonic_speed_cap` |
+
+O último é segurança: a 4 m/s, a distância de parada é 6,6 m (0,3 s de reação +
+0,15 s de confirmação + frenagem de 1,75 m/s²), mais que os 4 m que o ultrassom
+alcança. Acima de ~2,8 m/s, um obstáculo só seria visto quando já não desse para
+parar. `--sem-teto-ultrassom` (caixa "Teto pelo ultrassom" na GUI) tira o teto,
+só em pista fechada e sem ninguém na frente. Na pista virtual (10 q/s, 220 ms),
+com o teto em 2,8 m/s, a velocidade média foi de 0,56 para 0,88 m/s na pista
+de 1,3 m, sem toques novos. As curvas seguram o resto. Para ir além, a visão
+precisa ficar mais rápida (menos atraso).
+
+**No carro, subam aos poucos:** 0,7 → 1,0 → 1,5 → 2,0 → 3,0 → 4,0. Confiram em cada passo se
 ele reduz antes das curvas (`preview_speed_m_s` no `car.csv`) e se não abre a
 curva. Se ele chegar rápido demais, aumentem a margem: menor raio
 (`--min-radius 1.2`) ou `coast_deceleration` menor (o carro rola menos do que se
@@ -805,6 +893,155 @@ e só 183 pares em curva à direita.
 **Deixe "Debug de cones" ligado.** Os ensaios de 19/11 vieram sem o
 `cones_debug.jsonl`, e sem ele não há como medir o giro, a vista de cima nem a
 causa de cada batida.
+
+## Ensaios da noite de 19/11 e o que mudou em 24/11
+
+**O que os logs mostraram** (`archive_2411`, voltas de 19/11 a partir das 20 h):
+- **Visão:** ~10 quadros/s andando, imagem com 200–255 ms de idade no controle
+  (processamento de 16 a 115 ms). O controle roda a 48 Hz.
+- **Classificador** desligado na maioria das voltas. Agora vem **ligado por
+  padrão na GUI** (rede de 19/11, `modelos/cones.onnx`: 93,6% de acurácia
+  balanceada com os ensaios fora do treino).
+- **Paradas do ultrassom:** quase todas eram cones de verdade, a 0,05–0,35 m.
+- **Trim** aprendido terminou entre +2,7 e +5,6°.
+- **Alinhamento** (`tools/alinhamento_camera.py`, calibração atual): giro
+  residual de +1,2° (bom). A roda faz **88% da curva pedida à esquerda e 90% à
+  direita** (simétrico): a odometria girava ~11% a mais que o carro. Agora
+  `steering_response: 0.89` corrige a guinada da odometria (previsão do
+  estimador entre quadros e compensação do atraso). O comando do servo não
+  muda.
+- **Velocidade:** presa em ~1,4 m/s pelo atraso (orçamento de 0,3 m). Agora é
+  0,5 m (~2,3 m/s), e o teto vai até 4 m/s (ver "Rápido nas retas").
+
+### Mapa de cones (SLAM) e traçado de margem máxima (SVM)
+
+Ideia dos professores, aplicada em `fva_car/cone_slam.py`,
+`fva_car/svm_path.py` e `fva_car/map_path.py`.
+
+**SLAM (EKF-SLAM de cones).** O estado tem a pose do carro e a posição de cada
+cone, `[x, y, θ, c1x, c1y, …]`, no referencial do mapa.
+- **Previsão:** a odometria do eixo dianteiro. O ruído cresce com o caminho
+  andado.
+- **Medida:** cada cone do quadro, com a covariância da homografia (pequena na
+  direção, grande na distância). Ele é associado ao cone de mesma cor mais
+  próximo pela distância de Mahalanobis, com portão de 99% (χ² = 9,21).
+- **Rever um cone corrige a pose do carro**, ou seja, a deriva da odometria.
+- **Limpeza do mapa:** um cone visto uma vez só e não revisto em 1 s sai
+  (reflexo, falso positivo). Cones mais de 1,2 m atrás do eixo também saem
+  (até 40 no mapa).
+
+O mapa guarda os cones **ao lado e atrás** do carro, que a câmera (0,8–3 m à
+frente) já não vê. No simulador, os cones do mapa ficam a 3–4 cm (mediana) dos
+reais.
+
+**SVM.** A borda esquerda é uma classe (+1), a direita a outra (−1). O SVM de
+kernel RBF acha a fronteira de **margem máxima**, isto é, o caminho mais
+longe dos cones dos dois lados. Detalhes:
+- O SVM é só numpy: o dual com o viés no kernel é resolvido por gradiente
+  projetado. O Raspberry não tem scikit-learn.
+- As bordas são preenchidas entre cones vizinhos a cada 25 cm. Com cones a 1 m,
+  o SVM só com os cones fecha a fronteira em volta de cada um.
+- Com uma borda só, a outra é virtual, a uma largura de distância.
+- Um polinômio que pondera os pontos perto dá (e, rumo, curvatura) no eixo.
+  O traçado só vale se cobrir o eixo: extrapolar 1,5 m dava rumos de 60°.
+
+**Como entra no carro: reserva do estimador** (`cone_map: true`, padrão; caixa
+"Mapa SLAM + traçado SVM" na GUI; `--sem-mapa` desliga):
+- O SLAM roda a cada quadro, ~0,8 ms no notebook.
+- O SVM só roda quando o estimador **perde** o corredor, ~6 ms.
+- Nesse caso, se o mapa tem cones dos dois lados a menos de 2 m, o carro segue
+  devagar pelo traçado do mapa (estado `MAPA`) em vez de parar.
+- O `cones_debug.jsonl` ganha `mapa` com o número de cones no mapa, quantos de
+  cada lado e se o traçado foi usado.
+
+**Por que não no lugar do estimador** (`--mapa-substitui`, só para comparar).
+Na pista virtual, 5 pistas × 4 sementes:
+
+| cenário | estimador (rms / folga mín.) | mapa no lugar | mapa de reserva |
+|---|---|---|---|
+| 12 q/s, 1,3 m | 6,7 cm / 29 cm | 9,0 cm / 7 cm | 6,7 cm / 29 cm |
+| 12 q/s, 1,9 m | 6,6 cm / 41 cm | 13,1 cm / 5 cm | 6,6 cm / 41 cm |
+| ruído + calibração, 1,3 m | 7,0 cm / 27 cm | 9,9 cm / 12 cm | 7,0 cm / 27 cm |
+
+Com cones a 1 m, a corda entre dois cones de fora **corta o arco** da curva, e o
+centro de margem máxima fica 6–15 cm para dentro numa curva fechada. O
+estimador já usa um modelo de pista (clotoide com largura conhecida) e erra
+5–6 cm. Como reserva, nos cenários difíceis (4–7 q/s, iscas, ruído; 72 voltas
+por caso), o mapa ficou empatado com o estimador sozinho (±2 voltas). No carro
+real, comparem com e sem a caixa: o `jsonl` mostra quando o mapa assumiu.
+
+### SVM como classificador de cones (comparação)
+
+O mesmo conjunto da rede (6.400 recortes 32×32 rotulados, validação com
+ensaios inteiros fora do treino) foi testado com **HOG + histograma de cor +
+SVM**:
+
+| classificador | acurácia balanceada | rejeita não-cone | verde | vermelho |
+|---|---|---|---|---|
+| **rede (CNN, 23.891 parâmetros)** | **93,6%** | **87,7%** | 96,3% | 96,9% |
+| HOG + SVM linear | 89,5% | 78,5% | 94,0% | 96,0% |
+| HOG + SVM RBF (4.000 features aleatórias) | 90,4% | 79,0% | 95,8% | 96,4% |
+
+A rede ganha principalmente em rejeitar o que não é cone (batente, reflexo).
+Ela continua sendo a do carro.
+
+## IMU: guinada pelo giroscópio (24/11)
+
+Sem IMU, a guinada do carro vinha do modelo da bicicleta, `v·tan(esterço)/L`,
+com o esterço **comandado**. Nos logs de 19/11 a roda fazia só 88–90% da curva
+pedida, e o pneu escorrega mais quanto mais rápido. A guinada errada entrava na
+previsão do estimador entre quadros, na compensação dos ~220 ms de atraso e no
+mapa (SLAM).
+
+**Como funciona** (`fva_car/yaw_rate.py`, driver `fva_car/imu.py`):
+- **Partida, com o carro parado (~1 s):**
+  - o chip precisa se identificar (WHO_AM_I: MPU-9250/9255/6500/6050);
+  - a gravidade dá o eixo vertical, então a IMU pode estar montada em qualquer
+    posição (de lado, de cabeça para baixo) sem mudar sinal no código;
+  - o giroscópio dá o viés;
+  - o giroscópio é configurado em ±500°/s (3 m/s numa curva de 1 m dão ~170°/s),
+    com filtro interno de 41 Hz e 100 Hz de amostragem;
+  - a leitura é um bloco I2C de 14 bytes, não 12 transações.
+- **Na volta:** a odometria usa a guinada medida, com média de 2 amostras em vez
+  das 10 do modelo, o que tira ~100 ms de atraso da orientação. Parado, o viés é
+  reaprendido devagar (deriva com a temperatura).
+- **Resposta da direção:** em curva, a razão guinada medida / guinada do comando
+  é medida para cada lado. O terminal mostra isso no fim da volta e sugere
+  `--esterco-esquerda/--esterco-direita` se os lados forem diferentes.
+
+**A IMU já queimou uma vez: ela nunca é obrigatória.** Em qualquer falha, o
+`Car` usa o modelo da direção (com `steering_response` 0,89), como antes:
+
+| situação | o que acontece |
+|---|---|
+| sem `smbus`, chip ausente no I2C, WHO_AM_I errado (queimado) | partida sem IMU, aviso amarelo |
+| parado, acelerômetro longe de 1 g, leituras todas iguais, viés > 20°/s, carro mexendo | partida sem IMU, com o motivo |
+| erro de I2C isolado na volta | aquele passo usa o modelo |
+| 10 erros seguidos, leituras idênticas por 1 s (travada) | IMU desligada até o fim da volta |
+| leitura saturada | aquele passo usa o modelo |
+| em curva, guinada medida < 30% da do comando (eixo morto) | IMU desligada até o fim da volta |
+
+O resultado fica em `imu.json`, no `cones_summary.json`, na linha `imu:` do
+relatório do ensaio e na coluna `yaw_from_imu` do `car.csv` (1 = giroscópio).
+`--sem-imu` (caixa "IMU: guinada pelo giroscópio" na GUI) volta ao modelo, para
+comparar.
+
+**Pista virtual** (carro que faz 80–89% da curva pedida, viés de 2° na direção,
+10 q/s com 220 ms de atraso, 5 pistas × 10 sementes):
+
+| cenário | modelo (0,89) | giroscópio |
+|---|---|---|
+| 0,7 m/s, 1,3 m | 7,6 cm rms, 1 toque | 6,2 cm, 0 toques |
+| teto 2,8 m/s, 1,3 m | 8,7 cm, 3 toques, 93% das voltas | 6,4 cm, 0 toques, 100% |
+
+**Amortecimento pela guinada** (`stanley_yaw_damping`, `--amortecer-guinada K`).
+O Stanley ganha o termo `−k·(guinada medida − v·curvatura do caminho)`
+([Stanley em corrida de carros RC](https://arxiv.org/pdf/2408.15152)): o
+giroscópio vê o carro começando a oscilar na hora, enquanto a imagem chega
+~220 ms depois. Na pista virtual, com k de 0,1 a 0,5, o erro médio caiu pouco
+(6,5 → 6,3 cm), mas os toques variaram para os dois lados. Fica **desligado**
+(0). Para testar no carro: `--amortecer-guinada 0.2`, comparando com uma volta
+sem. Sem IMU válida, o termo é zero.
 
 ## Relatório do ensaio e versão do código
 

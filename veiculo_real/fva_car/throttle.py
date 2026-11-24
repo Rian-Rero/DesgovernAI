@@ -22,8 +22,10 @@ U_LIMITS = (.1, .95)
 
 
 class ThrottleMap:
-    def __init__(self, offset, gain, u=None, n=None):
+    def __init__(self, offset, gain, u=None, n=None, u_max=1.):
         self.offset, self.gain = float(offset), float(gain)
+        # Maior comando (servos.Servos.max_command): acima de 1,5 m/s passa de 1.
+        self.u_max = float(u_max)
         self.u = np.full(len(SPEEDS), np.nan) if u is None else np.asarray(u, float).copy()
         self.n = np.zeros(len(SPEEDS), int) if n is None else np.asarray(n, int).copy()
         self.learned_s = 0.  # tempo em regime nesta corrida
@@ -56,7 +58,7 @@ class ThrottleMap:
             return 0.
         known = (self.n >= MIN_SAMPLES) & np.isfinite(self.u)
         if not np.any(known):
-            return float(np.clip(self._base(v), 0., 1.))
+            return float(np.clip(self._base(v), 0., self.u_max))
         speeds, values = SPEEDS[known], self.u[known]
         if v <= speeds[0]:
             value = self._base(v) + values[0] - self._base(speeds[0])
@@ -64,7 +66,7 @@ class ThrottleMap:
             value = self._base(v) + values[-1] - self._base(speeds[-1])
         else:
             value = float(np.interp(v, speeds, values))
-        return float(np.clip(value, 0., 1.))
+        return float(np.clip(value, 0., self.u_max))
 
     def update(self, v, u, dt):
         """Uma amostra em regime: velocidade medida v (m/s) com throttle u."""

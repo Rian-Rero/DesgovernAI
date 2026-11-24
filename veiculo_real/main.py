@@ -29,6 +29,7 @@ from fva_car.lateral import (
 
 MAIN_VEL = 0.7  # m/s: velocidade padrao da missao
 FAST_VEL = 1.5  # m/s: selecionada com --fast
+MAX_VEL = 4.0  # m/s: maior teto aceito em --speed (o Car corta o throttle acima de 4,5)
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20  # folga desejada ate o obstaculo, a partir da FRENTE do pneu
@@ -106,6 +107,23 @@ parameters = {
     # ou os campos da GUI; tools/alinhamento_camera.py mede pelos logs.
     "steering_left_scale": 1.0,
     "steering_right_scale": 1.0,
+    # IMU (MPU-9250 no barramento I2C 4): guinada MEDIDA na odometria em vez do
+    # modelo da direcao (fva_car/yaw_rate.py). Sem o chip, queimado ou falhando
+    # na volta, o Car volta sozinho ao modelo. Na pista virtual (resposta da
+    # direcao 0,80-0,89, 10 q/s): erro de 7,6-8,7 para 6,2-6,5 cm e, com teto de
+    # 2,8 m/s, 3 toques para 0. --sem-imu desliga.
+    "imu": True,
+    "imu_bus": 4,
+    "imu_gyro_range_dps": 500,  # +-500 graus/s: 3 m/s numa curva de 1 m dao ~170
+    # Amortecimento do Stanley pela guinada medida (s): esterco -= k*(guinada -
+    # v*curvatura). Na pista virtual nao deu ganho consistente (0,1-0,5): fica
+    # desligado; --amortecer-guinada K para testar no carro. Sem IMU nao age.
+    "stanley_yaw_damping": 0.0,
+    # Guinada real / guinada do modelo cinematico, na odometria (previsao do
+    # estimador entre quadros e compensacao do atraso). Medido nos logs de 19/11
+    # pelos cones parados (tools/alinhamento_camera.py): 0,88 a esquerda e 0,90
+    # a direita; com 1,0 a odometria girava ~11% a mais que o carro.
+    "steering_response": 0.89,
     # 60 graus/s levava 0,33 s (0,5 m a 1,5 m/s) para chegar ao batente:
     # quase todo o trecho visivel antes da curva.
     "stanley_max_rate_deg_s": 120.0,
@@ -201,7 +219,16 @@ parameters = {
     "obstacle_confirm_s": 0.15,
     # Velocidade limitada pelo atraso da imagem: v <= isto / idade media (m). Com
     # 0,3 s de atraso (ensaios de 10/11) da ~1 m/s; com a visao rapida, nao limita.
-    "latency_speed_budget_m": 0.3,
+    "latency_speed_budget_m": 0.5,
+    # Nucleos do Pi 4: controle (e gravacao/transmissao) em 0-1, processo de visao
+    # em 2-3, sem um roubar o nucleo do outro (fva_car/system_health.py). So com
+    # a visao em processo e 4+ nucleos. False: o sistema escolhe (--sem-nucleos).
+    "cpu_cores": {"control": [0, 1], "vision": [2, 3]},
+    # Temperatura, clock e limitacao do Pi a cada 2 s, no resumo da volta.
+    "health_monitor": True,
+    # Teto pela distancia de parada no alcance do ultrassom (4 m): ~2,8 m/s.
+    # False tira o teto (pista fechada, sem pessoas/paredes na frente).
+    "ultrasonic_speed_cap": True,
     # Centralizacao: em reta (duas bordas) o carro aprende o centro do SERVO
     # (trim), igual para Stanley e pure pursuit; a odometria continua com o
     # esterco pretendido. Nos ensaios de 10/11 o carro andava 2-12 cm a direita.
@@ -236,6 +263,12 @@ parameters = {
     # distancia a 1,7-2,6 m passou a bater com a de 640 px (p90 da diferenca
     # 8-14 cm -> 4-5 cm) por +0,7 ms/quadro no notebook. False desliga.
     "cone_refine_bases": True,
+    # Mapa de cones (EKF-SLAM, fva_car/cone_slam.py) + tracado de margem maxima
+    # (SVM, fva_car/svm_path.py): com o estimador perdido (sem cones aceitos alem
+    # da memoria), o carro segue devagar pelos cones ja mapeados, inclusive os ao
+    # lado e atras, em vez de parar. "substituir": o tracado do mapa vale sempre
+    # (na pista virtual piorou: 6,7 -> 9-13 cm rms). False desliga.
+    "cone_map": True,
     # Mesmo modo de reconstrucao do detector atualizado em tools/yellow_path.py.
     # ROI 0: usa a imagem inteira, como no detector HSV de referencia.
     "path_settings": {"s_min": 25, "dashed": True, "dash_gap": 120, "roi_top": 50},
@@ -395,6 +428,78 @@ def stopping_distance(velocity, confirm_s=0.0):
     )
 
 
+def ultrasonic_speed_cap(confirm_s=0.0, sensor_range=4.0, margin=0.3):
+    """Maior velocidade cuja distancia de parada cabe no alcance do ultrassom.
+
+    Mais rapido que isto, um obstaculo so e visto quando ja nao da para parar
+    antes dele. Com 4 m de alcance, 0,3 s de reacao + 0,15 s de confirmacao e
+    1,75 m/s^2 de frenagem: ~2,8 m/s."""
+    usable = sensor_range - margin
+    low, high = 0.0, 10.0
+    for _ in range(50):
+        middle = (low + high) / 2
+        low, high = (middle, high) if stopping_distance(middle, confirm_s) <= usable else (low, middle)
+    return low
+
+
+def save_health(summary, recorder=None, folder=None):
+    """Saude do Pi na volta: resumo de cones, saude_raspberry.json e terminal."""
+    if recorder is not None:
+        recorder.notes["raspberry"] = summary
+    if isinstance(folder, (str, Path)):
+        try:
+            Path(folder, "saude_raspberry.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    temp, low = summary.get("temp_max_c"), summary.get("freq_min_mhz")
+    print("Raspberry na volta:"
+          + (f" ate {temp:.0f} C" if temp is not None else "")
+          + (f" | clock minimo {low:.0f} MHz" if low is not None else "")
+          + (" | limitado: " + ", ".join(summary["problems_during_run"]) if summary.get("problems_during_run")
+             else " | sem limitacao"), flush=True)
+    for warning in summary.get("warnings", []):
+        print(f"AVISO Raspberry: {warning}", flush=True)
+    return summary
+
+
+def save_imu(car, recorder=None, folder=None, config=None):
+    """Resumo da IMU na volta (resposta da direcao medida) no log e no terminal."""
+    gyro = getattr(car, "gyro", None)
+    status = getattr(car, "imu_status", None)
+    if gyro is None and status is None:
+        return None  # carro simulado/injetado
+    summary = gyro.summary() if gyro is not None else {"ativa": False, "motivo": status}
+    if recorder is not None:
+        recorder.notes["imu"] = summary
+    if isinstance(folder, (str, Path)):
+        try:
+            Path(folder, "imu.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    if gyro is None:
+        print(f"IMU: nao usada nesta volta ({status})", flush=True)
+        return summary
+    response = summary["resposta_direcao"]
+    text = ", ".join(f"{side} {value:.2f}" for side, value in response.items() if value is not None)
+    print(f"IMU: {'ativa' if summary['ativa'] else 'DESLIGADA no meio da volta (' + summary['motivo'] + ')'}"
+          f" | {summary['leituras_usadas']} leituras | {summary['falhas_i2c']} falhas I2C"
+          + (f" | resposta da direcao: {text}" if text else ""), flush=True)
+    values = [v for v in response.values() if v is not None]
+    current = float((config or {}).get("steering_response", 1.0))
+    if values and abs(sum(values)/len(values) - current) > 0.05:
+        print(f"IMU: a roda fez {sum(values)/len(values):.2f} da curva pedida (steering_response hoje"
+              f" {current:.2f}); so importa sem a IMU.", flush=True)
+    left, right = response["esquerda"], response["direita"]
+    if left and right and abs(left - right) > 0.08:
+        # A resposta medida ja inclui as escalas em uso: igualar os lados na media deles.
+        target = (left + right) / 2
+        scales = [float(np.clip(100 * float((config or {}).get(key, 1.0)) * target / value, 50, 150))
+                  for key, value in (("steering_left_scale", left), ("steering_right_scale", right))]
+        print(f"IMU: direcao assimetrica (esq {left:.2f}, dir {right:.2f}): --esterco-esquerda {scales[0]:.0f}"
+              f" --esterco-direita {scales[1]:.0f} igualaria os lados.", flush=True)
+    return summary
+
+
 def stop_vehicle(car):
     """Neutro imediato: set_vel(0) sozinho poderia conservar integral do PI."""
     car._set_ref(0.0)
@@ -437,6 +542,7 @@ def save_vision_snapshot(car, observation, status, now):
             "vision_frame_id": observation.sequence,
             "vision_age_s": finite(now - observation.timestamp),
             "capture_s": finite(observation.capture_seconds),
+            "capture_clock": getattr(observation, "capture_clock", ""),
             "processing_s": finite(observation.processing_seconds),
             "detection_s": finite(observation.detection_seconds),
             "geometry_s": finite(observation.geometry_seconds),
@@ -553,6 +659,18 @@ def follower_config(config, mode, corridor):
     return config
 
 
+def with_safety_speed(config):
+    """safe_speed_m_s do seguidor pelo ultrassom (ultrasonic_speed_cap)."""
+    config = dict(config)
+    if config.get("ultrasonic_speed_cap", True):
+        config["safe_speed_m_s"] = ultrasonic_speed_cap(float(config.get("obstacle_confirm_s", 0.0) or 0.0))
+        if config.get("velocity_reference", 0.0) > config["safe_speed_m_s"]:
+            print(f"Velocidade: teto {config['velocity_reference']:.1f} m/s pedido; o ultrassom (4 m) so"
+                  f" para a tempo ate {config['safe_speed_m_s']:.1f} m/s, que vira o teto efetivo"
+                  " (--sem-teto-ultrassom tira)", flush=True)
+    return config
+
+
 def run_mission(settings=None, display=False, car_factory=None, clock=time.monotonic):
     config = dict(parameters)
     if settings is not None:
@@ -587,6 +705,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             classifier=config.get("cone_classifier"), corridor=corridor,
             line_fusion=bool(config.get("cone_line_fusion", False)),
             refine_bases=bool(config.get("cone_refine_bases", True)),
+            cone_map=config.get("cone_map", False),
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -613,6 +732,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
               + (" (aprendendo nas retas)" if config.get("steering_trim_learning", True) else ""), flush=True)
     if not config.get("steering_trim_learning", True):
         config["centering_gain"] = config["centering_steer_gain"] = 0.0
+    config = with_safety_speed(config)
     follower = RealStanleyFollower(config)
     stream = None
     if config.get("stream_port"):
@@ -628,6 +748,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     # controle. Um carro injetado (testes, simulacao) fornece as proprias
     # imagens por get_image(), entao a visao continua em threads.
     use_process = bool(config.get("vision_process", True)) and car_factory is None
+    control_cores = vision_cores = None
+    if use_process:
+        from fva_car.system_health import core_layout, pin_process
+
+        control_cores, vision_cores = core_layout(config)
+        # Antes de criar as threads de transmissao, gravacao e recepcao: elas herdam.
+        control_cores = pin_process(control_cores) if control_cores else None
     poses = None
     if mode == "cones" or line_estimator_settings(config) is not None:
         # A visao leva o mapa de cones (ou a linha) pela odometria registrada pelo controle.
@@ -644,7 +771,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    classifier=config.get("cone_classifier"),
                                    corridor=corridor_settings(config),
                                    line_fusion=bool(config.get("cone_line_fusion", False)),
-                                   refine_bases=bool(config.get("cone_refine_bases", True)))
+                                   refine_bases=bool(config.get("cone_refine_bases", True)),
+                                   cone_map=config.get("cone_map", False))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -652,7 +780,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    birdseye=bool(config.get("line_birdseye", False)),
                                    estimator=line_estimator_settings(config))
         vision = VisionProcess(vision_data, mode, config["camera_calibration_file"], detector_kwargs,
-                               camera_settings=config.get("camera_settings") or {}, poses=poses)
+                               camera_settings=config.get("camera_settings") or {}, poses=poses,
+                               cpu_cores=vision_cores)
         try:
             # Abre a camera antes dos motores: falha cedo sem mover o carro.
             vision.start()
@@ -660,7 +789,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             if stream is not None:
                 stream.close()
             raise
-        print(f"Visao: processo separado (pid {vision.process.pid})", flush=True)
+        print(f"Visao: processo separado (pid {vision.process.pid})"
+              + (f" | nucleos: controle {control_cores}, visao {getattr(vision, 'cpu_cores', None)}"
+                 if control_cores or getattr(vision, "cpu_cores", None) else ""), flush=True)
     if car_factory is None:
         from fva_car import Car
 
@@ -688,10 +819,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             recorder.notes["options"] = {
                 "classifier": bool(config.get("cone_classifier")),
                 "refine_bases": bool(config.get("cone_refine_bases", True)),
+                "cone_map": config.get("cone_map", False),
                 "old_start": bool(config.get("old_start", False)),
                 "throttle_ff_offset": float(config.get("throttle_ff_offset", 0.32)),
                 "throttle_learning": bool(config.get("throttle_learning", False)),
                 "velocity_reference": float(config.get("velocity_reference", 0.0)),
+                "cpu_cores": {"control": control_cores,
+                              "vision": getattr(vision, "cpu_cores", None)},
             }
         except OSError as error:
             print(f"Debug de cones desativado: {error}", flush=True)
@@ -703,6 +837,17 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     observation = None
     control_status = "Missao ainda nao iniciada"
     last_control_at = None
+    health = None
+    if config.get("health_monitor", True) and car_factory is None:
+        from fva_car.system_health import HealthMonitor
+
+        health = HealthMonitor().start()
+        first = health.samples[0]
+        print("Raspberry: " + " | ".join(part for part in (
+            f"{first['temp_c']:.0f} C" if first.get("temp_c") is not None else "",
+            f"governor {first['governor']}" if first.get("governor") else "",
+            ("LIMITADO desde que ligou: " + ", ".join(first["problems_since_boot"]))
+            if first.get("problems_since_boot") else "sem limitacao") if part), flush=True)
     try:
         car.start_mission()
         print(
@@ -929,6 +1074,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             stop_event.set()
             if stream is not None:
                 stream.close()
+            # Diagnosticos nunca impedem o resto do encerramento (gravacao, visao).
+            try:
+                if health is not None:
+                    save_health(health.stop(), recorder, folder)
+                save_imu(car, recorder, folder, config)
+            except Exception as error:  # noqa: BLE001
+                print(f"Diagnostico do fim da volta falhou: {error}", flush=True)
             if recorder is not None:
                 recorder.close()
             if vision is not None:
@@ -1066,11 +1218,25 @@ def main():
                              " Tranco na partida: baixe; engasga: suba")
     parser.add_argument("--no-refine", action="store_true",
                         help="Cones: sem o refino da base dos cones longe na imagem cheia (comparacao)")
+    parser.add_argument("--sem-teto-ultrassom", action="store_true",
+                        help="Sem o teto de ~2,8 m/s pela distancia de parada no alcance do ultrassom")
+    parser.add_argument("--sem-imu", action="store_true",
+                        help="Guinada pelo modelo da direcao, sem o giroscopio da IMU")
+    parser.add_argument("--amortecer-guinada", type=float, metavar="K",
+                        help="Amortecimento do Stanley pela guinada medida, em s (0 = desligado; teste 0.1-0.3)")
+    parser.add_argument("--sem-nucleos", action="store_true",
+                        help="Nao fixa controle e visao em nucleos separados (o sistema escolhe)")
+    parser.add_argument("--sem-mapa", action="store_true",
+                        help="Cones: sem o mapa SLAM + tracado SVM de reserva (comparacao)")
+    parser.add_argument("--mapa-substitui", action="store_true",
+                        help="Cones: tracado do mapa SLAM + SVM no lugar do estimador sempre (experimento)")
     parser.add_argument("--old-start", action="store_true",
                         help="Partida como antes de 17/11, para comparar (ignora --throttle-offset)")
     parser.add_argument("--navigation", choices=("line", "cones"),
                         help="cones: somente cones (padrao); line: somente linha amarela")
     args = parser.parse_args()
+    if not 0 < args.speed <= MAX_VEL:
+        parser.error(f"--speed deve estar entre 0 e {MAX_VEL} m/s")
     settings = {"velocity_reference": args.speed}
     if args.navigation is not None:
         settings["navigation_mode"] = args.navigation
@@ -1135,6 +1301,20 @@ def main():
         settings["throttle_learning"] = False  # valor fixo para comparar
     if args.no_refine:
         settings["cone_refine_bases"] = False
+    if args.sem_teto_ultrassom:
+        settings["ultrasonic_speed_cap"] = False
+    if args.sem_imu:
+        settings["imu"] = False
+    if args.amortecer_guinada is not None:
+        if not 0 <= args.amortecer_guinada <= 1:
+            parser.error("--amortecer-guinada deve estar entre 0 e 1 s")
+        settings["stanley_yaw_damping"] = args.amortecer_guinada
+    if args.sem_nucleos:
+        settings["cpu_cores"] = False
+    if args.sem_mapa:
+        settings["cone_map"] = False
+    if args.mapa_substitui:
+        settings["cone_map"] = "substituir"
     if args.old_start:
         settings["old_start"] = True
     if args.no_preview:

@@ -164,6 +164,14 @@ class Camera:
 	# captura uma imagem da camera
 	def get_image(self, gray: bool = False):
 		ok, frame = self.cap.read()
+		# Horario do quadro marcado pelo driver (V4L2, CLOCK_MONOTONIC, o mesmo de
+		# time.monotonic): quando ele CHEGOU, sem a espera do read() por ele.
+		# capture_func confere se e plausivel antes de usar.
+		try:
+			stamp = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+		except cv2.error:
+			stamp = 0.0
+		self.frame_time = stamp if stamp > 0 else None
 		if not ok or frame is None:
 			return None
 
