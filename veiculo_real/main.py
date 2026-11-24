@@ -4,6 +4,7 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import queue
 import signal
@@ -30,6 +31,10 @@ from fva_car.lateral import (
 MAIN_VEL = 0.7  # m/s: velocidade padrao da missao
 FAST_VEL = 1.5  # m/s: selecionada com --fast
 MAX_VEL = 4.0  # m/s: maior teto aceito em --speed (o Car corta o throttle acima de 4,5)
+# Missao em andamento: PID para a GUI encerrar (SIGTERM) ou liberar a parada do
+# ultrassom (SIGUSR1) sem reiniciar o programa.
+MISSION_PID_FILE = Path("/tmp/fva_missao.pid")
+RESUME_REQUEST = threading.Event()
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20  # folga desejada ate o obstaculo, a partir da FRENTE do pneu
@@ -44,7 +49,9 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 ULTRASONIC_MIN_VALID_M = 0.03
 
 parameters = {
-    "ts": 30.0,
+    # Duracao maxima da missao (s). Era 30: agora a volta so acaba pelo botao
+    # Encerrar da GUI, Ctrl+C ou --tempo. 30 min.
+    "ts": 1800.0,
     "navigation_mode": "cones",  # somente cones; linha requer selecao explicita
     # Largura/espacamento da pista: so PALPITE inicial (a pista muda a cada dia).
     # O estimador do corredor mede a largura com as duas bordas e passa a usar a
@@ -91,8 +98,17 @@ parameters = {
     # 12 q/s: folga minima ate os cones 20 -> 29 cm e todas as voltas completas
     # (com ruido e erro de calibracao tambem). Em pista larga (>= 1,7 m) piorava:
     # some sozinho acima de racing_full_width_m. 0 desliga.
-    "racing_line_m": 0.10,
+    "racing_line_m": 0.15,
     "racing_inside": 1.0,
+    # Tracado de corrida "apice" (24/11): chega por fora (racing_line_m), converge
+    # para o apice (racing_apex_m para dentro) e compensa o arrasto da traseira
+    # (L^2*kappa/2, ~5 cm em R = 1,25 m). Pista virtual, curvas fechadas, carro
+    # com 85% de resposta e 220 ms: folga mediana aos cones de DENTRO 31,5 ->
+    # 35,8 cm (1,3 m) e 46,9 -> 50,4 cm (1,6 m), todas as voltas. Apice para dentro
+    # (0,05) com 0,25 para fora tirou folga (25 cm): fica 0. "antigo": formula
+    # anterior. --apice M para testar.
+    "racing_mode": "apice",
+    "racing_apex_m": 0.0,
     "stanley_softening": 0.3,
     # Velocidade do termo de deslocamento do Stanley, atan(k*e/(ks + v)), com k e
     # ks fixos: a MEDIDA pelo encoder, filtrada (1a ordem, stanley_speed_filter_s).
@@ -325,6 +341,8 @@ def corridor_settings(config):
         raise ValueError("cone_estimator deve ser True, False ou um dicionario de ajustes.")
     # A pose do Car e do eixo traseiro; os cones tem origem no eixo dianteiro.
     settings = {"pose_offset_m": float(config.get("wheelbase", 0.36)), **value}
+    if config.get("track_width_m"):
+        settings.setdefault("known_width_m", float(config["track_width_m"]))
     if config.get("old_start", False):
         # Criterio antigo: devagar com sigma no eixo > 0,1 m e alvo sem minimo.
         settings.update(slow_sigma_e=0.1, slow_sigma_lateral=99.0, near_sigma_e=99.0)
@@ -498,6 +516,22 @@ def save_imu(car, recorder=None, folder=None, config=None):
         print(f"IMU: direcao assimetrica (esq {left:.2f}, dir {right:.2f}): --esterco-esquerda {scales[0]:.0f}"
               f" --esterco-direita {scales[1]:.0f} igualaria os lados.", flush=True)
     return summary
+
+
+def write_mission_pid(path=MISSION_PID_FILE):
+    try:
+        Path(path).write_text(f"{os.getpid()}\n", encoding="utf-8")
+    except OSError as error:
+        print(f"Aviso: PID da missao nao salvo ({error}); botoes da GUI nao alcancam esta missao.", flush=True)
+
+
+def remove_mission_pid(path=MISSION_PID_FILE):
+    """Apaga o arquivo so se ainda e desta missao (outra pode ter comecado)."""
+    try:
+        if Path(path).read_text(encoding="utf-8").split()[0] == str(os.getpid()):
+            Path(path).unlink()
+    except (OSError, IndexError):
+        pass
 
 
 def stop_vehicle(car):
@@ -909,6 +943,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         last_encoder_valid = None
         t_diagnostic = t_plot - 1.0
         last_diagnostic_sequence = 0
+        if car_factory is None:
+            write_mission_pid()
         while car.t < config["ts"]:
             if not car.step():
                 break
@@ -934,6 +970,19 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             observation = vision_data["observation"]
             echo_ignored = False
             close = (valid and np.isfinite(dist) and ULTRASONIC_MIN_VALID_M <= dist <= stop_distance)
+            if RESUME_REQUEST.is_set():
+                # Botao "Liberar parada" da GUI (SIGUSR1): destrava a parada do
+                # ultrassom. Com o obstaculo ainda na frente, o carro trava de novo
+                # depois da confirmacao, como na primeira vez.
+                RESUME_REQUEST.clear()
+                if obstacle_detected:
+                    obstacle_detected = False
+                    echo_since = None
+                    print("Parada do ultrassom liberada pela interface"
+                          + (f": ATENCAO, o ultrassom ainda le {dist:.2f} m." if close else ": seguindo."),
+                          flush=True)
+                else:
+                    print("Liberar parada: o carro nao estava parado pelo ultrassom.", flush=True)
             if not close:
                 echo_since = None
             if not obstacle_detected and close:
@@ -957,7 +1006,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 if not echo_ignored and (confirm_s <= 0 or float(car.t) - echo_since >= confirm_s):
                     obstacle_detected = True
                     print(
-                        f"Obstaculo a {dist:.2f} m: parada travada ate o fim do ensaio"
+                        f"Obstaculo a {dist:.2f} m: parada travada (botao Liberar parada na GUI)"
                         + (f" ({reason})." if reason else "."),
                         flush=True,
                     )
@@ -1071,6 +1120,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         try:
             stop_vehicle(car)
         finally:
+            if car_factory is None:
+                remove_mission_pid()
             stop_event.set()
             if stream is not None:
                 stream.close()
@@ -1220,6 +1271,12 @@ def main():
                         help="Cones: sem o refino da base dos cones longe na imagem cheia (comparacao)")
     parser.add_argument("--sem-teto-ultrassom", action="store_true",
                         help="Sem o teto de ~2,8 m/s pela distancia de parada no alcance do ultrassom")
+    parser.add_argument("--largura-pista", type=float, metavar="M",
+                        help="Largura da pista medida hoje, de cone a cone (m): o carro ja comeca sabendo")
+    parser.add_argument("--apice", type=float, metavar="M",
+                        help="Na curva, ir ate M metros para dentro (apice); padrao 0")
+    parser.add_argument("--tempo", type=float, metavar="S",
+                        help=f"Duracao maxima da missao em s (padrao {parameters['ts']:.0f}; encerre pela GUI)")
     parser.add_argument("--sem-imu", action="store_true",
                         help="Guinada pelo modelo da direcao, sem o giroscopio da IMU")
     parser.add_argument("--amortecer-guinada", type=float, metavar="K",
@@ -1303,6 +1360,19 @@ def main():
         settings["cone_refine_bases"] = False
     if args.sem_teto_ultrassom:
         settings["ultrasonic_speed_cap"] = False
+    if args.largura_pista is not None:
+        if not .5 <= args.largura_pista <= 3.:
+            parser.error("--largura-pista deve estar entre 0.5 e 3 m")
+        settings["track_width_m"] = args.largura_pista
+        settings["cone_settings"] = {**parameters["cone_settings"], "track_width_cm": round(100*args.largura_pista)}
+    if args.apice is not None:
+        if not 0 <= args.apice <= .3:
+            parser.error("--apice deve estar entre 0 e 0.3 m")
+        settings["racing_apex_m"] = args.apice
+    if args.tempo is not None:
+        if args.tempo <= 0:
+            parser.error("--tempo deve ser positivo (s)")
+        settings["ts"] = float(args.tempo)
     if args.sem_imu:
         settings["imu"] = False
     if args.amortecer_guinada is not None:
@@ -1325,7 +1395,11 @@ def main():
         # A GUI remota encerra com SIGTERM. Usa o mesmo finally do Ctrl+C.
         raise KeyboardInterrupt
 
+    def resume_mission(_signum, _frame):
+        RESUME_REQUEST.set()  # o laco de controle libera a parada no proximo passo
+
     previous_handler = signal.signal(signal.SIGTERM, interrupt_mission)
+    previous_resume = signal.signal(signal.SIGUSR1, resume_mission) if hasattr(signal, "SIGUSR1") else None
     try:
         try:
             run_mission(settings, display=args.display)
@@ -1335,6 +1409,8 @@ def main():
                 f"{error}\nCalibre com veiculo_real/tools/calibrar_camera_lateral.py antes de rodar.\n",
             )
     finally:
+        if previous_resume is not None:
+            signal.signal(signal.SIGUSR1, previous_resume)
         signal.signal(signal.SIGTERM, previous_handler)
 
 

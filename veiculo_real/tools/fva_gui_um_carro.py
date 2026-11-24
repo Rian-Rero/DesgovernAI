@@ -79,7 +79,8 @@ MISSION_DEFAULTS = {
     "cpu_cores": True,            # False: --sem-nucleos (controle e visao sem nucleos fixos)
     "imu": True,                  # False: --sem-imu (guinada pelo modelo da direcao)
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
-    "racing_line": "0.10",        # --abrir-curva (m para fora antes da curva; 0.10 e o padrao do main.py)
+    "racing_line": "0.15",        # --abrir-curva (m para fora antes da curva; 0.15 e o padrao do main.py)
+    "track_width": "",            # --largura-pista (m, medida na trena; vazio: o carro estima)
     "steer_left": "100",          # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
     "steer_right": "100",         # --esterco-direita
     "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
@@ -88,7 +89,8 @@ VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
 STANLEY_GAINS = ("1.5", "2.0", "2.5", "3.0", "3.5")
-RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20")
+RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20", "0.25")
+TRACK_WIDTHS = ("", "1.0", "1.2", "1.3", "1.5", "1.7", "1.9")
 STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
@@ -154,6 +156,12 @@ def build_main_command(options: dict) -> str:
             racing = None
         if racing is not None and 0 <= racing <= .5 and abs(racing - float(MISSION_DEFAULTS["racing_line"])) > 1e-9:
             parts.append(f"--abrir-curva {racing:g}")
+        try:
+            width = float(str(o.get("track_width", "")).replace(",", "."))
+        except ValueError:
+            width = None
+        if width is not None and .5 <= width <= 3.:
+            parts.append(f"--largura-pista {width:g}")
     for key, flag in (("steer_left", "--esterco-esquerda"), ("steer_right", "--esterco-direita")):
         try:
             value = float(str(o[key]).replace(",", "."))
@@ -233,6 +241,37 @@ def remote_log_path(workdir: str, label: str, now=None):
     now = time.localtime() if now is None else now
     folder = posixpath.join(workdir, REMOTE_TERMINAL_DIR, time.strftime("%Y-%m-%d", now))
     return folder, posixpath.join(folder, f"{time.strftime('%Hh%Mm%S', now)}_{label}.log")
+
+
+# Missao em andamento no carro: main.py grava o PID aqui (main.MISSION_PID_FILE).
+MISSION_PID_FILE = "/tmp/fva_missao.pid"
+MISSION_SIGNALS = {"encerrar": "SIGTERM", "liberar": "SIGUSR1"}
+
+
+def mission_signal_command(action: str, pid_file: str = MISSION_PID_FILE) -> str:
+    """Comando (no carro) que manda o sinal da acao ao main.py em andamento.
+
+    Codigo de saida: 0 enviado (imprime o PID), 2 nenhuma missao rodando. So
+    sinaliza se o PID do arquivo ainda e um main.py (PID reaproveitado nao)."""
+    signal_name = MISSION_SIGNALS[action]
+    code = (
+        "import os, signal, sys\n"
+        "try:\n"
+        f"    pid = int(open({pid_file!r}).read().split()[0])\n"
+        "    cmdline = open('/proc/%d/cmdline' % pid, 'rb').read()\n"
+        "except (OSError, ValueError, IndexError):\n"
+        "    sys.exit(2)\n"
+        "if b'main.py' not in cmdline:\n"
+        "    sys.exit(2)\n"
+        f"os.kill(pid, signal.{signal_name})\n"
+        "print(pid)\n"
+    )
+    return f"python3 -c {shlex.quote(code)}"
+
+
+def mission_alive_command(pid: int) -> str:
+    """Comando que sai com 0 enquanto o processo `pid` existe."""
+    return f"test -d /proc/{int(pid)}"
 
 
 def command_label(command: str) -> str:
@@ -1144,6 +1183,18 @@ class RsyncGUI(tk.Tk):
         ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
+            cmd_buttons, text="⏹ Encerrar missão", command=lambda: self.mission_action("encerrar")
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            cmd_buttons, text="🔄 Reiniciar missão", command=lambda: self.mission_action("reiniciar")
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            cmd_buttons, text="🔓 Liberar parada", command=lambda: self.mission_action("liberar")
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
             cmd_buttons, text="Ver câmera", command=self.open_camera_stream
         ).pack(side="left", padx=(0, 6))
 
@@ -1326,6 +1377,9 @@ class RsyncGUI(tk.Tk):
         self.gain_combo.pack(side="left", padx=(4, 8))
         ttk.Label(throttle, text="Abrir na curva (m):").pack(side="left", padx=(8, 0))
         ttk.Combobox(throttle, textvariable=self.mission_vars["racing_line"], values=RACING_LINES,
+                     width=5).pack(side="left", padx=(4, 8))
+        ttk.Label(throttle, text="Largura da pista (m):").pack(side="left", padx=(8, 0))
+        ttk.Combobox(throttle, textvariable=self.mission_vars["track_width"], values=TRACK_WIDTHS,
                      width=5).pack(side="left", padx=(4, 8))
         steering = ttk.Frame(box)
         steering.pack(fill="x", padx=6, pady=(0, 4))
@@ -2978,6 +3032,58 @@ class RsyncGUI(tk.Tk):
         threading.Thread(
             target=self._run_remote_cmds, args=(targets, cmds), daemon=True
         ).start()
+
+    ########################################
+    def mission_action(self, action):
+        """Encerrar, reiniciar ou liberar a parada do ultrassom da missao em andamento."""
+        targets = self.get_selected_devices()
+        if not targets:
+            messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.")
+            return
+        threading.Thread(target=self._mission_action, args=(targets, action), daemon=True).start()
+
+    def _mission_action(self, targets, action):
+        report = lambda text: self.ui(self.cmdlog_write, text)
+        for name, ip in targets:
+            client = None
+            try:
+                client = self._connect_ssh(ip)
+                signal_action = "liberar" if action == "liberar" else "encerrar"
+                _, out, _ = client.exec_command(mission_signal_command(signal_action), timeout=10)
+                text = out.read().decode(errors="replace").strip()
+                code = out.channel.recv_exit_status()
+                if code == 2:
+                    report(f"ℹ️ {name.upper()}: nenhuma missão rodando.")
+                    if action != "reiniciar":
+                        continue
+                elif code != 0:
+                    report(f"⚠️ {name.upper()}: não foi possível sinalizar a missão (código {code}).")
+                    continue
+                elif action == "liberar":
+                    report(f"🔓 {name.upper()}: parada do ultrassom liberada (se o obstáculo continuar na"
+                           " frente, o carro trava de novo).")
+                    continue
+                else:
+                    report(f"⏹ {name.upper()}: encerrando a missão (salvando logs)...")
+                    pid = int(text.split()[-1])
+                    deadline = time.monotonic() + 20.
+                    while time.monotonic() < deadline:
+                        _, alive, _ = client.exec_command(mission_alive_command(pid), timeout=10)
+                        if alive.channel.recv_exit_status() != 0:
+                            break
+                        time.sleep(.5)
+                    else:
+                        report(f"⚠️ {name.upper()}: a missão não terminou em 20 s.")
+                        continue
+                    report(f"✅ {name.upper()}: missão encerrada.")
+                if action == "reiniciar":
+                    report(f"🔄 {name.upper()}: iniciando de novo com o comando da caixa.")
+                    self.ui(self.run_cmds_on_selected)
+            except Exception as exc:
+                report(f"❌ {name.upper()}: {exc}")
+            finally:
+                if client is not None:
+                    client.close()
 
     ########################################
     def flash_arduino(self):

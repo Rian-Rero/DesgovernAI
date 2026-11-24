@@ -350,6 +350,56 @@ class HairpinSideTests(unittest.TestCase):
         self.assertFalse(tracker.green_left)
 
 
+class RoundaboutSideTests(unittest.TestCase):
+    """Rotatoria (24/11): cones de outras vias nao trocam as cores; troca real nao para o carro."""
+    def corridor(self):
+        from fva_car.corridor import CorridorEstimator, CorridorSettings
+        green = np.array([[1., .65], [1.5, .65], [2., .65], [2.5, .65]])
+        red = np.array([[1., -.65], [1.5, -.65], [2., -.65], [2.5, -.65]])
+        estimator = CorridorEstimator(CorridorSettings(track_width_m=1.3))
+        for k in range(5):
+            estimator.step(.1*k, green, red, (0., 0., 0.) if k else None)
+        return estimator, green, red
+
+    def test_cones_of_another_road_seen_through_a_gap_do_not_vote(self):
+        from fva_car.cones import SIDE_FLIP_FRAMES_TRACKING, SideTracker, path_separation
+        estimator, _, red = self.corridor()
+        # Verdes da via de saida, BEM fora do anel, a direita (~1,6 m do centro).
+        far_green = np.array([[1.5, -1.6], [2., -1.7], [2.5, -1.6]])
+        self.assertIsNone(path_separation(far_green, red, estimator.x))
+        tracker = SideTracker()
+        tracker.green_left = True
+        flips = [tracker.update(far_green, red, estimator, True)[2] for _ in range(3*SIDE_FLIP_FRAMES_TRACKING)]
+        self.assertFalse(any(flips))
+        self.assertTrue(tracker.green_left)
+
+    def test_real_color_swap_keeps_the_corridor(self):
+        from fva_car.cones import handle_side_flip
+        estimator, _, _ = self.corridor()
+        before = estimator.x.copy()
+        width = estimator.learned_width
+        info = {'source': 'corredor'}
+        self.assertFalse(handle_side_flip(estimator, info))
+        self.assertTrue(info['kept_state'])
+        np.testing.assert_allclose(estimator.x, before)       # mesma geometria
+        self.assertEqual(estimator.learned_width, width)
+        self.assertAlmostEqual(math.sqrt(estimator.P[0, 0]), .3)  # so o deslocamento fica mais incerto
+        info = {'source': 'pares'}                              # sem corredor: montado com as cores trocadas
+        self.assertTrue(handle_side_flip(estimator, info))
+        self.assertIsNone(estimator.x)
+        self.assertIsNone(estimator.learned_width)
+
+
+class VirtualRoundaboutTests(unittest.TestCase):
+    def test_no_false_color_flips_in_a_roundabout(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools'))
+        import pista_virtual as pv
+        track = pv.build_track(pv.ROUNDABOUTS['rotatoria'], 1.3, None, 1., rng=np.random.default_rng(100))
+        result = pv.run(track, pv.base_config({'steering_law': 'stanley'}), seed=0, fps=10., latency=(.19, .25),
+                        color_sides=True, duration=25.)
+        self.assertEqual(result['side_flips'], 0)
+
+
 class FarBaseRefinementTests(unittest.TestCase):
     """Base dos cones longe refeita na imagem cheia (fva_car/cones.py refine_bases)."""
     def setUp(self):

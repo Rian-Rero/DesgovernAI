@@ -279,3 +279,20 @@ class FollowerSpeedFactorTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class KnownWidthTests(unittest.TestCase):
+    """--largura-pista (24/11): o estimador comeca sabendo W e nao foge dele."""
+    def test_known_width_overrides_the_start_pair_and_bounds_learning(self):
+        settings = CorridorSettings(track_width_m=1.3, known_width_m=1.3)
+        estimator = CorridorEstimator(settings)
+        self.assertEqual(estimator.learned_width, 1.3)
+        # Par de partida mal medido (1,8 m): a largura nao vem dele.
+        left, right = np.array([[1.5, .9], [2.5, .9]]), np.array([[1.5, -.9], [2.5, -.9]])
+        for k in range(20):
+            estimator.step(.1*k, left, right, (0., 0., 0.) if k else None)
+        self.assertLessEqual(estimator.learned_width, 1.3*1.15 + 1e-9)
+        estimator.learned_width = 9.
+        estimator.forget_width()
+        self.assertEqual(estimator.learned_width, 1.3)
+        self.assertIsNone(CorridorEstimator(CorridorSettings()).learned_width)

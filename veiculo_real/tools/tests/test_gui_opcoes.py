@@ -4,6 +4,7 @@ import itertools
 from pathlib import Path
 import shlex
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -110,9 +111,13 @@ class MissionOptionsTests(unittest.TestCase):
     def test_steering_scales_and_curve_opening_reach_main(self):
         self.assertFalse({"steering_left_scale", "steering_right_scale", "racing_line_m"}
                          & set(parsed(gui.build_main_command({}))))
-        settings = parsed(gui.build_main_command({"steer_left": "90", "steer_right": "105", "racing_line": "0.15"}))
+        settings = parsed(gui.build_main_command({"steer_left": "90", "steer_right": "105", "racing_line": "0.20",
+                                                  "track_width": "1,3"}))
         self.assertEqual((settings["steering_left_scale"], settings["steering_right_scale"], settings["racing_line_m"]),
-                         (.9, 1.05, .15))
+                         (.9, 1.05, .2))
+        self.assertEqual(settings["track_width_m"], 1.3)
+        self.assertEqual(settings["cone_settings"]["track_width_cm"], 130)
+        self.assertNotIn("--largura-pista", gui.build_main_command({"track_width": ""}))
         self.assertNotIn("--esterco-esquerda", gui.build_main_command({"steer_left": "abc"}))
 
     def test_only_main_lines_are_rewritten(self):
@@ -375,3 +380,46 @@ class CollectTerminalLogsTests(unittest.TestCase):
             self.assertRegex(on_car[0].name, r"^\d\dh\d\dm\d\d_missao_cones_1\.5ms_stanley\.log$")
             self.assertIn("Encoder: leitura OK.", on_car[0].read_text(encoding="utf-8"))
             self.assertEqual([p.name for p in collected], [on_car[0].name])
+
+
+class MissionControlTests(unittest.TestCase):
+    """Botoes Encerrar / Liberar parada: o comando roda no carro (aqui, localmente)."""
+    def setUp(self):
+        import subprocess
+        import tempfile
+        self.folder = Path(tempfile.mkdtemp())
+        self.pid_file = self.folder/"missao.pid"
+        (self.folder/"main.py").write_text(
+            "import os, signal, sys, time\n"
+            f"open({str(self.pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            f"signal.signal(signal.SIGUSR1, lambda *_: open({str(self.folder/'liberado')!r}, 'w').write('1'))\n"
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+            "while True:\n    time.sleep(.05)\n")
+        self.process = subprocess.Popen([sys.executable, str(self.folder/"main.py")])
+        self.addCleanup(self.process.kill)
+        deadline = time.monotonic() + 10
+        while not self.pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+
+    def run_remote(self, command):
+        import subprocess
+        return subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=10)
+
+    def test_release_then_stop(self):
+        result = self.run_remote(gui.mission_signal_command("liberar", str(self.pid_file)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deadline = time.monotonic() + 5
+        while not (self.folder/"liberado").exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue((self.folder/"liberado").exists())
+        self.assertIsNone(self.process.poll())       # liberar nao encerra
+        result = self.run_remote(gui.mission_signal_command("encerrar", str(self.pid_file)))
+        self.assertEqual(int(result.stdout), self.process.pid)
+        self.process.wait(5)
+        self.assertNotEqual(self.run_remote(gui.mission_alive_command(self.process.pid)).returncode, 0)
+
+    def test_nothing_running(self):
+        self.process.kill()
+        self.process.wait(5)
+        self.assertEqual(self.run_remote(gui.mission_signal_command("encerrar", str(self.pid_file))).returncode, 2)
+        self.assertEqual(self.run_remote(gui.mission_signal_command("liberar", str(self.folder/"nada.pid"))).returncode, 2)

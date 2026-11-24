@@ -824,6 +824,17 @@ class RealStanleyFollower:
         # a borda de dentro da imagem na pista virtual).
         self.racing_full_width = positive('racing_full_width_m', 1.3)
         self.racing_zero_width = positive('racing_zero_width_m', 1.7)
+        # Tracado de corrida (24/11, racing_mode "apice"; "antigo" = formula acima):
+        # chega por FORA (racing_line_m), converge para o APICE dentro da curva
+        # (racing_apex_m para dentro, limitado pela folga aos cones de dentro) e
+        # compensa o arrasto da traseira (L^2*kappa/2: a roda de tras passa por
+        # dentro da da frente; o Stanley controla so o eixo dianteiro).
+        self.racing_mode = self.settings.get('racing_mode', 'antigo')
+        if self.racing_mode not in ('antigo', 'apice'):
+            raise ValueError('racing_mode deve ser "apice" ou "antigo".')
+        self.racing_apex = nonnegative('racing_apex_m', 0.)
+        self.racing_half_car = nonnegative('racing_half_car_m', .13)
+        self.racing_offtrack = self.settings.get('racing_offtracking', True)
         self.racing_offset = 0.
         # Centralizacao: integral do erro lateral vira um esterco de correcao
         # (trim), igual para Stanley e pure pursuit. Corrige vies fixo (centro
@@ -909,21 +920,64 @@ class RealStanleyFollower:
 
     def _racing_line_offset(self, curvature, observation, dt):
         """Deslocamento desejado do carro em relacao ao centro (m, esquerda +)."""
-        if self.racing_line <= 0 or not math.isfinite(self.path_dkappa):
+        if (not math.isfinite(self.path_dkappa)
+                or self.racing_line <= 0 and (self.racing_mode == 'antigo' or not self.racing_offtrack)
+                and self.racing_apex <= 0):
             self.racing_offset = 0.
             return 0.
+        width = getattr(observation, 'corridor_width_m', math.nan)
+        known = isinstance(width, (int, float, np.number)) and math.isfinite(width)
+        if self.racing_mode == 'apice':
+            return self._apex_line_offset(curvature, width if known else math.nan, dt)
         arcs = np.linspace(.5, 1.5, 6)
         ahead = curvature + self.path_dkappa*arcs
         ahead = float(ahead[np.argmax(np.abs(ahead))])
         sat = lambda value: float(np.clip(value/self.racing_curvature, -1., 1.))
         target = self.racing_line*(self.racing_inside*sat(curvature) - sat(ahead))
-        width = getattr(observation, 'corridor_width_m', math.nan)
-        known = isinstance(width, (int, float, np.number)) and math.isfinite(width)
         room = max(0., width/2 - .13 - self.racing_margin) if known else 0.
         if known and self.racing_zero_width > self.racing_full_width:
             target *= float(np.clip((self.racing_zero_width - width)/(self.racing_zero_width - self.racing_full_width),
                                     0., 1.))
         target = float(np.clip(target, -room, room))
+        if self.racing_filter > 0:
+            self.racing_offset += (1. - math.exp(-float(dt)/self.racing_filter))*(target - self.racing_offset)
+        else:
+            self.racing_offset = target
+        return self.racing_offset
+
+    def _apex_line_offset(self, curvature, width, dt):
+        """Fora -> apice -> centro, pela clotoide do estimador (m, carro a esquerda +).
+
+        kappa(s) = kappa + dkappa*s nos proximos 2 m. Com a curva ainda a frente
+        (|kappa| no eixo bem menor que o pico), o peso de ENTRADA leva o carro para
+        fora; dentro dela, o peso de CURVA leva ao apice. Os dois limites vem da
+        largura: para fora ate a borda de fora menos o carro e a margem; para
+        dentro ate a borda de dentro menos o carro, a margem e o arrasto da
+        traseira."""
+        arcs = np.linspace(0., 2., 11)
+        profile = np.clip(curvature + self.path_dkappa*arcs, -self.max_curvature, self.max_curvature)
+        peak = float(profile[np.argmax(np.abs(profile))])
+        here = float(np.clip(curvature, -self.max_curvature, self.max_curvature))
+        if abs(peak) < 1e-3:
+            target = 0.
+        else:
+            sign = math.copysign(1., peak)
+            sat = lambda value: float(np.clip(abs(value)/self.racing_curvature, 0., 1.))
+            entry = sat(peak)*float(np.clip((abs(peak) - abs(here))/abs(peak), 0., 1.))
+            bend = sat(here)*(1. - entry)
+            offtrack = self.controller.wheelbase**2*abs(here)/2 if self.racing_offtrack else 0.
+            target = sign*(-self.racing_line*entry + self.racing_apex*bend) - sign*offtrack
+            if math.isfinite(width):
+                outside = max(0., width/2 - self.racing_half_car - self.racing_margin)
+                inside = max(0., width/2 - self.racing_half_car - self.racing_margin - offtrack)
+                if self.racing_zero_width > self.racing_full_width:
+                    fade = float(np.clip((self.racing_zero_width - width)
+                                         / (self.racing_zero_width - self.racing_full_width), 0., 1.))
+                    target = sign*(-(self.racing_line*entry*fade) + self.racing_apex*bend*fade) - sign*offtrack
+                # sign*target > 0: para dentro; < 0: para fora.
+                target = sign*float(np.clip(sign*target, -outside, inside))
+            else:
+                target = -sign*offtrack  # sem largura conhecida: so o arrasto
         if self.racing_filter > 0:
             self.racing_offset += (1. - math.exp(-float(dt)/self.racing_filter))*(target - self.racing_offset)
         else:

@@ -867,7 +867,7 @@ arquivo novo (`logs/direcao_trim_v2.json`); o antigo não é mais lido.
   de partida do ajuste vem dele: centro no meio, largura entre os dois. Na
   primeira partida, usa o par mais parecido com um portão (mesma distância à
   frente).
-- **Trajetória de curva** (`racing_line_m` 0,10, `racing_inside` 1;
+- **Trajetória de curva** (até 24/11: `racing_line_m` 0,10, `racing_inside` 1; ver "Curvas fechadas" abaixo;
   `--abrir-curva`, campo "Abrir na curva" na GUI). Com uma curva chegando (pela
   clotoide do estimador, de 0,5 a 1,5 m), a referência vai até 10 cm para
   **fora**: o carro abre antes da curva, vê mais cones dela e entra com folga do
@@ -1042,6 +1042,92 @@ giroscópio vê o carro começando a oscilar na hora, enquanto a imagem chega
 (6,5 → 6,3 cm), mas os toques variaram para os dois lados. Fica **desligado**
 (0). Para testar no carro: `--amortecer-guinada 0.2`, comparando com uma volta
 sem. Sem IMU válida, o termo é zero.
+
+## Ensaios de 24/11 à noite: curvas, rotatória e controle da missão
+
+### Controle da missão pela GUI
+
+- **Duração:** a missão dura até 30 min (`ts` 1800; era 30 s). `--tempo S`
+  muda a duração.
+- **⏹ Encerrar missão:** manda `SIGTERM` ao `main.py`, que para o carro e salva
+  tudo, como o Ctrl+C.
+- **🔄 Reiniciar missão:** encerra, espera o fim (até 20 s) e roda de novo o
+  comando da caixa.
+- **🔓 Liberar parada:** o ultrassom travava o carro até o fim da missão. O
+  botão manda `SIGUSR1` e destrava. Se o obstáculo continuar na frente, o carro
+  trava de novo depois da confirmação (0,15 s), por segurança.
+
+O `main.py` grava o próprio PID em `/tmp/fva_missao.pid`. A GUI só sinaliza se
+esse PID ainda for um `main.py`, nunca outro processo que tenha reaproveitado o
+número.
+
+### Curvas fechadas: chegar por fora, convergir para o ápice
+
+Nos logs de 24/11 o carro passava a curva 5–9 cm **por dentro** do alvo e
+encostava nos cones de dentro. Em 55–63% do tempo ele via só a borda de fora.
+Três causas:
+- **O traçado antigo** abria só 4–6 cm antes da curva e, na saída, fechava para
+  dentro.
+- **A traseira** passa por dentro da dianteira (L²κ/2, ~5 cm numa curva de
+  R = 1,25 m), e o Stanley controla só o eixo dianteiro.
+- **A largura da pista** era medida pelo primeiro par de cones: 1,10 m numa volta
+  e 1,88 m na seguinte, na mesma pista. Vendo só a borda de fora, com 1,68 m o
+  centro vai ~20 cm para dentro.
+
+**Traçado "ápice"** (`racing_mode: "apice"`, padrão):
+- **Antes da curva:** a referência vai até `racing_line_m` (0,15 m) para
+  **fora**. O carro chega aberto, faz a curva com raio maior e vê mais cones
+  dela.
+- **Dentro da curva:** converge para o ápice, até `racing_apex_m` para dentro,
+  limitado pela folga aos cones de dentro e com o arrasto da traseira
+  compensado.
+- **Na saída:** com a curvatura caindo, volta ao centro.
+
+Pista virtual (curvas fechadas, 85% de resposta da direção, 220 ms de atraso,
+16 sementes). A folga é medida na **carroceria inteira**, do eixo traseiro à
+frente, não só no eixo dianteiro:
+
+| pista | folga mediana aos cones de dentro: antes → agora | voltas completas |
+|---|---|---|
+| 1,3 m | 31,5 → **35,8 cm** | 98% → **100%** |
+| 1,6 m | 46,9 → **50,4 cm** | 97% → 98% |
+
+Levar o carro de fato para dentro no ápice (0,05 m, com 0,25 m para fora) tirou
+folga (25 cm). Por isso o ápice fica em 0 por padrão. `--apice 0.05` testa, e
+`--abrir-curva` (campo "Abrir na curva" na GUI) muda a abertura.
+
+**Largura da pista medida** (`--largura-pista 1.3`, campo "Largura da pista" na
+GUI): o estimador já começa sabendo a largura e a aprendida não sai de ±15%
+dela. Meçam com a trena de cone a cone. Vazio, o carro estima como antes.
+
+### Rotatória: cores e engasgo
+
+Pista virtual com rotatórias de rua (entrada virando à direita, volta inteira
+na ilha, saída) e a **mesma decisão de cor do carro**:
+- **Antes:** o carro "trocava as cores" 29 vezes em 36 voltas. De dentro do anel,
+  ele via pelas aberturas os cones verdes das vias de entrada e saída do lado de
+  fora (à direita), concluía que o verde era a borda direita e, a cada troca,
+  recomeçava o estimador do zero. Ficava "perdido" e parava: o engasgo.
+- **Agora:**
+  - só votam cones na faixa de uma borda (20–85% da largura até o centro);
+  - uma troca decidida pelo corredor mantém a geometria (só a cor de cada borda
+    muda) e não recomeça mais;
+  - uma troca na partida, sem corredor, ainda recomeça, porque ali o estado foi
+    montado com as cores trocadas.
+
+| 36 voltas em rotatórias | antes | agora | cores ideais |
+|---|---|---|---|
+| trocas de cor | 29 | **0** | 0 |
+| paradas | 23 | **8** | 8 |
+| percurso feito | 39% | **51%** | 51% |
+
+Nas pistas normais, nada mudou. **O que ainda falta:**
+- **Sair da rotatória:** é uma decisão. De dentro do anel, continuar girando e
+  pegar a saída são os dois caminhos válidos, e o carro não tem regra para
+  escolher; as voltas que falham no simulador falham ali.
+- **Ilha de cor trocada:** se a ilha tiver a cor oposta à da borda esquerda da
+  entrada, o carro não percebe a troca, porque dentro do anel vê quase só a borda
+  de fora.
 
 ## Relatório do ensaio e versão do código
 

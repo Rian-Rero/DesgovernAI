@@ -105,9 +105,26 @@ def refine_bases(frame, points, color, detector, settings, scale, light=None, gr
     return out, changed
 
 
-def path_separation(green, red, state, max_curvature=2.):
-    """Distancia a linha central (esquerda +) mediana do verde - a do vermelho, no corredor `state`."""
+# So votam no lado de cada cor os cones NA FAIXA de uma borda: distancia a linha
+# central entre estas fracoes da largura (a borda fica em 0,5). Numa rotatoria, de
+# dentro do anel o carro ve pelas aberturas os cones das vias de entrada e saida
+# BEM fora do anel (do lado de fora, a direita, com a cor da esquerda); antes
+# eles votavam e trocavam as cores 4-10 vezes por volta na pista virtual.
+SIDE_BORDER_BAND = (.2, .85)
+
+
+def path_separation(green, red, state, max_curvature=2., width=None):
+    """Distancia a linha central (esquerda +) mediana do verde - a do vermelho, no corredor `state`.
+
+    So com cones na faixa das bordas (SIDE_BORDER_BAND) da largura `width` (padrao:
+    a do estado; o SideTracker passa a nominal, porque um estado montado com as
+    cores trocadas tem largura sem sentido); None sem cones assim das duas cores.
+    Uma cor so nao vota: com uma borda so, um corredor ja montado com as cores
+    trocadas se confirma sozinho (testado na pista virtual: nao ajudou)."""
     from .corridor import offsets
+    if width is None or not math.isfinite(width) or width <= 0:
+        width = float(state[4]) if len(state) > 4 and math.isfinite(state[4]) and state[4] > 0 else 1.
+    low, high = SIDE_BORDER_BAND[0]*width, SIDE_BORDER_BAND[1]*width
     medians = []
     for points in (green, red):
         points = np.asarray(points, float).reshape(-1, 2)
@@ -115,7 +132,7 @@ def path_separation(green, red, state, max_curvature=2.):
         if not len(points):
             return None
         d, along, _, _ = offsets(points, state, max_curvature=max_curvature)
-        keep = (along > -.6) & (along < 4.)
+        keep = (along > -.6) & (along < 4.) & (np.abs(d) >= low) & (np.abs(d) <= high)
         if not np.any(keep):
             return None
         medians.append(float(np.median(d[keep])))
@@ -136,7 +153,8 @@ class SideTracker:
         """(verde a esquerda?, debug, trocou?)."""
         state = None if estimator is None else estimator.x
         if state is not None:
-            separation = path_separation(green, red, state, estimator.settings.max_curvature)
+            separation = path_separation(green, red, state, estimator.settings.max_curvature,
+                                         getattr(estimator, 'nominal_width', None))
             paired, source = True, 'corredor'
             threshold = max(SIDE_MIN_SEPARATION_M, .5*float(state[4]))
             needed = SIDE_FLIP_FRAMES_TRACKING
@@ -160,6 +178,27 @@ class SideTracker:
                             else round(separation, 3), 'paired': bool(paired), 'flipped': bool(flipped),
                             'source': 'detector' if self.green_left is None else source,
                             'contrary': self.contrary}, flipped
+
+
+def handle_side_flip(estimator, info, cone_map=None):
+    """As cores trocaram de lado: o que fazer com o estimador do corredor.
+
+    Decidido pelo proprio corredor (fonte 'corredor'), a GEOMETRIA continua certa
+    e so a cor de cada borda mudou (ilha de rotatoria de outra cor, trecho com as
+    cores invertidas): mantem o estado e a largura, so abre a incerteza do
+    deslocamento. Antes recomecava do zero: estado PERDIDO, carro parado ate
+    juntar cones de novo (o "engasgo"). Sem corredor (pares de cones na partida),
+    o estado foi montado com as cores trocadas: recomeca, como antes."""
+    if info.get('source') == 'corredor' and estimator.x is not None:
+        estimator.relax()
+        info['kept_state'] = True
+        return False
+    estimator.reset()
+    estimator.forget_width()
+    if cone_map is not None:
+        cone_map.reset()
+    info['kept_state'] = False
+    return True
 
 
 def side_evidence(green, red, max_range=SIDE_MAX_RANGE_M):
@@ -412,11 +451,7 @@ class RealConeDetector:
         """Verde a esquerda? Pela geometria dos cones deste quadro, com histerese."""
         green_left, info, flipped = self.sides.update(green, red, self.corridor, fallback)
         if flipped:
-            # Estado montado com as cores trocadas nao serve: recomeca, sem a largura.
-            self.corridor.reset()
-            self.corridor.learned_width = None
-            if self.map is not None:
-                self.map.reset()
+            handle_side_flip(self.corridor, info, self.map)
         return green_left, info
 
     def _line_points(self, frame, timestamp):

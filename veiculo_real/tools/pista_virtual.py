@@ -48,6 +48,30 @@ CALIBRATION = ROOT/'calibracao'/'camera_lateral.json'
 WHEELBASE = .36
 STEER_MAX = math.radians(20.)
 CAR_HALF_WIDTH = .13
+CONE_RADIUS = .05  # meia base do cone (10,5 cm)
+# Carroceria: do eixo traseiro ate a frente do pneu dianteiro (7 cm adiante do eixo).
+BODY_REAR, BODY_FRONT = -.05, WHEELBASE + .07
+
+
+def body_clearance(x, y, th, cones):
+    """(folga minima carroceria-cone em m, lado do cone: +1 esquerda / -1 direita).
+
+    O carro e um segmento do eixo traseiro a frente, engrossado pela meia largura;
+    numa curva fechada a traseira passa por DENTRO da dianteira (~L^2/2R), o que
+    a folga so no eixo dianteiro nao via."""
+    c, s = math.cos(th), math.sin(th)
+    d = cones - (x, y)
+    along = c*d[:, 0] + s*d[:, 1]
+    side = -s*d[:, 0] + c*d[:, 1]
+    near = (along > BODY_REAR - .5) & (along < BODY_FRONT + .5) & (np.abs(side) < 1.)
+    if not np.any(near):
+        return math.inf, 0
+    along, side = along[near], side[near]
+    gap_along = np.maximum(0., np.maximum(BODY_REAR - along, along - BODY_FRONT))
+    gap_side = np.maximum(0., np.abs(side) - CAR_HALF_WIDTH)
+    distance = np.hypot(gap_along, gap_side) - CONE_RADIUS
+    k = int(np.argmin(distance))
+    return float(distance[k]), (1 if side[k] > 0 else -1)
 
 # (nome, segmentos): ('reta', comprimento) ou ('curva', raio com sinal (esquerda +), angulo em graus)
 TRACKS = {
@@ -62,6 +86,31 @@ TRACKS = {
     # Pista dos ensaios de 10/11: curvas de raio ~1,2 m (kappa 0,8), largura ~1,3 m.
     'fechada': [('reta', 6.), ('curva', 1.25, 180), ('reta', 4.), ('curva', -1.25, 90), ('reta', 5.)],
 }
+# Rotatorias: chega reto, vira 60 graus a direita para entrar no anel, da a volta inteira
+# na ilha (sentido anti-horario: ilha a esquerda) e sai virando a direita, como
+# numa rotatoria de rua. Os cones que cairiam dentro da faixa de outro trecho
+# (entrada e saida cruzando o anel) sao tirados, como as aberturas de uma
+# rotatoria real (build_track clear_crossings). Fora de TRACKS para nao mudar as
+# comparacoes antigas.
+ROUNDABOUTS = {
+    'rotatoria': [('reta', 4.), ('curva', -2.0, 60), ('curva', 2.0, 360), ('curva', -2.0, 60), ('reta', 4.)],
+    'rotatoria_horaria': [('reta', 4.), ('curva', 2.0, 60), ('curva', -2.0, 360), ('curva', 2.0, 60), ('reta', 4.)],
+    'rotatoria_fechada': [('reta', 4.), ('curva', -1.6, 60), ('curva', 1.5, 360), ('curva', -1.6, 60), ('reta', 4.)],
+}
+
+
+def ring_arc(segments):
+    """(inicio, fim) em m de caminho do anel (o trecho de curva de 300 graus ou mais)."""
+    start = 0.
+    for segment in segments:
+        length = segment[1] if segment[0] == 'reta' else abs(segment[1])*math.radians(segment[2])
+        if segment[0] == 'curva' and abs(segment[2]) >= 300:
+            return start, start + length
+        start += length
+    return None
+
+
+ALL_TRACKS = {**TRACKS, **ROUNDABOUTS}
 
 
 @dataclass
@@ -82,7 +131,14 @@ class Track:
         return float(self.s[-1])
 
 
-def build_track(segments, width=1.8, width_end=None, spacing=.5, cone_noise=.03, rng=None):
+def build_track(segments, width=1.8, width_end=None, spacing=.5, cone_noise=.03, rng=None, swap=None,
+                clear_crossings=None):
+    """Pista pelos trechos; Track.left/right sao os cones VERDES/VERMELHOS.
+
+    swap=(s0, s1): nesse trecho (m de caminho) as cores trocam de lado (borda
+    esquerda vermelha), como uma rotatoria com a ilha de outra cor.
+    clear_crossings: tira cones que caem dentro da faixa de outro trecho da
+    pista (padrao: so nas rotatorias, onde a pista cruza a si mesma)."""
     rng = rng or np.random.default_rng(0)
     ds = .02
     x = y = th = 0.
@@ -108,7 +164,21 @@ def build_track(segments, width=1.8, width_end=None, spacing=.5, cone_noise=.03,
     for side, sign in (('left', 1.), ('right', -1.)):
         base = center[index] + sign*widths[index, None]/2*normal[index]
         cones[side] = base + rng.normal(0., cone_noise, base.shape)
-    return Track(center, heading, s, widths, cones['left'], cones['right'])
+    keep = np.ones((2, len(index)), bool)
+    if clear_crossings if clear_crossings is not None else any(abs(seg[2]) > 300 for seg in segments
+                                                                if seg[0] == 'curva'):
+        for k, side in enumerate(('left', 'right')):
+            for j, cone in enumerate(cones[side]):
+                d = np.hypot(*(center - cone).T)
+                other = np.abs(s - s[index[j]]) > 1.5*width     # outro trecho, nao o vizinho
+                keep[k, j] = not np.any(other & (d < widths/2 - .1))
+    green, red = cones['left'][keep[0]], cones['right'][keep[1]]
+    if swap is not None:
+        arcs = s[index]
+        swapped = (arcs >= swap[0]) & (arcs <= swap[1])
+        green = np.vstack([cones['left'][keep[0] & ~swapped], cones['right'][keep[1] & swapped]])
+        red = np.vstack([cones['right'][keep[1] & ~swapped], cones['left'][keep[0] & swapped]])
+    return Track(center, heading, s, widths, green, red)
 
 
 def add_decoys(track, count, rng, gap=(.2, .8)):
@@ -304,12 +374,15 @@ def track_error(track, point, hint):
 
 def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), duration=None, coast=.5,
         camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False, decoys=0,
-        steer_response=None):
+        steer_response=None, color_sides=False):
     """Uma volta; devolve dicionario de metricas (e a serie, com trace).
 
     steer_response: None (padrao) = carro ideal (roda faz a curva pedida, odometria
     pelo modelo puro); um numero = a roda faz essa fracao e a odometria usa o
-    steering_response da configuracao. config['sim_gyro']: odometria pelo giroscopio."""
+    steering_response da configuracao. config['sim_gyro']: odometria pelo giroscopio.
+    color_sides: como no carro, o lado de cada cor e decidido pelos proprios
+    cones (SideTracker de fva_car/cones.py), com o estimador recomecando quando
+    troca; sem isso, verde = esquerda sempre."""
     import main as vehicle_main
 
     rng = np.random.default_rng(seed)
@@ -327,6 +400,11 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         from fva_car.map_path import MapPath
         map_path = MapPath(wheelbase=WHEELBASE, default_width=settings.track_width_m,
                            replace=config.get('cone_map') == 'substituir')
+    sides = None
+    if color_sides:
+        from fva_car.cones import SideTracker, handle_side_flip
+        sides = SideTracker()
+    flips = 0
     follower = RealStanleyFollower(vehicle_main.follower_config(config, 'cones', corridor))
     run.last_follower = follower  # trim aprendido (corridas seguidas)
     poses = PoseHistory()
@@ -344,6 +422,8 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
     next_capture, last_capture = 0., None
     hint = 0
     rows = []
+    body = []  # (folga da carroceria, lado do cone, sinal da curva)
+    all_cones = np.vstack([track.left, track.right])
     states = {name: 0 for name in STATES}
     frames = valid = 0
     finished = False
@@ -358,10 +438,17 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
                 estimate = estimator.step(now, [], [], motion, pose_frame=True,
                                           center=camera.observe_line(car, track))
             else:
-                left, right = camera.observe(car, track)
+                green, red = camera.observe(car, track)
+                green_left = True
+                if sides is not None:  # como RealConeDetector._corridor_sides
+                    green_left, info, flipped = sides.update(green, red, estimator, True)
+                    if flipped:
+                        flips += 1
+                        handle_side_flip(estimator, info, map_path)
+                left, right = (green, red) if green_left else (red, green)
                 estimate = estimator.step(now, left, right, motion, pose_frame=True)
-                if map_path is not None:  # como no carro: verde = esquerda aqui
-                    estimate = map_path.step(now, left, right, True, motion, True, estimate,
+                if map_path is not None:
+                    estimate = map_path.step(now, green, red, green_left, motion, True, estimate,
                                              estimator._point_covariance)
             last_capture = now
             frames += 1
@@ -386,6 +473,8 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         lateral_accel = car.v_true**2*math.tan(car.steer_actual + car.steer_bias + car.trim)/WHEELBASE
         rows.append((now, car.X, car.Y, car.front[0], car.front[1], error, half, car.v_true, car.vref,
                      car.st, follower.last_state.get('active', False), lateral_accel))
+        gap, cone_side = body_clearance(car.X, car.Y, car.th, all_cones)
+        body.append((gap, cone_side, math.copysign(1., car.st) if abs(car.st) > .05 else 0.))
         if track.s[max_index] >= track.length - 3.2:
             finished = True
             break
@@ -406,11 +495,26 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         stops=int(np.sum(stopped > 0)), valid=valid/max(frames, 1),
         max_lateral_accel=float(np.max(np.abs(data[:, 11]))),
         over_accel_s=float(np.sum(np.abs(data[:, 11]) > accel_limit)*car.dt),
-        states={k: v/max(frames, 1) for k, v in states.items() if v},
+        states={k: v/max(frames, 1) for k, v in states.items() if v}, side_flips=flips,
+        **_body_metrics(np.asarray(body, float)),
         width_learned=estimator.learned_width)
     if trace:
         result['trace'] = data
     return result
+
+
+def _body_metrics(body):
+    """Folga minima da carroceria aos cones e toques (do lado de dentro da curva a parte)."""
+    if not len(body):
+        return dict(body_clearance_m=math.nan, body_hits=0, inside_hits=0, inside_clearance_m=math.nan)
+    gap, side, turn = body.T
+    touching = gap < 0
+    starts = np.diff(np.r_[0, touching.astype(int), 0]) > 0
+    inside = (turn != 0) & (side == turn)
+    inside_gap = gap[inside]
+    return dict(body_clearance_m=float(np.min(gap)), body_hits=int(np.sum(starts)),
+                inside_hits=int(np.sum(starts[:len(gap)] & inside)),
+                inside_clearance_m=float(np.min(inside_gap)) if len(inside_gap) else math.nan)
 
 
 def parse_value(text):
@@ -453,7 +557,7 @@ def plot(track, results, path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--pista', nargs='+', default=list(TRACKS), choices=list(TRACKS))
+    parser.add_argument('--pista', nargs='+', default=list(TRACKS), choices=list(ALL_TRACKS))
     parser.add_argument('--linha', action='store_true',
                         help='segue a linha amarela no centro (estimador como linha central) em vez dos cones')
     parser.add_argument('--law', nargs='+', default=['stanley', 'pure_pursuit'], choices=['stanley', 'pure_pursuit'])
@@ -488,7 +592,7 @@ def main(argv=None):
             config = base_config({**changes, 'steering_law': law})
             results = []
             for seed in range(args.seeds):
-                track = build_track(TRACKS[name], args.width, args.width_end, args.spacing,
+                track = build_track(ALL_TRACKS[name], args.width, args.width_end, args.spacing,
                                     rng=np.random.default_rng(100 + seed))
                 result = run(track, config, seed=seed, coast=args.coast, trace=bool(args.plot) and seed == 0,
                              latency=tuple(args.latency), fps=args.fps, servo_tau=args.servo_tau,
@@ -509,7 +613,7 @@ def main(argv=None):
                   f" {worst('max_lateral_accel'):8.2f} {mean('over_accel_s'):7.2f} {100*mean('mean_m'):+8.1f}", flush=True)
         if args.plot and traced:
             path = args.plot if len(args.pista) == 1 else args.plot.with_name(f'{args.plot.stem}_{name}{args.plot.suffix}')
-            plot(build_track(TRACKS[name], args.width, args.width_end, args.spacing, rng=np.random.default_rng(100)),
+            plot(build_track(ALL_TRACKS[name], args.width, args.width_end, args.spacing, rng=np.random.default_rng(100)),
                  traced, path)
     return 0
 

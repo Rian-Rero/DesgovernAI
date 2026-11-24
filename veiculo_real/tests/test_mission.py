@@ -242,6 +242,39 @@ class MissionTests(unittest.TestCase):
         logs=[call.kwargs for call in self.car.log.call_args_list if 'obstacle_stop' in call.kwargs]
         self.assertEqual([log['obstacle_stop'] for log in logs],[0,1,1])
 
+    def test_interface_releases_the_obstacle_stop(self):
+        """Botao "Liberar parada" (SIGUSR1 -> RESUME_REQUEST): destrava; se o eco voltar, trava de novo."""
+        self.car.steps_left=6
+        self.settings['ts']=10.
+        self.car.distances=iter([(.1,True),(.1,True),(10.,True),(10.,True),(.1,True),(.1,True)])
+        original_step=self.car.step
+        def step():
+            if self.car.steps_left==3:  # depois de travar e o obstaculo sair: botao
+                mission.RESUME_REQUEST.set()
+            return original_step()
+        self.car.step=step
+        follower=Mock()
+        self.addCleanup(mission.RESUME_REQUEST.clear)
+        with patch.object(mission,'RealStanleyFollower',return_value=follower):self.run_fake()
+        self.assertEqual([call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list],
+                         [False,True,True,False,False,True])
+
+    def test_mission_pid_file_belongs_to_this_process(self):
+        path=Path(self.folder.name)/'missao.pid'
+        mission.write_mission_pid(path)
+        self.assertEqual(path.read_text().strip(),str(mission.os.getpid()))
+        mission.remove_mission_pid(path)
+        self.assertFalse(path.exists())
+        path.write_text('1\n')  # outra missao: nao apaga
+        mission.remove_mission_pid(path)
+        self.assertTrue(path.exists())
+
+    def test_long_default_mission_and_time_option(self):
+        self.assertGreaterEqual(mission.parameters['ts'],1800.)
+        with patch.object(sys,'argv',['main.py','--tempo','90']),patch.object(mission,'run_mission') as run:
+            mission.main()
+        self.assertEqual(run.call_args[0][0]['ts'],90.)
+
     def test_full_rc_bypasses_stanley_while_obstacle_keeps_priority(self):
         self.car.sel_direcao = self.car.sel_tracao = 0
         self.car.distances = iter([(.1, True), (.1, True)])

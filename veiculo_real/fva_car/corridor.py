@@ -64,6 +64,11 @@ class CorridorSettings:
     width_prior_sigma: float = .2  # atracao fraca para a largura aprendida, m (por quadro)
     width_noise: float = .05       # m/sqrt(m): a largura pode mudar ao longo da pista
     width_learn_rate: float = .2   # peso de cada quadro AMBAS confiavel na largura aprendida
+    # Largura MEDIDA na pista do dia (m; 0 = desconhecida). Com ela o estimador ja
+    # comeca sabendo W (nao mede pelo primeiro par de cones, que em 24/11 deu 1,10
+    # numa volta e 1,88 na seguinte) e a aprendida fica a +-known_width_tolerance.
+    known_width_m: float = 0.
+    known_width_tolerance: float = .15
     max_range_m: float = 3.        # cones mais distantes nao entram
     pixel_sigma: float = 2.        # erro da base do cone, px (na resolucao calibrada)
     row_sigma: float = 4.          # px extras na vertical: arfagem do carro (~0,4 grau)
@@ -303,6 +308,12 @@ class CorridorEstimator:
         self.learned_width = None  # sobrevive a reset(): a pista nao muda ao perder os cones
         self.started = False       # ja inicializou nesta corrida (sobrevive a reset())
         self.reset()
+        self.forget_width()
+
+    def forget_width(self):
+        """Largura aprendida de volta ao ponto de partida: a medida, se houver."""
+        known = self.settings.known_width_m
+        self.learned_width = float(known) if known and known > 0 else None
 
     @property
     def nominal_width(self):
@@ -317,6 +328,10 @@ class CorridorEstimator:
             self.learned_width = width
         else:
             self.learned_width += self.settings.width_learn_rate*(width - self.learned_width)
+        known = self.settings.known_width_m
+        if known and known > 0:
+            margin = self.settings.known_width_tolerance*known
+            self.learned_width = float(np.clip(self.learned_width, known - margin, known + margin))
 
     def reset(self):
         self.x = None
@@ -327,6 +342,19 @@ class CorridorEstimator:
         self.bad_frames = 0
         self.used_center = 0
         self.band_rejected = 0  # cones tirados pela faixa no ultimo quadro (ja somados em rejected)
+
+    def relax(self, sigma_e=.3, sigma_psi=.2):
+        """Abre a incerteza do deslocamento e do rumo sem perder o corredor.
+
+        Usado quando as cores trocam de lado com o corredor ja estimado (ilha de
+        rotatoria de outra cor): a geometria continua a mesma, so a cor de cada
+        borda mudou; os proximos cones recentralizam o estado sem o carro parar."""
+        if self.P is None:
+            return
+        for index, sigma in ((E, sigma_e), (PSI, sigma_psi)):
+            self.P[index, :] *= 0.
+            self.P[:, index] *= 0.
+            self.P[index, index] = sigma*sigma
 
     def set_homography(self, ground_from_pixel, pixel_scale=1.):
         self.homography = np.asarray(ground_from_pixel, float)

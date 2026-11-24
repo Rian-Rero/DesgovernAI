@@ -65,7 +65,8 @@ class DecoyTests(unittest.TestCase):
             runs = []
             for seed in (1, 2, 3):
                 track = pv.build_track(pv.TRACKS['grampo'], 1.8, None, .5, rng=np.random.default_rng(100 + seed))
-                config = pv.base_config({'velocity_reference': 1.0,
+                # Sem tracado de curva: o erro e medido ao CENTRO, e o tracado desloca de proposito.
+                config = pv.base_config({'velocity_reference': 1.0, 'racing_line_m': 0., 'racing_mode': 'antigo',
                                          'cone_estimator': {'band_m': band, 'band_growth': .1}})
                 runs.append(pv.run(track, config, seed=seed, decoys=15))
             results[band] = runs

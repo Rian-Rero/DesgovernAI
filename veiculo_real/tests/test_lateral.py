@@ -556,3 +556,35 @@ class RealFollowerTests(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
+
+class ApexRacingLineTests(unittest.TestCase):
+    """Tracado "apice" (24/11): por fora antes da curva, centro menos o arrasto dentro dela."""
+    def follower(self, **changes):
+        from fva_car.lateral import RealStanleyFollower
+        follower = RealStanleyFollower({'racing_mode': 'apice', 'racing_line_m': .15, 'racing_apex_m': 0.,
+                                        'racing_filter_s': 0., **changes})
+        return follower
+
+    def offset(self, follower, curvature, dkappa, width=1.3):
+        from types import SimpleNamespace
+        follower.path_dkappa = dkappa
+        return follower._racing_line_offset(curvature, SimpleNamespace(corridor_width_m=width), .02)
+
+    def test_outside_before_a_left_curve_and_inside_drag_compensated_in_it(self):
+        follower = self.follower()
+        before = self.offset(follower, 0., .5)           # curva a esquerda chegando
+        self.assertAlmostEqual(before, -.15, delta=.01)   # carro para a DIREITA (fora)
+        inside = self.offset(follower, .8, 0.)            # dentro da curva constante
+        self.assertAlmostEqual(inside, -.36**2*.8/2, delta=1e-6)  # so o arrasto da traseira, para fora
+        mirrored = self.offset(follower, 0., -.5)         # curva a direita chegando: para a esquerda
+        self.assertAlmostEqual(mirrored, .15, delta=.01)
+        self.assertEqual(self.offset(follower, 0., 0.), 0.)   # reta
+
+    def test_limited_by_the_room_and_apex_option(self):
+        follower = self.follower(racing_line_m=.5)
+        self.assertGreaterEqual(self.offset(follower, 0., .5, width=1.), -(.5 - .13 - .2) - 1e-9)
+        apex = self.follower(racing_apex_m=.1)
+        self.assertGreater(self.offset(apex, .8, 0.), 0.)  # apice: para dentro (esquerda)
+        with self.assertRaises(ValueError):
+            self.follower(racing_mode='outro')
