@@ -230,13 +230,16 @@ class ConeObservation(LineObservation):
     cone_settings: object = None
     corridor: object = None   # CorridorEstimate do quadro (estimador ligado)
     debug: dict | None = None  # Detalhes serializaveis do quadro (cones_debug.jsonl).
+    # Placas ArUco do quadro: (id, cx, cy, lado px) na imagem cheia (fva_car/aruco.py).
+    markers: tuple = ()
 
 
 
 class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
-                 classifier=None, corridor=None, line_fusion=False, refine_bases=True, cone_map=False):
+                 classifier=None, corridor=None, line_fusion=False, refine_bases=True, cone_map=False,
+                 aruco_every=0):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
 
         corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
@@ -250,6 +253,10 @@ class RealConeDetector:
         cone_map: mapa de cones (SLAM, fva_car/cone_slam.py) com tracado pelo SVM
         (fva_car/svm_path.py) quando o estimador perde o corredor; "substituir"
         usa o tracado do mapa sempre (experimento). Precisa do estimador.
+
+        aruco_every: procura placas ArUco a cada N quadros, na imagem cheia
+        (~1,3 ms a 640 px no notebook); 0 desliga. Entre buscas, o quadro repete
+        as placas da ultima busca.
         """
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('Cones requerem calibracao metrica da camera fixa.')
@@ -327,6 +334,24 @@ class RealConeDetector:
                          PathSettings(roi_top=0, min_span=15, h_max=35, s_min=25, dashed=True, dash_gap=120))
             self.line[1].reset(anchor=.5)
         self.line_frames = 0
+        self.aruco_every = int(aruco_every or 0)
+        self.aruco = None
+        self.aruco_frames = 0
+        self.markers = ()
+        if self.aruco_every > 0:
+            from .aruco import ArucoDetector
+            self.aruco = ArucoDetector()
+
+    def _detect_markers(self, frame):
+        if self.aruco is None:
+            return ()
+        self.aruco_frames += 1
+        if (self.aruco_frames - 1) % self.aruco_every == 0:
+            try:
+                self.markers = tuple(m.to_tuple() for m in self.aruco.detect(frame))
+            except cv2.error:
+                self.markers = ()
+        return self.markers
 
     def observe_frame(self, frame, timestamp):
         metadata = dict(processing_size=self.processing_size)
@@ -338,6 +363,7 @@ class RealConeDetector:
         if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
             return ConeObservation(timestamp, reason='Imagem deve ser BGR uint8', **metadata)
         metadata['source_frame'] = frame
+        metadata['markers'] = self._detect_markers(frame)
         if frame.shape[1::-1] != self.calibration.image_size:
             return ConeObservation(timestamp, reason='Resolucao diferente da calibracao da camera', **metadata)
         started = time.perf_counter()
@@ -424,6 +450,8 @@ class RealConeDetector:
             metadata['corridor'] = estimate
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
+        if metadata.get('markers'):
+            debug['aruco'] = [list(m) for m in metadata['markers']]
         if estimate is not None:
             debug.update(corridor=dict(estimate.debug(), sides=self.corridor_sides,
                                        line_points=int(self.corridor.used_center)), legacy_errors=legacy)
@@ -521,6 +549,15 @@ class RealConeDetector:
                         cv2.polylines(image, [pixels[start:start+2]], False, color, 1, cv2.LINE_AA)
             cv2.putText(image, estimate.state, (6, image.shape[0]-8), cv2.FONT_HERSHEY_SIMPLEX, .5,
                         (255, 255, 255), 1, cv2.LINE_AA)
+        # Placas ArUco: quadrado magenta com o ID (coordenadas da imagem cheia).
+        scale = image.shape[1]/float(self.calibration.image_size[0])
+        for marker_id, cx, cy, side in getattr(observation, 'markers', ()) or ():
+            half = side*scale/2
+            top_left = (int(cx*scale - half), int(cy*scale - half))
+            bottom_right = (int(cx*scale + half), int(cy*scale + half))
+            cv2.rectangle(image, top_left, bottom_right, (255, 0, 255), 2)
+            cv2.putText(image, f'ID {marker_id}', (top_left[0], max(12, top_left[1] - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 0, 255), 1, cv2.LINE_AA)
         return image
 
     def with_preview(self, observation):

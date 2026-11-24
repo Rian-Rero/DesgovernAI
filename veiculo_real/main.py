@@ -108,6 +108,16 @@ parameters = {
     # (0,05) com 0,25 para fora tirou folga (25 cm): fica 0. "antigo": formula
     # anterior. --apice M para testar.
     "racing_mode": "apice",
+    # Memoria do tracado (s): um quadro novo substitui o caminho ja identificado
+    # aos poucos (fva_car/lateral.py _remember_path). Ensaios de 24/11: cada
+    # quadro discordava do anterior em ~0,15 rad e o esterco trocava de lado 2x
+    # por segundo. Pista virtual (ruido do carro real, 10 q/s): pedaladas 44 ->
+    # 13 e 42 -> 19, mesmas voltas e o mesmo erro. 0,4-0,6 s cortava mais, mas
+    # perdia voltas. Custo: com objetos falsos AO LADO da pista (iscas), a
+    # correcao de um salto do estimador tambem demora: 0,97 -> 0,93 das voltas
+    # (15 iscas) e 19 -> 21 toques (6 iscas). Exigir 2 quadros concordando antes
+    # de mudar foi pior (pedaladas 48 -> 39 so). 0 desliga (--memoria-tracado 0).
+    "path_memory_s": 0.25,
     "racing_apex_m": 0.0,
     "stanley_softening": 0.3,
     # Velocidade do termo de deslocamento do Stanley, atan(k*e/(ks + v)), com k e
@@ -242,6 +252,13 @@ parameters = {
     "cpu_cores": {"control": [0, 1], "vision": [2, 3]},
     # Temperatura, clock e limitacao do Pi a cada 2 s, no resumo da volta.
     "health_monitor": True,
+    # Placas ArUco (DICT_5X5_100, como camera.py; fva_car/aruco.py). Acao por ID:
+    # "pare" (ID 1, placa de PARE): reduz a approach_speed e para pelo ultrassom
+    # com stop_gap_m entre a frente do pneu e o cone; fica parado ate o botao
+    # "Liberar parada" da GUI (ou hold_s segundos). "ignorar": so registra.
+    # every: busca a cada N quadros. False desliga (--sem-aruco).
+    "aruco": {"every": 2, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
+              "hold_s": None, "ignore_s": 4.0},
     # Teto pela distancia de parada no alcance do ultrassom (4 m): ~2,8 m/s.
     # False tira o teto (pista fechada, sem pessoas/paredes na frente).
     "ultrasonic_speed_cap": True,
@@ -518,6 +535,34 @@ def save_imu(car, recorder=None, folder=None, config=None):
     return summary
 
 
+def aruco_every(config):
+    """Busca de placas a cada N quadros (0: desligado)."""
+    value = config.get("aruco")
+    if not value:
+        return 0
+    return max(1, int((value if isinstance(value, dict) else {}).get("every", 2)))
+
+
+def sign_controller(config, mode):
+    """SignController das placas ArUco pela configuracao, ou None."""
+    value = config.get("aruco")
+    if mode != "cones" or not value:
+        return None
+    from fva_car.aruco import SignController
+
+    value = value if isinstance(value, dict) else {}
+    return SignController(
+        actions={int(k): v for k, v in (value.get("actions") or {"1": "pare"}).items()},
+        approach_speed=float(value.get("approach_speed", 0.3)),
+        stop_gap_m=float(value.get("stop_gap_m", 0.08)),
+        front_overhang_m=FRONT_OVERHANG_M,
+        reaction_s=STOP_REACTION_TIME + float(config.get("obstacle_confirm_s", 0.0) or 0.0),
+        deceleration=STOP_DECELERATION,
+        hold_s=value.get("hold_s"),
+        ignore_s=float(value.get("ignore_s", 4.0)),
+    )
+
+
 def write_mission_pid(path=MISSION_PID_FILE):
     try:
         Path(path).write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -740,6 +785,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             line_fusion=bool(config.get("cone_line_fusion", False)),
             refine_bases=bool(config.get("cone_refine_bases", True)),
             cone_map=config.get("cone_map", False),
+            aruco_every=aruco_every(config),
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -806,7 +852,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    corridor=corridor_settings(config),
                                    line_fusion=bool(config.get("cone_line_fusion", False)),
                                    refine_bases=bool(config.get("cone_refine_bases", True)),
-                                   cone_map=config.get("cone_map", False))
+                                   cone_map=config.get("cone_map", False),
+                                   aruco_every=aruco_every(config))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -945,6 +992,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         last_diagnostic_sequence = 0
         if car_factory is None:
             write_mission_pid()
+        signs = sign_controller(config, mode)
+        sign = None
         while car.t < config["ts"]:
             if not car.step():
                 break
@@ -968,6 +1017,14 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             confirm_s = float(config.get("obstacle_confirm_s", 0.0) or 0.0)
             stop_distance = stopping_distance(car.v, confirm_s)
             observation = vision_data["observation"]
+            if signs is not None:
+                sign = signs.update(observation, clock())
+                if sign.message:
+                    print(sign.message, flush=True)
+                follower.external_speed_limit = sign.speed_limit
+                if sign.state == "APROXIMANDO":
+                    # O cone da placa e o "obstaculo": para bem mais perto dele.
+                    stop_distance = signs.trigger_distance(car.v)
             echo_ignored = False
             close = (valid and np.isfinite(dist) and ULTRASONIC_MIN_VALID_M <= dist <= stop_distance)
             if RESUME_REQUEST.is_set():
@@ -975,6 +1032,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 # ultrassom. Com o obstaculo ainda na frente, o carro trava de novo
                 # depois da confirmacao, como na primeira vez.
                 RESUME_REQUEST.clear()
+                if signs is not None and signs.state in ("PARADO", "APROXIMANDO"):
+                    print(signs.release(clock()), flush=True)
                 if obstacle_detected:
                     obstacle_detected = False
                     echo_since = None
@@ -987,7 +1046,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 echo_since = None
             if not obstacle_detected and close:
                 reason = ""
-                if mode == "cones" and config.get("ultrasonic_curve_filter", True):
+                approaching_sign = sign is not None and sign.state == "APROXIMANDO"
+                if mode == "cones" and config.get("ultrasonic_curve_filter", True) and not approaching_sign:
                     # Em curva, ja virando, o eco pode ser o cone da borda de fora:
                     # a visao diz se ele esta fora do caminho (fva_car/obstacle.py).
                     echo_ignored, reason = curve_echo(
@@ -1005,11 +1065,16 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                     echo_since = float(car.t)
                 if not echo_ignored and (confirm_s <= 0 or float(car.t) - echo_since >= confirm_s):
                     obstacle_detected = True
-                    print(
-                        f"Obstaculo a {dist:.2f} m: parada travada (botao Liberar parada na GUI)"
-                        + (f" ({reason})." if reason else "."),
-                        flush=True,
-                    )
+                    if signs is not None and signs.stopped(clock()):
+                        print(f"PARE: parado com o ultrassom a {dist:.2f} m do cone"
+                              f" (~{100*max(0.0, dist - FRONT_OVERHANG_M):.0f} cm da frente do pneu)."
+                              " Botao Liberar parada na GUI para seguir.", flush=True)
+                    else:
+                        print(
+                            f"Obstaculo a {dist:.2f} m: parada travada (botao Liberar parada na GUI)"
+                            + (f" ({reason})." if reason else "."),
+                            flush=True,
+                        )
             manual = (
                 getattr(car, "sel_direcao", 1) == 0
                 and getattr(car, "sel_tracao", 1) == 0
@@ -1057,6 +1122,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             car.log(
                 obstacle_ignored=int(echo_ignored),
                 obstacle_stop=int(obstacle_detected),
+                aruco_state=-1 if sign is None else ("LIVRE", "APROXIMANDO", "PARADO", "SAINDO").index(sign.state),
+                aruco_id=-1 if sign is None else sign.marker_id,
                 distance_m=dist,
                 stopping_distance_m=stop_distance,
             )
@@ -1277,6 +1344,12 @@ def main():
                         help="Na curva, ir ate M metros para dentro (apice); padrao 0")
     parser.add_argument("--tempo", type=float, metavar="S",
                         help=f"Duracao maxima da missao em s (padrao {parameters['ts']:.0f}; encerre pela GUI)")
+    parser.add_argument("--memoria-tracado", type=float, metavar="S",
+                        help="Memoria do tracado contra o esterco 'pedalando' (s; 0 desliga; padrao 0.25)")
+    parser.add_argument("--sem-aruco", action="store_true",
+                        help="Nao procura placas ArUco (PARE)")
+    parser.add_argument("--pare-segundos", type=float, metavar="S",
+                        help="Na placa de PARE, segue sozinho depois de S segundos (padrao: so pelo botao)")
     parser.add_argument("--sem-imu", action="store_true",
                         help="Guinada pelo modelo da direcao, sem o giroscopio da IMU")
     parser.add_argument("--amortecer-guinada", type=float, metavar="K",
@@ -1373,6 +1446,16 @@ def main():
         if args.tempo <= 0:
             parser.error("--tempo deve ser positivo (s)")
         settings["ts"] = float(args.tempo)
+    if args.memoria_tracado is not None:
+        if not 0 <= args.memoria_tracado <= 1:
+            parser.error("--memoria-tracado deve estar entre 0 e 1 s")
+        settings["path_memory_s"] = args.memoria_tracado
+    if args.sem_aruco:
+        settings["aruco"] = False
+    if args.pare_segundos is not None:
+        if args.pare_segundos < 0:
+            parser.error("--pare-segundos deve ser >= 0")
+        settings["aruco"] = {**parameters["aruco"], "hold_s": args.pare_segundos}
     if args.sem_imu:
         settings["imu"] = False
     if args.amortecer_guinada is not None:

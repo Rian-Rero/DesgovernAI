@@ -1129,6 +1129,60 @@ Nas pistas normais, nada mudou. **O que ainda falta:**
   entrada, o carro não percebe a troca, porque dentro do anel vê quase só a borda
   de fora.
 
+### Esterço "pedalando": memória do traçado
+
+Nos 5 ensaios das 19h25–19h30 o esterço trocou de lado rápido (mais de 8° de um
+lado ao outro em menos de 0,5 s) de 5 a 7 vezes por volta, às vezes em
+sequência: −8 → +10 → −8 → +10° em menos de 1 s. A causa: entre quadros, o
+seguidor leva o traçado pela odometria (com o giroscópio), mas cada quadro novo
+discordava do levado em ~0,15 rad de rumo. Com uma borda só e 2–4 cones, o
+ajuste oscila de quadro a quadro, e esse salto fica abaixo do limite de descarte
+(0,35 rad), então o Stanley obedecia cada um.
+
+**Memória do traçado** (`path_memory_s` 0,25; `fva_car/lateral.py`
+`_remember_path`):
+- Num quadro novo, a diferença para o traçado já identificado, levado até agora,
+  vira um resíduo que some com constante de tempo de 0,25 s.
+- Um traçado novo de verdade vale em ~0,75 s.
+- Um quadro ruim isolado mal mexe no esterço.
+
+Pista virtual (ruído do carro real, 10 q/s, 220–300 ms, 12 sementes):
+
+| cenário | pedaladas: sem → com | voltas | toques |
+|---|---|---|---|
+| 1,3 m | 48 → **13** | 100% → 100% | 0 → 1 |
+| 1,5 m, 0,8 m/s | 46 → **22** | 100% → 100% | 1 → 1 |
+| 1,3 m + 6 objetos falsos ao lado | 130 → **69** | 76% → 72% | 19 → 21 |
+
+**Custo:** com objetos falsos, a correção de um salto do estimador também
+demora, por isso o caso com objetos falsos piorou um pouco. Exigir dois quadros
+concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracado
+0` ou a caixa "Memória do traçado" na GUI desligam, para comparar.
+
+### Placas ArUco (PARE)
+
+`fva_car/aruco.py`, dicionário 5×5 (IDs 0–99), o mesmo do `camera.py`.
+- **Busca:** a cada 2 quadros na imagem cheia (~1,3 ms no notebook).
+- **No vídeo:** as placas aparecem com um quadrado magenta e o ID.
+- **Ação por ID:** `aruco.actions` no `main.py`, decidida num `match`/`case`.
+  Hoje só a ID 1 tem ação (`"pare"`); `"ignorar"` só registra.
+
+**PARE (ID 1):**
+1. A placa precisa ser vista em 2 quadros seguidos, para um reflexo não parar o
+   carro.
+2. Visto isso, o carro reduz para 0,3 m/s (`approach_speed`).
+3. A parada passa a ser pelo ultrassom, com só `stop_gap_m` (8 cm) entre a frente
+   do pneu e o cone. A distância normal de parada do ultrassom pararia a ~0,4 m.
+   O filtro de "cone da borda na curva" fica desligado nesse trecho, porque o
+   cone da placa é o alvo.
+4. Fica parado até o botão **🔓 Liberar parada** (ou `--pare-segundos S` para
+   seguir sozinho). Depois ignora a placa por 4 s.
+5. Se a placa sumir por 2,5 s sem o carro parar, é esquecida (falso positivo).
+
+O terminal mostra cada passo; o `car.csv` tem `aruco_state` (0 livre,
+1 aproximando, 2 parado, 3 saindo) e `aruco_id`; o `cones_debug.jsonl` tem as
+placas de cada quadro. `--sem-aruco` ou a caixa "Placas ArUco" na GUI desligam.
+
 ## Relatório do ensaio e versão do código
 
 - `main.py` imprime `Codigo: versao xxxxxxxx` (hash dos `.py`) e grava esse

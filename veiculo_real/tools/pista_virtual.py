@@ -496,11 +496,29 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
         max_lateral_accel=float(np.max(np.abs(data[:, 11]))),
         over_accel_s=float(np.sum(np.abs(data[:, 11]) > accel_limit)*car.dt),
         states={k: v/max(frames, 1) for k, v in states.items() if v}, side_flips=flips,
+        steer_reversals=steer_reversals(data[:, 0], data[:, 9]),
         **_body_metrics(np.asarray(body, float)),
         width_learned=estimator.learned_width)
     if trace:
         result['trace'] = data
     return result
+
+
+def steer_reversals(t, steer, threshold_deg=8., window_s=.5):
+    """'Pedaladas': esterco de mais de threshold de um lado ao outro em ate window_s."""
+    steer = np.degrees(np.asarray(steer, float))
+    count, i = 0, 0
+    while i < len(steer):
+        if abs(steer[i]) > threshold_deg:
+            j = i + 1
+            while j < len(steer) and t[j] - t[i] < window_s:
+                if steer[j]*steer[i] < 0 and abs(steer[j]) > threshold_deg:
+                    count += 1
+                    i = j - 1
+                    break
+                j += 1
+        i += 1
+    return count
 
 
 def _body_metrics(body):

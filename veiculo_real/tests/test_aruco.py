@@ -1,0 +1,128 @@
+"""Placas ArUco (fva_car/aruco.py): deteccao, PARE perto do cone e integracao com a missao."""
+import math
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fva_car.aruco import ArucoDetector, Marker, SignController  # noqa: E402
+
+
+def frame_with(marker_id, side=80, at=(300, 180), size=(640, 480)):
+    image = np.full((size[1], size[0], 3), 140, np.uint8)
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_100)
+    marker = cv2.aruco.generateImageMarker(dictionary, marker_id, side)
+    border = side//5  # borda branca: o detector precisa dela
+    patch = np.full((side + 2*border, side + 2*border), 255, np.uint8)
+    patch[border:border+side, border:border+side] = marker
+    x, y = at
+    image[y:y+patch.shape[0], x:x+patch.shape[1]] = patch[:, :, None]
+    return image
+
+
+def seen(t, *markers):
+    return SimpleNamespace(timestamp=t, markers=tuple(m.to_tuple() for m in markers))
+
+
+class DetectorTests(unittest.TestCase):
+    def test_finds_id_center_and_size(self):
+        markers = ArucoDetector().detect(frame_with(1, side=80, at=(300, 180)))
+        self.assertEqual([m.marker_id for m in markers], [1])
+        marker = markers[0]
+        self.assertAlmostEqual(marker.cx, 300 + 16 + 40, delta=2)
+        self.assertAlmostEqual(marker.side_px, 80, delta=3)
+        self.assertEqual(ArucoDetector().detect(np.full((480, 640, 3), 140, np.uint8)), ())
+
+    def test_cone_detector_carries_markers_every_n_frames(self):
+        from fva_car.cones import RealConeDetector
+        from fva_car.lateral import GroundCalibration
+        calibration = GroundCalibration.from_file(Path(__file__).resolve().parent/'dados'/'camera_pista_virtual.json')
+        detector = RealConeDetector(calibration, processing_width=320, corridor=True, aruco_every=2)
+        frame = frame_with(1)
+        first = detector.observe_frame(frame, 1.)
+        self.assertEqual(first.markers[0][0], 1)
+        self.assertEqual(first.debug['aruco'][0][0], 1)
+        detector.observe_frame(np.full_like(frame, 140), 1.1)   # sem busca: repete a ultima
+        self.assertEqual(detector.markers[0][0], 1)
+        third = detector.observe_frame(np.full_like(frame, 140), 1.2)
+        self.assertEqual(third.markers, ())
+        self.assertIsNotNone(detector.preview_bgr(first))
+        self.assertIsNone(RealConeDetector(calibration, corridor=True).aruco)
+
+
+class StopSignTests(unittest.TestCase):
+    def test_confirmed_stop_sign_slows_then_stops_close_and_waits_for_the_button(self):
+        signs = SignController({1: 'pare'}, confirm_frames=2, approach_speed=.3, stop_gap_m=.08)
+        sign = Marker(1, 320, 200, 40)
+        self.assertEqual(signs.update(seen(1., sign), 1.).state, 'LIVRE')   # 1 quadro: ainda nao
+        command = signs.update(seen(1.1, sign), 1.1)
+        self.assertEqual(command.state, 'APROXIMANDO')
+        self.assertIn('PARE', command.message)
+        self.assertEqual(command.speed_limit, .3)
+        # Ultrassom: comeca a parar perto (0,08 m + 7 cm do pneu + reacao a 0,3 m/s)
+        self.assertLess(signs.trigger_distance(.3), .3)
+        self.assertTrue(signs.stopped(1.5))
+        self.assertEqual(signs.update(seen(1.6, sign), 1.6).speed_limit, 0.)
+        for t in (5., 30.):  # sem hold_s: fica parado
+            self.assertEqual(signs.update(seen(t, sign), t).state, 'PARADO')
+        self.assertIn('liberado', signs.release(31.))
+        for t in (31.1, 31.2, 31.3):  # a mesma placa ainda a vista: ignorada por ignore_s
+            self.assertEqual(signs.update(seen(t, sign), t).speed_limit, math.inf)
+        self.assertEqual(signs.update(seen(36., sign), 36.).state, 'LIVRE')
+
+    def test_hold_time_and_forgotten_sign(self):
+        signs = SignController({1: 'pare'}, hold_s=3., memory_s=1.)
+        sign = Marker(1, 320, 200, 40)
+        signs.update(seen(0., sign), 0.)
+        signs.update(seen(.1, sign), .1)
+        signs.stopped(.5)
+        self.assertEqual(signs.update(seen(2., sign), 2.).state, 'PARADO')
+        self.assertIn('liberado', signs.update(seen(3.6, sign), 3.6).message)
+        other = SignController({1: 'pare'}, memory_s=1.)
+        other.update(seen(0., sign), 0.)
+        other.update(seen(.1, sign), .1)
+        command = other.update(seen(1.5), 1.5)  # placa sumiu sem o carro parar (falso)
+        self.assertEqual(command.state, 'LIVRE')
+        self.assertIn('sumiu', command.message)
+
+    def test_other_ids_and_bad_actions(self):
+        signs = SignController({1: 'pare', 7: 'ignorar'})
+        for t in (0., .1):
+            command = signs.update(seen(t, Marker(7, 1, 1, 30), Marker(23, 1, 1, 30)), t)
+        self.assertEqual(command.state, 'LIVRE')
+        self.assertIn('ArUco 23', command.message)   # avisa uma vez
+        with self.assertRaises(ValueError):
+            SignController({1: 'voar'})
+
+
+class MissionTests(unittest.TestCase):
+    """O laco de controle para perto do cone da placa e libera pelo botao."""
+    def test_mission_uses_the_short_stop_distance_and_resume_releases(self):
+        import main
+        self.assertEqual(main.aruco_every(main.parameters), 2)
+        self.assertEqual(main.aruco_every({'aruco': False}), 0)
+        signs = main.sign_controller(main.parameters, 'cones')
+        self.assertEqual(signs.actions, {1: 'pare'})
+        self.assertIsNone(main.sign_controller(main.parameters, 'line'))
+        # A distancia de parada da placa e bem menor que a normal do ultrassom.
+        confirm = main.parameters['obstacle_confirm_s']
+        self.assertLess(signs.trigger_distance(.3), main.stopping_distance(.3, confirm) - .1)
+
+    def test_command_line(self):
+        from unittest.mock import patch
+        import main
+        with patch.object(sys, 'argv', ['main.py', '--pare-segundos', '3']), patch.object(main, 'run_mission') as run:
+            main.main()
+        self.assertEqual(run.call_args[0][0]['aruco']['hold_s'], 3.)
+        with patch.object(sys, 'argv', ['main.py', '--sem-aruco']), patch.object(main, 'run_mission') as run:
+            main.main()
+        self.assertIs(run.call_args[0][0]['aruco'], False)
+
+
+if __name__ == '__main__':
+    unittest.main()

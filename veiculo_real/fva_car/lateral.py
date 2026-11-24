@@ -725,6 +725,9 @@ class RealStanleyFollower:
         # Saltos maiores que estes, entre quadros proximos, sao descartados.
         self.max_lateral_jump = positive('max_lateral_jump_m', MAX_LATERAL_JUMP)
         self.max_heading_jump = positive('max_heading_jump_rad', MAX_HEADING_JUMP)
+        # Memoria do tracado (s): constante de tempo com que um quadro novo
+        # substitui o caminho ja identificado (_remember_path). 0 desliga.
+        self.path_memory_s = nonnegative('path_memory_s', 0.)
         self.hold_speed_factor = 1.
         self.last_state = {}  # Resumo do ultimo apply, para o debug por quadro.
         self.reverse_steps = 0  # Fora de reset(): a re real continua bloqueada.
@@ -798,6 +801,8 @@ class RealStanleyFollower:
                 or math.isnan(self.safe_speed) or self.safe_speed <= 0):
             raise ValueError('safe_speed_m_s deve ser positivo (inf: sem teto).')
         self.safe_speed = float(self.safe_speed)
+        # Teto dado de fora a cada passo (placa de PARE se aproximando, aruco.py).
+        self.external_speed_limit = math.inf
         self.age_average = None
         self.odometry = None  # PoseHistory do laco de controle (compensacao exata)
         self.exact_compensation = self.settings.get('exact_latency_compensation', True)
@@ -880,10 +885,50 @@ class RealStanleyFollower:
         self.frame_at = None
         self.frame_rejected = False
         self.rejected_frames = 0
+        self.blend_frame_at = None   # memoria do tracado (_remember_path)
+        self.blend_output = None
+        self.blend_at = None
+        self.blend_residual = np.zeros(2)
         self.counted_at = None
         self.lost_frames = 0
         self.missed_frames = 0  # quadros sem deteccao alguma (sem contar descartes)
         self.search_direction = None
+
+    def _remember_path(self, errors, observation, now, car):
+        """Memoria do tracado: um quadro novo nao troca o caminho de uma vez.
+
+        Entre quadros, o tracado ja identificado e levado pela odometria (e pelo
+        giroscopio). Quando chega um quadro novo, a diferenca entre o que ele diz
+        e o que o carro ja sabia (deslocamento e rumo no eixo, agora) vira um
+        residuo que some com constante de tempo path_memory_s. Se os quadros
+        seguintes confirmam o caminho novo, ele vale em ~3 constantes de tempo; se
+        era um quadro ruim (uma borda so, 2-4 cones), o caminho lembrado segura.
+        Nos ensaios de 24/11 cada quadro discordava do anterior em ~0,15 rad de
+        rumo (abaixo do salto maximo de 0,35) e o Stanley obedecia cada um: o
+        esterco trocava de lado 2 vezes por segundo ("pedalando")."""
+        if self.path_memory_s <= 0:
+            return errors
+        stamp = getattr(observation, 'timestamp', None)
+        if stamp != self.blend_frame_at:
+            self.blend_frame_at = stamp
+            residual = np.zeros(2)
+            # So com o caminho lembrado do passo anterior: depois de um quadro
+            # descartado ou de uma perda, ele ja esta velho e o novo entra direto.
+            if (self.blend_output is not None and self.blend_at is not None
+                    and 0. <= now - self.blend_at <= 3.*float(car.dt)):
+                expected = self._predict_line(self.blend_output, car, now - self.blend_at)
+                residual = np.array([expected[0] - errors[0],
+                                     math.atan2(math.sin(expected[1] - errors[1]), math.cos(expected[1] - errors[1]))])
+                # So suaviza o que e plausivel como ruido; salto maior ja e tratado
+                # (descartado ou aceito) pelo teste de salto acima.
+                residual = np.clip(residual, [-self.max_lateral_jump, -self.max_heading_jump],
+                                   [self.max_lateral_jump, self.max_heading_jump])
+            self.blend_residual = residual
+        elif self.blend_at is not None:
+            self.blend_residual = self.blend_residual*math.exp(-max(0., now - self.blend_at)/self.path_memory_s)
+        output = (errors[0] + float(self.blend_residual[0]), errors[1] + float(self.blend_residual[1]), errors[2])
+        self.blend_output, self.blend_at = output, now
+        return output
 
     def _filter_curvature(self, curvature, timestamp):
         """Passa-baixa por quadro novo (o mesmo quadro serve varios passos)."""
@@ -1147,6 +1192,8 @@ class RealStanleyFollower:
             else:
                 compensated = min(age, MAX_LATENCY_COMPENSATION)
                 errors = self._predict_line(errors, car, compensated)
+        if line_seen and finite_sample:
+            errors = self._remember_path(errors, observation, float(now), car)
         if line_seen:
             self.line_memory, self.line_seen_at = errors, float(now)
             self.line_speed_limit = speed_limit
@@ -1226,7 +1273,7 @@ class RealStanleyFollower:
                 self.age_average = (age if self.age_average is None
                                     else self.age_average + .05*(age - self.age_average))
                 speed_raw = min(speed_raw, max(self.min_speed, self.latency_budget/max(self.age_average, .05)))
-            limit = min(speed_limit, self.line_speed_limit, self.safe_speed)
+            limit = min(speed_limit, self.line_speed_limit, self.safe_speed, self.external_speed_limit)
             speed_raw = min(speed_raw, limit)
             car.set_vel(min(self._filter_speed(speed_raw, car.dt, getattr(car, 'v', 0.)), limit))
             active = bool(getattr(car, 'encoder_valid', True))

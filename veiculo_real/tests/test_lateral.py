@@ -588,3 +588,23 @@ class ApexRacingLineTests(unittest.TestCase):
         self.assertGreater(self.offset(apex, .8, 0.), 0.)  # apice: para dentro (esquerda)
         with self.assertRaises(ValueError):
             self.follower(racing_mode='outro')
+
+
+class PathMemoryTests(unittest.TestCase):
+    """Memoria do tracado (24/11): quadro novo que discorda nao troca o caminho de uma vez."""
+    def test_new_frame_blends_into_the_remembered_path(self):
+        from types import SimpleNamespace
+        from fva_car.lateral import RealStanleyFollower
+        follower = RealStanleyFollower({'path_memory_s': .25})
+        car = SimpleNamespace(v=0., st=0., w=0., dt=.02)
+        frame = lambda t: SimpleNamespace(timestamp=t)
+        first = follower._remember_path((0., 0., 0.), frame(1.), 1., car)
+        self.assertEqual(first, (0., 0., 0.))
+        jumped = follower._remember_path((0., .15, 0.), frame(2.), 1.02, car)   # quadro novo: +0,15 rad
+        self.assertAlmostEqual(jumped[1], 0., places=6)                         # ainda o caminho lembrado
+        for k in range(1, 40):                                                  # o mesmo quadro, 0,78 s
+            out = follower._remember_path((0., .15, 0.), frame(2.), 1.02 + .02*k, car)
+        self.assertAlmostEqual(out[1], .15, delta=.01)                          # confirmado: vale o novo
+        off = RealStanleyFollower({'path_memory_s': 0.})
+        off._remember_path((0., 0., 0.), frame(1.), 1., car)
+        self.assertEqual(off._remember_path((0., .15, 0.), frame(2.), 1.02, car)[1], .15)

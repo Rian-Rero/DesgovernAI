@@ -78,6 +78,8 @@ MISSION_DEFAULTS = {
     "speed_cap": True,            # False: --sem-teto-ultrassom (teto ~2,8 m/s pela parada no ultrassom)
     "cpu_cores": True,            # False: --sem-nucleos (controle e visao sem nucleos fixos)
     "imu": True,                  # False: --sem-imu (guinada pelo modelo da direcao)
+    "aruco": True,                # False: --sem-aruco (placas ArUco: ID 1 = PARE)
+    "path_memory": True,          # False: --memoria-tracado 0 (sem a memoria contra o esterco "pedalando")
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
     "racing_line": "0.15",        # --abrir-curva (m para fora antes da curva; 0.15 e o padrao do main.py)
     "track_width": "",            # --largura-pista (m, medida na trena; vazio: o carro estima)
@@ -94,7 +96,7 @@ TRACK_WIDTHS = ("", "1.0", "1.2", "1.3", "1.5", "1.7", "1.9")
 STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
 CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
-                     "curve_echo", "refine", "cone_map")
+                     "curve_echo", "refine", "cone_map", "aruco", "path_memory")
 LINE_ONLY_OPTIONS = ("line_highcam",)
 
 
@@ -136,6 +138,10 @@ def build_main_command(options: dict) -> str:
             parts.append("--no-refine")
         if o["estimator"] and not o["cone_map"]:
             parts.append("--sem-mapa")
+        if not o["aruco"]:
+            parts.append("--sem-aruco")
+        if o["estimator"] and not o["path_memory"]:
+            parts.append("--memoria-tracado 0")
     if not o["speed_cap"]:
         parts.append("--sem-teto-ultrassom")
     if not o["cpu_cores"]:
@@ -315,6 +321,10 @@ def command_label(command: str) -> str:
             parts.append("sem-teto")
         if "--sem-imu" in options:
             parts.append("sem-imu")
+        if "--sem-aruco" in options:
+            parts.append("sem-aruco")
+        if options.get("--memoria-tracado") in ("0", "0.0"):
+            parts.append("sem-memoria")
         if "--old-start" in options:
             parts.append("partida-antiga")
         elif options.get("--throttle-offset"):
@@ -1343,6 +1353,8 @@ class RsyncGUI(tk.Tk):
             ("speed_cap", "Teto pelo ultrassom (~2,8 m/s)"),
             ("cpu_cores", "Controle e visão em núcleos separados"),
             ("imu", "IMU: guinada pelo giroscópio"),
+            ("aruco", "Placas ArUco (ID 1 = PARE)"),
+            ("path_memory", "Memória do traçado (sem pedalar)"),
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])
