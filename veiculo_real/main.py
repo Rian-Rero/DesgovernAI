@@ -55,9 +55,10 @@ STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 ULTRASONIC_MIN_VALID_M = 0.03
 
 parameters = {
-    # Duracao maxima da missao (s). Era 30: agora a volta so acaba pelo botao
-    # Encerrar da GUI, Ctrl+C ou --tempo. 30 min.
-    "ts": 1800.0,
+    # Duracao maxima da missao (s): a volta acaba sozinha depois disto (ou antes,
+    # pelo botao Encerrar da GUI ou Ctrl+C). --tempo / campo "Tempo da missao" da
+    # GUI mudam. 50 s, o mesmo padrao da GUI.
+    "ts": 50.0,
     "navigation_mode": "cones",  # somente cones; linha requer selecao explicita
     # Largura/espacamento da pista: so PALPITE inicial (a pista muda a cada dia).
     # O estimador do corredor mede a largura com as duas bordas e passa a usar a

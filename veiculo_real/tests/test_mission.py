@@ -300,7 +300,7 @@ class MissionTests(unittest.TestCase):
         self.assertTrue(path.exists())
 
     def test_long_default_mission_and_time_option(self):
-        self.assertGreaterEqual(mission.parameters['ts'],1800.)
+        self.assertEqual(mission.parameters['ts'],50.)
         with patch.object(sys,'argv',['main.py','--tempo','90']),patch.object(mission,'run_mission') as run:
             mission.main()
         self.assertEqual(run.call_args[0][0]['ts'],90.)

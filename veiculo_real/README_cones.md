@@ -1055,8 +1055,8 @@ Botões no quadro "Missão" da aba da câmera, junto do vídeo:
 
 A resposta do carro aparece ao lado dos botões e no terminal da aba Comandos.
 
-**Tempo da missão:** campo "Tempo da missão (s)" na GUI, padrão 50 s (`--tempo`;
-sem ele, o `main.py` usa 30 min).
+**Tempo da missão:** 50 s, no `main.py` e no campo "Tempo da missão (s)" da GUI
+(`--tempo` muda).
 
 **Como chega ao carro** (24/11, depois de os botões "não funcionarem"):
 1. A GUI escreve `<ação> <código>` em `/tmp/fva_missao.cmd`.
