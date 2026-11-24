@@ -246,6 +246,7 @@ class MissionTests(unittest.TestCase):
         """Botao "Liberar parada" (SIGUSR1 -> RESUME_REQUEST): destrava; se o eco voltar, trava de novo."""
         self.car.steps_left=6
         self.settings['ts']=10.
+        self.settings['obstacle_resume_grace_s']=0.  # sem carencia: o eco que volta trava de novo
         self.car.distances=iter([(.1,True),(.1,True),(10.,True),(10.,True),(.1,True),(.1,True)])
         original_step=self.car.step
         def step():
@@ -258,6 +259,35 @@ class MissionTests(unittest.TestCase):
         with patch.object(mission,'RealStanleyFollower',return_value=follower):self.run_fake()
         self.assertEqual([call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list],
                          [False,True,True,False,False,True])
+
+    def test_interface_command_file_releases_with_grace_and_ends_the_mission(self):
+        """Canal da GUI (arquivo): liberar com o cone AINDA na frente nao trava de novo
+        durante a carencia; encerrar termina a missao pelo caminho normal."""
+        folder=Path(self.folder.name)
+        cmd,ack=folder/'missao.cmd',folder/'missao.ack'
+        self.car.steps_left=12
+        self.settings.update(ts=100.,mission_commands=True,obstacle_resume_grace_s=2.)
+        self.car.distances=iter([(.1,True)]*12)  # cone colado na frente o tempo todo
+        original_step=self.car.step
+        def step():
+            if self.car.steps_left==9:cmd.write_text('liberar abc\n')   # ja travado
+            if self.car.steps_left==4:cmd.write_text('encerrar def\n')
+            return original_step()
+        self.car.step=step
+        ticks=iter(np.arange(0.,100.,.5))
+        follower=Mock()
+        with patch.object(mission,'MISSION_CMD_FILE',cmd),patch.object(mission,'MISSION_ACK_FILE',ack), \
+                patch.object(mission,'RealStanleyFollower',return_value=follower), \
+                patch.object(mission.threading,'Thread',side_effect=self.fake_thread):
+            mission.run_mission(self.settings,car_factory=lambda _:self.car,clock=lambda:float(next(ticks)))
+        stops=[call.kwargs['obstacle_detected'] for call in follower.apply.call_args_list]
+        # trava no 2o passo; liberado no 4o: 2 s (2 passos) sem travar; depois trava de novo
+        self.assertEqual(stops[:3],[False,True,True])
+        self.assertEqual(stops[3:5],[False,False])
+        self.assertTrue(stops[6])
+        self.assertLess(len(stops),12)                                     # encerrada antes do fim
+        self.assertTrue(ack.read_text().startswith('def encerrar recebido'))
+        self.assertFalse(cmd.exists())
 
     def test_mission_pid_file_belongs_to_this_process(self):
         path=Path(self.folder.name)/'missao.pid'

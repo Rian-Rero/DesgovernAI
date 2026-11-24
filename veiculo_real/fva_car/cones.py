@@ -239,7 +239,7 @@ class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
                  classifier=None, corridor=None, line_fusion=False, refine_bases=True, cone_map=False,
-                 aruco_every=0):
+                 aruco_every=0, aruco_marker_m=0.):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
 
         corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
@@ -256,7 +256,8 @@ class RealConeDetector:
 
         aruco_every: procura placas ArUco a cada N quadros, na imagem cheia
         (~1,3 ms a 640 px no notebook); 0 desliga. Entre buscas, o quadro repete
-        as placas da ultima busca.
+        as placas da ultima busca. aruco_marker_m: lado do quadrado preto do
+        marcador (m); com ele, cada placa ganha a posicao no chao (camera_pose).
         """
         if not isinstance(calibration, GroundCalibration):
             raise ValueError('Cones requerem calibracao metrica da camera fixa.')
@@ -338,17 +339,30 @@ class RealConeDetector:
         self.aruco = None
         self.aruco_frames = 0
         self.markers = ()
+        self.aruco_marker_m = float(aruco_marker_m or 0.)
+        self.camera_pose = None
         if self.aruco_every > 0:
             from .aruco import ArucoDetector
+            from .camera_pose import camera_pose
             self.aruco = ArucoDetector()
+            self.camera_pose = camera_pose(self.full_homography, calibration.image_size)
 
     def _detect_markers(self, frame):
         if self.aruco is None:
             return ()
         self.aruco_frames += 1
         if (self.aruco_frames - 1) % self.aruco_every == 0:
+            from dataclasses import replace as with_fields
+            from .camera_pose import marker_ground
             try:
-                self.markers = tuple(m.to_tuple() for m in self.aruco.detect(frame))
+                found = []
+                for marker in self.aruco.detect(frame):
+                    ground = marker_ground(self.camera_pose, self.full_homography, (marker.cx, marker.cy),
+                                           marker.side_px, self.aruco_marker_m)
+                    if ground is not None:
+                        marker = with_fields(marker, x=ground[0], y=ground[1], z=ground[2])
+                    found.append(marker.to_tuple())
+                self.markers = tuple(found)
             except cv2.error:
                 self.markers = ()
         return self.markers
@@ -551,7 +565,7 @@ class RealConeDetector:
                         (255, 255, 255), 1, cv2.LINE_AA)
         # Placas ArUco: quadrado magenta com o ID (coordenadas da imagem cheia).
         scale = image.shape[1]/float(self.calibration.image_size[0])
-        for marker_id, cx, cy, side in getattr(observation, 'markers', ()) or ():
+        for marker_id, cx, cy, side, *_ in getattr(observation, 'markers', ()) or ():
             half = side*scale/2
             top_left = (int(cx*scale - half), int(cy*scale - half))
             bottom_right = (int(cx*scale + half), int(cy*scale + half))

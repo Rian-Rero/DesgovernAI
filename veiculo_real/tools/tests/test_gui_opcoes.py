@@ -30,7 +30,7 @@ class MissionOptionsTests(unittest.TestCase):
         # A rede treinada em 19/11 vem ligada por padrao.
         self.assertEqual(gui.build_main_command({}),
                          "python3 -u main.py --navigation cones --vision-width 320 --steering-filter 3"
-                         " --speed 0.7 --stream 8080 --classifier modelos/cones.onnx")
+                         " --speed 0.7 --tempo 180 --stream 8080 --classifier modelos/cones.onnx")
 
     def test_map_and_speed_cap_options_reach_main(self):
         self.assertIn("4.0", gui.SPEED_PRESETS)
@@ -384,42 +384,78 @@ class CollectTerminalLogsTests(unittest.TestCase):
 
 class MissionControlTests(unittest.TestCase):
     """Botoes Encerrar / Liberar parada: o comando roda no carro (aqui, localmente)."""
-    def setUp(self):
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def start(self, answers=True):
         import subprocess
         import tempfile
         self.folder = Path(tempfile.mkdtemp())
-        self.pid_file = self.folder/"missao.pid"
+        self.files = {k: str(self.folder/f"missao.{k}") for k in ("pid", "cmd", "ack")}
+        loop = (  # o laco de controle do main.py, so a parte do canal
+            "import sys, time\n"
+            "while True:\n"
+            f"    request = mission.read_mission_command({self.files['cmd']!r})\n"
+            "    if request:\n"
+            "        action, code = request\n"
+            f"        mission.answer_mission_command(code, action + ' recebido pelo carro', {self.files['ack']!r})\n"
+            f"        open({str(self.folder/'feito')!r}, 'a').write(action + '\\n')\n"
+            "        if action == 'encerrar':\n"
+            "            sys.exit(0)\n"
+            "    time.sleep(.05)\n"
+        ) if answers else "import time\nwhile True:\n    time.sleep(.05)\n"
         (self.folder/"main.py").write_text(
-            "import os, signal, sys, time\n"
-            f"open({str(self.pid_file)!r}, 'w').write(str(os.getpid()))\n"
-            f"signal.signal(signal.SIGUSR1, lambda *_: open({str(self.folder/'liberado')!r}, 'w').write('1'))\n"
-            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
-            "while True:\n    time.sleep(.05)\n")
+            "import os, signal, sys\n"
+            f"sys.path.insert(0, {str(self.ROOT)!r})\n"
+            "import main as mission\n"
+            f"open({self.files['pid']!r}, 'w').write(str(os.getpid()))\n"
+            f"signal.signal(signal.SIGUSR1, lambda *_: open({str(self.folder/'sinal')!r}, 'w').write('1'))\n"
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n" + loop)
         self.process = subprocess.Popen([sys.executable, str(self.folder/"main.py")])
+        self.addCleanup(self.process.wait, 5)
         self.addCleanup(self.process.kill)
-        deadline = time.monotonic() + 10
-        while not self.pid_file.exists() and time.monotonic() < deadline:
+        deadline = time.monotonic() + 20
+        while not Path(self.files["pid"]).exists() and time.monotonic() < deadline:
             time.sleep(.05)
 
     def run_remote(self, command):
         import subprocess
-        return subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=10)
+        return subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=20)
 
-    def test_release_then_stop(self):
-        result = self.run_remote(gui.mission_signal_command("liberar", str(self.pid_file)))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        deadline = time.monotonic() + 5
-        while not (self.folder/"liberado").exists() and time.monotonic() < deadline:
-            time.sleep(.05)
-        self.assertTrue((self.folder/"liberado").exists())
+    def command(self, action, wait_s=3.):
+        return gui.mission_command(action, self.files["pid"], self.files["cmd"], self.files["ack"], wait_s)
+
+    def test_car_confirms_release_then_stop(self):
+        self.start()
+        result = self.run_remote(self.command("liberar"))
+        self.assertEqual(result.returncode, gui.MISSION_OK, result.stderr)
+        self.assertIn("liberar recebido pelo carro", result.stdout)
         self.assertIsNone(self.process.poll())       # liberar nao encerra
-        result = self.run_remote(gui.mission_signal_command("encerrar", str(self.pid_file)))
-        self.assertEqual(int(result.stdout), self.process.pid)
+        result = self.run_remote(self.command("encerrar"))
+        self.assertEqual(result.returncode, gui.MISSION_OK, result.stderr)
+        self.assertEqual(int(result.stdout.split()[0]), self.process.pid)
         self.process.wait(5)
+        self.assertEqual((self.folder/"feito").read_text().split(), ["liberar", "encerrar"])
         self.assertNotEqual(self.run_remote(gui.mission_alive_command(self.process.pid)).returncode, 0)
 
+    def test_old_code_on_the_car_gets_the_signal(self):
+        self.start(answers=False)
+        result = self.run_remote(self.command("liberar", wait_s=.5))
+        self.assertEqual(result.returncode, gui.MISSION_SIGNAL_ONLY, result.stderr)
+        deadline = time.monotonic() + 5
+        while not (self.folder/"sinal").exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue((self.folder/"sinal").exists())
+        self.assertFalse(Path(self.files["cmd"]).exists())  # pedido sem resposta nao fica para depois
+
     def test_nothing_running(self):
+        self.start()
         self.process.kill()
         self.process.wait(5)
-        self.assertEqual(self.run_remote(gui.mission_signal_command("encerrar", str(self.pid_file))).returncode, 2)
-        self.assertEqual(self.run_remote(gui.mission_signal_command("liberar", str(self.folder/"nada.pid"))).returncode, 2)
+        self.assertEqual(self.run_remote(self.command("encerrar")).returncode, gui.MISSION_NONE)
+        self.assertEqual(self.run_remote(gui.mission_signal_command("liberar", str(self.folder/"nada.pid"))).returncode,
+                         gui.MISSION_NONE)
+
+    def test_mission_time_reaches_main(self):
+        self.assertEqual(parsed(gui.build_main_command({}))["ts"], 180.)
+        self.assertEqual(parsed(gui.build_main_command({"mission_time": "60"}))["ts"], 60.)
+        self.assertNotIn("--tempo", gui.build_main_command({"mission_time": ""}))

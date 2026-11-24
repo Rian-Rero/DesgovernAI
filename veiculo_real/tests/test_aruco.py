@@ -35,7 +35,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual([m.marker_id for m in markers], [1])
         marker = markers[0]
         self.assertAlmostEqual(marker.cx, 300 + 16 + 40, delta=2)
-        self.assertAlmostEqual(marker.side_px, 80, delta=3)
+        self.assertAlmostEqual(marker.side_px, 80, delta=3)   # lado vertical
         self.assertEqual(ArucoDetector().detect(np.full((480, 640, 3), 140, np.uint8)), ())
 
     def test_cone_detector_carries_markers_every_n_frames(self):
@@ -53,6 +53,11 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(third.markers, ())
         self.assertIsNotNone(detector.preview_bgr(first))
         self.assertIsNone(RealConeDetector(calibration, corridor=True).aruco)
+        self.assertTrue(math.isnan(first.markers[0][4]))   # sem o tamanho do marcador: sem posicao
+        sized = RealConeDetector(calibration, processing_width=320, corridor=True, aruco_every=1, aruco_marker_m=.1)
+        marker = sized.observe_frame(frame, 1.).markers[0]
+        self.assertGreater(marker[4], 0.)                    # na frente do carro
+        self.assertTrue(math.isfinite(marker[5]) and math.isfinite(marker[6]))
 
 
 class StopSignTests(unittest.TestCase):
@@ -98,6 +103,45 @@ class StopSignTests(unittest.TestCase):
         self.assertIn('ArUco 23', command.message)   # avisa uma vez
         with self.assertRaises(ValueError):
             SignController({1: 'voar'})
+
+
+class SideSignTests(unittest.TestCase):
+    """Placa AO LADO: posicao pela imagem, lembrada pela odometria depois que sai da vista."""
+    def test_stops_with_the_front_beside_the_sign(self):
+        from fva_car.aruco import SignController
+        L, overhang = .36, .07
+        sign_world = np.array([3.5, .9])   # 3,5 m a frente, 0,9 m a esquerda
+        signs = SignController({1: 'pare'}, approach_speed=.3, front_overhang_m=overhang, reaction_s=.45,
+                               deceleration=1.75, wheelbase=L, stop_at_m=0.)
+        x, v, dt, t = -L, .3, .02, 0.   # eixo traseiro; frente do eixo dianteiro em 0
+        history = {}
+        stopped_at = None
+        rng = np.random.default_rng(0)
+        while t < 30.:
+            history[round(t, 2)] = (x, 0., 0.)
+            front = x + L
+            rel = sign_world - [front, 0.]
+            visible = rel[0] > .9/math.tan(math.radians(31.5))   # sai do campo (63 graus) a ~1,5 m
+            markers = ()
+            if visible and round(t/.1) == t/.1 or visible and abs(t/.1 - round(t/.1)) < 1e-6:
+                noise = 1. + rng.normal(0., .05)            # tamanho medido com 5% de erro
+                markers = (Marker(1, 100., 200., 30., rel[0]*noise, rel[1]*noise, .2),)
+            frame_time = round(math.floor(t/.1 + 1e-9)*.1, 2)
+            observation = SimpleNamespace(timestamp=frame_time, markers=tuple(m.to_tuple() for m in markers))
+            command = signs.update(observation, t, (x, 0., 0.), lambda s: history.get(round(s, 2)), v)
+            if command.stop and stopped_at is None:
+                signs.stopped(t)
+                stopped_at = t
+            if stopped_at is not None:      # freia: reacao e depois desaceleracao
+                if t - stopped_at > .45:
+                    v = max(0., v - 1.75*dt)
+            x += v*dt
+            t = round(t + dt, 2)
+            if v == 0.:
+                break
+        self.assertIsNotNone(stopped_at)
+        front_of_car = x + L + overhang
+        self.assertAlmostEqual(front_of_car, sign_world[0], delta=.12)   # frente na altura da placa
 
 
 class MissionTests(unittest.TestCase):

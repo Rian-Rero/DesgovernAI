@@ -1045,21 +1045,34 @@ sem. Sem IMU válida, o termo é zero.
 
 ## Ensaios de 24/11 à noite: curvas, rotatória e controle da missão
 
-### Controle da missão pela GUI
+### Controle da missão pela GUI (aba 📷 Câmera)
 
-- **Duração:** a missão dura até 30 min (`ts` 1800; era 30 s). `--tempo S`
-  muda a duração.
-- **⏹ Encerrar missão:** manda `SIGTERM` ao `main.py`, que para o carro e salva
-  tudo, como o Ctrl+C.
-- **🔄 Reiniciar missão:** encerra, espera o fim (até 20 s) e roda de novo o
-  comando da caixa.
-- **🔓 Liberar parada:** o ultrassom travava o carro até o fim da missão. O
-  botão manda `SIGUSR1` e destrava. Se o obstáculo continuar na frente, o carro
-  trava de novo depois da confirmação (0,15 s), por segurança.
+Botões no quadro "Missão" da aba da câmera, junto do vídeo:
+- **▶ Iniciar:** roda o comando da aba Comandos.
+- **⏹ Encerrar:** para o carro e salva os logs.
+- **🔄 Reiniciar:** encerra, espera o fim e inicia de novo.
+- **🔓 Liberar parada:** destrava a parada do ultrassom ou da placa de PARE.
 
-O `main.py` grava o próprio PID em `/tmp/fva_missao.pid`. A GUI só sinaliza se
-esse PID ainda for um `main.py`, nunca outro processo que tenha reaproveitado o
-número.
+A resposta do carro aparece ao lado dos botões e no terminal da aba Comandos.
+
+**Tempo da missão:** campo "Tempo da missão (s)" na GUI, padrão 180 s (`--tempo`;
+sem ele, o `main.py` usa 30 min).
+
+**Como chega ao carro** (24/11, depois de os botões "não funcionarem"):
+1. A GUI escreve `<ação> <código>` em `/tmp/fva_missao.cmd`.
+2. O laço de controle lê esse arquivo a cada 0,1 s e responde em
+   `/tmp/fva_missao.ack`.
+3. Na GUI aparece "✅ … recebido pelo carro".
+4. Sem resposta em 3 s, a GUI manda o sinal como reserva (`SIGUSR1`/`SIGTERM`)
+   e avisa: "o carro não respondeu; o código no carro está atualizado?". O
+   código antigo no carro não tinha o canal, então **enviem os arquivos** (aba
+   Enviar Arquivos) antes de testar.
+
+**Liberar com o cone ainda na frente:** o carro quase sempre para encostado no
+cone. Antes, ao liberar, o ultrassom via o mesmo cone e travava de novo em
+0,15 s: o bipe não parava e parecia que o botão não funcionava. Agora, depois de
+liberar, o ultrassom fica ignorado por `obstacle_resume_grace_s` (2 s), para o
+carro sair de perto. Depois disso, um obstáculo de verdade para o carro de novo.
 
 ### Curvas fechadas: chegar por fora, convergir para o ápice
 
@@ -1167,20 +1180,36 @@ concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracad
 - **Ação por ID:** `aruco.actions` no `main.py`, decidida num `match`/`case`.
   Hoje só a ID 1 tem ação (`"pare"`); `"ignorar"` só registra.
 
-**PARE (ID 1):**
+**PARE (ID 1), placa AO LADO da pista:**
 1. A placa precisa ser vista em 2 quadros seguidos, para um reflexo não parar o
-   carro.
-2. Visto isso, o carro reduz para 0,3 m/s (`approach_speed`).
-3. A parada passa a ser pelo ultrassom, com só `stop_gap_m` (8 cm) entre a frente
-   do pneu e o cone. A distância normal de parada do ultrassom pararia a ~0,4 m.
-   O filtro de "cone da borda na curva" fica desligado nesse trecho, porque o
-   cone da placa é o alvo.
-4. Fica parado até o botão **🔓 Liberar parada** (ou `--pare-segundos S` para
-   seguir sozinho). Depois ignora a placa por 4 s.
-5. Se a placa sumir por 2,5 s sem o carro parar, é esquecida (falso positivo).
+   carro. O carro então reduz para 0,3 m/s (`approach_speed`).
+2. **Onde está a placa** (`fva_car/camera_pose.py`):
+   - a calibração guarda só a homografia do chão; dela sai o foco da câmera
+     (521 px, 63° de campo) e a altura dela (~25 cm);
+   - a **direção** da placa vem da própria homografia, e a **distância** vem do
+     tamanho aparente do marcador (o lado vertical, que não encolhe com a placa
+     vista de lado);
+   - o terminal mostra a distância, o lado e a **altura estimada do centro da
+     placa**. Se essa altura não bater com a real, o tamanho configurado está
+     errado.
+3. **Lembrada pela odometria:** a placa ao lado sai da imagem ~1,5 m antes de o
+   carro chegar. A posição dela fica guardada no referencial da odometria, com
+   peso maior para as leituras de perto, e o carro segue contando quanto falta.
+4. **Parada:** quando falta só a distância de frear, o carro para, com a
+   **frente do carro na altura da placa** (`stop_at_m` 0; negativo para antes).
+   Se a placa estiver na frente, o ultrassom também para (8 cm do pneu ao cone).
+5. Fica parado até **🔓 Liberar parada** (ou `--pare-segundos S`) e depois
+   ignora a placa por 4 s. Se a placa sumir sem posição e sem parada, é
+   esquecida em 2,5 s.
+
+**Medir antes do ensaio:** o lado do **quadrado preto** do marcador impresso
+(`marker_m`, padrão 0,10 m; `--placa-lado 0.12`). Um erro de 20% no tamanho
+desloca a parada ~20% da distância da última leitura (~30 cm a 1,5 m). No teste
+com 5% de ruído no tamanho, a frente do carro parou a menos de 12 cm da placa.
 
 O terminal mostra cada passo; o `car.csv` tem `aruco_state` (0 livre,
-1 aproximando, 2 parado, 3 saindo) e `aruco_id`; o `cones_debug.jsonl` tem as
+1 aproximando, 2 parado, 3 saindo), `aruco_id` e `aruco_remaining_m` (quanto
+faltava até a placa); o `cones_debug.jsonl` tem as
 placas de cada quadro. `--sem-aruco` ou a caixa "Placas ArUco" na GUI desligam.
 
 ## Relatório do ensaio e versão do código

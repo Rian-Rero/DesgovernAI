@@ -34,7 +34,13 @@ MAX_VEL = 4.0  # m/s: maior teto aceito em --speed (o Car corta o throttle acima
 # Missao em andamento: PID para a GUI encerrar (SIGTERM) ou liberar a parada do
 # ultrassom (SIGUSR1) sem reiniciar o programa.
 MISSION_PID_FILE = Path("/tmp/fva_missao.pid")
+# Canal da GUI (aba Camera): ela escreve "<acao> <codigo>" em MISSION_CMD_FILE e
+# espera "<codigo> <resposta>" em MISSION_ACK_FILE. Nao depende de sinais nem de
+# permissao para matar processo, e a GUI sabe se o carro recebeu.
+MISSION_CMD_FILE = Path("/tmp/fva_missao.cmd")
+MISSION_ACK_FILE = Path("/tmp/fva_missao.ack")
 RESUME_REQUEST = threading.Event()
+STOP_REQUEST = threading.Event()
 TELEMETRY_HZ = 10.0
 TELEMETRY_PERIOD = 1.0 / TELEMETRY_HZ
 OBSTACLE_DISTANCE = 0.20  # folga desejada ate o obstaculo, a partir da FRENTE do pneu
@@ -253,12 +259,20 @@ parameters = {
     # Temperatura, clock e limitacao do Pi a cada 2 s, no resumo da volta.
     "health_monitor": True,
     # Placas ArUco (DICT_5X5_100, como camera.py; fva_car/aruco.py). Acao por ID:
-    # "pare" (ID 1, placa de PARE): reduz a approach_speed e para pelo ultrassom
-    # com stop_gap_m entre a frente do pneu e o cone; fica parado ate o botao
-    # "Liberar parada" da GUI (ou hold_s segundos). "ignorar": so registra.
-    # every: busca a cada N quadros. False desliga (--sem-aruco).
+    # "pare" (ID 1, placa de PARE AO LADO da pista): reduz a approach_speed e
+    # para com a frente do carro na altura da placa (stop_at_m; negativo = antes).
+    # A posicao vem da imagem: direcao pela homografia e distancia pelo tamanho
+    # do marcador. marker_m = LADO DO QUADRADO PRETO impresso (medir com regua!);
+    # a altura estimada do centro da placa sai no terminal e confere a medida.
+    # Placa na frente: o ultrassom tambem para (stop_gap_m do pneu ao cone).
+    # Fica parado ate o botao "Liberar parada" da GUI (ou hold_s segundos).
+    # "ignorar": so registra. every: busca a cada N quadros. False desliga.
     "aruco": {"every": 2, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
-              "hold_s": None, "ignore_s": 4.0},
+              "marker_m": 0.10, "stop_at_m": 0.0, "hold_s": None, "ignore_s": 4.0},
+    # Depois de "Liberar parada", o ultrassom fica ignorado por isto (s): o carro
+    # quase sempre parou encostado no cone, e sem a carencia travava de novo em
+    # 0,15 s (o bipe nao parava e o botao parecia nao funcionar).
+    "obstacle_resume_grace_s": 2.0,
     # Teto pela distancia de parada no alcance do ultrassom (4 m): ~2,8 m/s.
     # False tira o teto (pista fechada, sem pessoas/paredes na frente).
     "ultrasonic_speed_cap": True,
@@ -543,6 +557,12 @@ def aruco_every(config):
     return max(1, int((value if isinstance(value, dict) else {}).get("every", 2)))
 
 
+def aruco_marker_m(config):
+    """Lado do quadrado preto dos marcadores (m); 0: sem posicao das placas."""
+    value = config.get("aruco")
+    return float(value.get("marker_m", 0.0) or 0.0) if isinstance(value, dict) else 0.0
+
+
 def sign_controller(config, mode):
     """SignController das placas ArUco pela configuracao, ou None."""
     value = config.get("aruco")
@@ -560,7 +580,33 @@ def sign_controller(config, mode):
         deceleration=STOP_DECELERATION,
         hold_s=value.get("hold_s"),
         ignore_s=float(value.get("ignore_s", 4.0)),
+        stop_at_m=float(value.get("stop_at_m", 0.0)),
+        wheelbase=float(config.get("wheelbase", 0.36)),
     )
+
+
+def read_mission_command(path=None):
+    """(acao, codigo) pedida pela GUI, ou None. O arquivo e consumido."""
+    path = MISSION_CMD_FILE if path is None else path
+    try:
+        text = Path(path).read_text(encoding="utf-8").split()
+        Path(path).unlink()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text:
+        return None
+    return text[0], (text[1] if len(text) > 1 else "")
+
+
+def answer_mission_command(code, message, path=None):
+    """Resposta para a GUI (troca atomica: ela nunca le pela metade)."""
+    path = MISSION_ACK_FILE if path is None else path
+    try:
+        temporary = Path(str(path) + ".tmp")
+        temporary.write_text(f"{code} {message}\n", encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        pass
 
 
 def write_mission_pid(path=MISSION_PID_FILE):
@@ -786,6 +832,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             refine_bases=bool(config.get("cone_refine_bases", True)),
             cone_map=config.get("cone_map", False),
             aruco_every=aruco_every(config),
+            aruco_marker_m=aruco_marker_m(config),
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -853,7 +900,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    line_fusion=bool(config.get("cone_line_fusion", False)),
                                    refine_bases=bool(config.get("cone_refine_bases", True)),
                                    cone_map=config.get("cone_map", False),
-                                   aruco_every=aruco_every(config))
+                                   aruco_every=aruco_every(config),
+                                   aruco_marker_m=aruco_marker_m(config))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -990,12 +1038,38 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         last_encoder_valid = None
         t_diagnostic = t_plot - 1.0
         last_diagnostic_sequence = 0
+        commands_enabled = bool(config.get("mission_commands", car_factory is None))
         if car_factory is None:
             write_mission_pid()
+        if commands_enabled:
+            for stale in (MISSION_CMD_FILE, MISSION_ACK_FILE):
+                try:
+                    stale.unlink()  # comando de uma missao anterior nao vale para esta
+                except OSError:
+                    pass
         signs = sign_controller(config, mode)
+        command_check = -math.inf
+        resume_until = -math.inf
         sign = None
         while car.t < config["ts"]:
             if not car.step():
+                break
+            if commands_enabled and clock() - command_check >= 0.1:
+                command_check = clock()
+                request = read_mission_command()
+                if request is not None:
+                    action, code = request
+                    if action == "liberar":
+                        RESUME_REQUEST.set()
+                        answer_mission_command(code, "liberar recebido pelo carro")
+                    elif action == "encerrar":
+                        STOP_REQUEST.set()
+                        answer_mission_command(code, "encerrar recebido pelo carro: salvando logs")
+                    else:
+                        answer_mission_command(code, f"acao desconhecida: {action}")
+            if STOP_REQUEST.is_set():
+                STOP_REQUEST.clear()
+                print("Missao encerrada pela interface.", flush=True)
                 break
             if poses is not None:
                 try:
@@ -1018,30 +1092,47 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             stop_distance = stopping_distance(car.v, confirm_s)
             observation = vision_data["observation"]
             if signs is not None:
-                sign = signs.update(observation, clock())
+                try:
+                    pose_now = (float(car.p[0]), float(car.p[1]), float(car.th))
+                except (TypeError, ValueError, IndexError):
+                    pose_now = None
+                sign = signs.update(observation, clock(), pose_now,
+                                    poses.pose_at if poses is not None else None, float(car.v))
                 if sign.message:
                     print(sign.message, flush=True)
                 follower.external_speed_limit = sign.speed_limit
+                if sign.stop and not obstacle_detected and signs.stopped(clock()):
+                    # Placa ao lado alcancada (pela odometria): mesma parada travada
+                    # do ultrassom, liberada pelo botao da GUI.
+                    obstacle_detected = True
+                    print(f"PARE: parando com a frente do carro na altura da placa"
+                          f" (faltavam {100*sign.remaining_m:.0f} cm). Botao Liberar parada na GUI para seguir.",
+                          flush=True)
                 if sign.state == "APROXIMANDO":
                     # O cone da placa e o "obstaculo": para bem mais perto dele.
                     stop_distance = signs.trigger_distance(car.v)
             echo_ignored = False
             close = (valid and np.isfinite(dist) and ULTRASONIC_MIN_VALID_M <= dist <= stop_distance)
             if RESUME_REQUEST.is_set():
-                # Botao "Liberar parada" da GUI (SIGUSR1): destrava a parada do
-                # ultrassom. Com o obstaculo ainda na frente, o carro trava de novo
-                # depois da confirmacao, como na primeira vez.
+                # Botao "Liberar parada" da GUI (arquivo de comando ou SIGUSR1):
+                # destrava a parada e ignora o ultrassom por obstacle_resume_grace_s,
+                # para o carro sair de perto do cone em que parou.
                 RESUME_REQUEST.clear()
                 if signs is not None and signs.state in ("PARADO", "APROXIMANDO"):
                     print(signs.release(clock()), flush=True)
+                grace = float(config.get("obstacle_resume_grace_s", 2.0) or 0.0)
+                resume_until = float(car.t) + grace
                 if obstacle_detected:
                     obstacle_detected = False
                     echo_since = None
-                    print("Parada do ultrassom liberada pela interface"
-                          + (f": ATENCAO, o ultrassom ainda le {dist:.2f} m." if close else ": seguindo."),
-                          flush=True)
+                    print("Parada do ultrassom liberada pela interface: seguindo"
+                          + (f"; ultrassom ignorado por {grace:.1f} s para sair de perto"
+                             + (f" (le {dist:.2f} m)" if close else "") if grace > 0 else "")
+                          + ".", flush=True)
                 else:
                     print("Liberar parada: o carro nao estava parado pelo ultrassom.", flush=True)
+            if float(car.t) < resume_until:
+                close = False  # carencia depois de liberar (obstacle_resume_grace_s)
             if not close:
                 echo_since = None
             if not obstacle_detected and close:
@@ -1124,6 +1215,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 obstacle_stop=int(obstacle_detected),
                 aruco_state=-1 if sign is None else ("LIVRE", "APROXIMANDO", "PARADO", "SAINDO").index(sign.state),
                 aruco_id=-1 if sign is None else sign.marker_id,
+                aruco_remaining_m=math.nan if sign is None else sign.remaining_m,
                 distance_m=dist,
                 stopping_distance_m=stop_distance,
             )
@@ -1348,6 +1440,8 @@ def main():
                         help="Memoria do tracado contra o esterco 'pedalando' (s; 0 desliga; padrao 0.25)")
     parser.add_argument("--sem-aruco", action="store_true",
                         help="Nao procura placas ArUco (PARE)")
+    parser.add_argument("--placa-lado", type=float, metavar="M",
+                        help="Lado do quadrado preto do ArUco impresso, em m (padrao 0.10): da a distancia da placa")
     parser.add_argument("--pare-segundos", type=float, metavar="S",
                         help="Na placa de PARE, segue sozinho depois de S segundos (padrao: so pelo botao)")
     parser.add_argument("--sem-imu", action="store_true",
@@ -1452,10 +1546,14 @@ def main():
         settings["path_memory_s"] = args.memoria_tracado
     if args.sem_aruco:
         settings["aruco"] = False
-    if args.pare_segundos is not None:
+    if args.pare_segundos is not None and settings.get("aruco", True) is not False:
         if args.pare_segundos < 0:
             parser.error("--pare-segundos deve ser >= 0")
-        settings["aruco"] = {**parameters["aruco"], "hold_s": args.pare_segundos}
+        settings["aruco"] = {**settings.get("aruco", parameters["aruco"]), "hold_s": args.pare_segundos}
+    if args.placa_lado is not None and settings.get("aruco", True) is not False:
+        if not .02 <= args.placa_lado <= .5:
+            parser.error("--placa-lado deve estar entre 0.02 e 0.5 m")
+        settings["aruco"] = {**settings.get("aruco", parameters["aruco"]), "marker_m": args.placa_lado}
     if args.sem_imu:
         settings["imu"] = False
     if args.amortecer_guinada is not None:
