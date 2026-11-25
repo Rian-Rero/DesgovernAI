@@ -9,13 +9,14 @@ por match/case:
                posicao da placa vem da imagem (camera_pose.marker_ground: direcao
                pela homografia, distancia pelo tamanho do marcador, marker_m) e
                e lembrada pela odometria depois que ela sai da imagem (a ~1,5 m).
-               Se ela estiver NA FRENTE, o ultrassom tambem para (stop_gap_m entre
-               o pneu e o cone). Fica parado ate o botao "Liberar parada" da GUI
+               Se ela estiver NA FRENTE, para antes do cone (stop_gap_m entre o
+               pneu e o cone), com o ultrassom como protecao adicional. Fica parado
+               ate o botao "Liberar parada" da GUI
                (ou hold_s); depois ignora a placa por ignore_s.
     "ignorar"  so registra.
 
-A placa so vale vista em confirm_frames quadros seguidos (um reflexo isolado
-nao para o carro) e e esquecida se sumir por memory_s sem o carro parar.
+A placa so vale vista em confirm_frames buscas seguidas. Confirmada sem
+posicao utilizavel, pede parada imediatamente.
 """
 from dataclasses import dataclass
 import math
@@ -78,14 +79,15 @@ class SignCommand:
     speed_limit: float = math.inf      # teto da vref (m/s)
     marker_id: int = -1
     message: str = ""
-    stop: bool = False                 # parar agora (placa ao lado alcancada)
-    remaining_m: float = math.nan      # quanto falta ate a frente do carro chegar a placa
+    stop: bool = False                 # entrou em PARADO neste passo
+    remaining_m: float = math.nan      # quanto falta ate a posicao de parada
+    in_path: bool = False
 
 
 class SignController:
-    def __init__(self, actions=None, confirm_frames=2, memory_s=2.5, approach_speed=.3, stop_gap_m=.08,
+    def __init__(self, actions=None, confirm_frames=2, approach_speed=.3, stop_gap_m=.08,
                  front_overhang_m=.07, reaction_s=.3, deceleration=1.75, hold_s=None, ignore_s=4.,
-                 stop_at_m=0., wheelbase=.36):
+                 stop_at_m=0., wheelbase=.36, front_half_width_m=.25, max_frame_age=1.):
         """stop_at_m: onde a FRENTE do carro para em relacao a placa (0: na altura
         dela; negativo: antes)."""
         self.actions = {}
@@ -94,7 +96,6 @@ class SignController:
                 raise ValueError(f"Acao ArUco desconhecida: {action} (use {', '.join(ACTIONS)})")
             self.actions[int(key)] = action
         self.confirm_frames = int(confirm_frames)
-        self.memory_s = float(memory_s)
         self.approach_speed = float(approach_speed)
         self.stop_gap_m = float(stop_gap_m)
         self.front_overhang_m = float(front_overhang_m)
@@ -106,12 +107,14 @@ class SignController:
         self.marker_id = -1
         self.seen = {}          # id -> quadros seguidos em que apareceu
         self.last_frame = None
-        self.last_seen_at = -math.inf
+        self.last_scan = None
         self.stopped_at = None
         self.ignore_until = {}  # id -> instante ate quando ignorar (depois de parar nela)
         self.reported = set()
         self.stop_at_m = float(stop_at_m)
         self.wheelbase = float(wheelbase)
+        self.front_half_width_m = float(front_half_width_m)
+        self.max_frame_age = float(max_frame_age)
         self.sign_world = None  # posicao da placa no referencial da odometria (media ponderada)
         self.sign_weight = 0.
 
@@ -130,28 +133,24 @@ class SignController:
         if self.sign_world is None:
             self.sign_world, self.sign_weight = world, weight
         else:
-            total = self.sign_weight + weight
-            self.sign_world = (self.sign_weight*self.sign_world + weight*world)/total
-            self.sign_weight = total
+            self.sign_world = (self.sign_weight*self.sign_world + weight*world)/(self.sign_weight + weight)
+            self.sign_weight = weight
 
-    def remaining(self, pose):
-        """Quanto a frente do carro ainda anda ate a altura da placa (m), ou nan."""
+    def _remaining(self, pose):
+        """Distancia ate o ponto de parada e se o cone intercepta a frente."""
         if self.sign_world is None or pose is None:
-            return math.nan
+            return math.nan, False
         fx, fy, th = self._front(pose)
         dx, dy = self.sign_world[0] - fx, self.sign_world[1] - fy
-        ahead = math.cos(th)*dx + math.sin(th)*dy
-        return ahead - self.front_overhang_m - self.stop_at_m
+        c, s = math.cos(th), math.sin(th)
+        ahead = c*dx + s*dy
+        in_path = abs(-s*dx + c*dy) <= self.front_half_width_m
+        gap = max(-self.stop_at_m, self.stop_gap_m) if in_path else -self.stop_at_m
+        return ahead - self.front_overhang_m - gap, in_path
 
     def braking_distance(self, speed):
         speed = abs(float(speed)) if math.isfinite(speed) else self.approach_speed
         return speed*self.reaction_s + speed*speed/(2.*self.deceleration)
-
-    def trigger_distance(self, speed):
-        """Leitura do ultrassom em que comecar a parar para sobrar stop_gap_m na frente do pneu."""
-        speed = abs(float(speed)) if math.isfinite(speed) else self.approach_speed
-        return (self.stop_gap_m + self.front_overhang_m + speed*self.reaction_s
-                + speed*speed/(2.*self.deceleration))
 
     def _new_frame(self, markers, now):
         ids = {m.marker_id for m in markers}
@@ -165,55 +164,56 @@ class SignController:
     def update(self, observation, now, pose=None, pose_at=None, speed=math.nan):
         """Comando deste passo. observation: a ultima da visao (com .markers);
         pose: (x, y, th) do eixo traseiro agora; pose_at(t): a do instante da foto."""
-        stamp = getattr(observation, "timestamp", None)
+        stamp = getattr(observation, "marker_timestamp", getattr(observation, "timestamp", None))
+        scan = getattr(observation, "marker_scan", None)
         message = ""
-        if stamp is not None and stamp != self.last_frame:
+        if stamp is not None and 0. <= now - stamp <= self.max_frame_age and (
+                self.last_frame is None or stamp > self.last_frame):
+            if self.last_frame is not None and (stamp - self.last_frame > self.max_frame_age
+                    or (scan is not None and self.last_scan is not None and scan != self.last_scan + 1)):
+                self.seen.clear()
             self.last_frame = stamp
+            self.last_scan = scan
             markers = tuple(Marker(*m) for m in (getattr(observation, "markers", ()) or ()))
-            capture_pose = pose_at(stamp) if pose_at is not None else None
-            for marker in self._new_frame(markers, now):
+            confirmed = self._new_frame(markers, now)
+            capture_pose = pose_at(stamp) if confirmed and pose_at is not None else None
+            for marker in confirmed:
                 action = self.actions.get(marker.marker_id)
-                if marker.marker_id == self.marker_id:
-                    self.last_seen_at = now
-                    if self.state == "APROXIMANDO":
-                        self._remember(marker, capture_pose)
                 match action:
                     case "pare":
                         if self.state == "LIVRE":
-                            self.state, self.marker_id, self.last_seen_at = "APROXIMANDO", marker.marker_id, now
+                            self.state, self.marker_id = "APROXIMANDO", marker.marker_id
                             self.sign_world, self.sign_weight = None, 0.
-                            self._remember(marker, capture_pose)
                             where = (f" a {marker.x:.2f} m, {'esquerda' if marker.y > 0 else 'direita'}"
                                      f" {abs(marker.y):.2f} m, centro a {100*marker.z:.0f} cm do chao"
-                                     if math.isfinite(marker.x) else " (sem posicao: so o ultrassom para)")
-                            message = (f"PARE (ArUco {marker.marker_id}, lado {marker.side_px:.0f} px){where}:"
-                                       f" reduzindo para {self.approach_speed:.2f} m/s")
+                                     if math.isfinite(marker.x) else " (sem posicao)")
+                            message = f"PARE confirmado (ArUco {marker.marker_id}, lado {marker.side_px:.0f} px){where}"
+                        if self.state == "APROXIMANDO" and marker.marker_id == self.marker_id:
+                            self._remember(marker, capture_pose)
                     case "ignorar":
                         pass
                     case _:
                         if marker.marker_id not in self.reported:
                             self.reported.add(marker.marker_id)
                             message = f"ArUco {marker.marker_id} visto, sem acao configurada"
-        remaining = self.remaining(pose) if self.state == "APROXIMANDO" else math.nan
-        if self.state == "APROXIMANDO" and math.isfinite(remaining) and remaining <= self.braking_distance(speed):
-            # A placa ja saiu da imagem: a odometria leva o carro ate ela.
-            return SignCommand(self.state, self.approach_speed, self.marker_id, message, True, remaining)
-        if (self.state == "APROXIMANDO" and now - self.last_seen_at > self.memory_s
-                and not (math.isfinite(remaining) and remaining > -.5)):
-            message = f"PARE (ArUco {self.marker_id}) sumiu ha {self.memory_s:.1f} s sem parada: seguindo"
-            self.state = "LIVRE"
+        remaining, in_path = self._remaining(pose)
+        if self.state == "APROXIMANDO":
+            if not math.isfinite(remaining) or remaining <= self.braking_distance(speed):
+                self.stopped(now)
+                return SignCommand(self.state, 0., self.marker_id, message, True, remaining, in_path)
+            return SignCommand(self.state, self.approach_speed, self.marker_id, message,
+                               remaining_m=remaining, in_path=in_path)
         if self.state == "PARADO" and self.hold_s is not None and now - self.stopped_at >= self.hold_s:
             message = self.release(now)
         if self.state == "SAINDO" and now >= self.ignore_until.get(self.marker_id, -1):
             self.state = "LIVRE"
-        if self.state == "APROXIMANDO":
-            return SignCommand(self.state, self.approach_speed, self.marker_id, message, False, remaining)
         if self.state == "PARADO":
-            return SignCommand(self.state, 0., self.marker_id, message)
+            return SignCommand(self.state, 0., self.marker_id, message,
+                               remaining_m=remaining, in_path=in_path)
         return SignCommand(self.state, math.inf, self.marker_id, message)
 
     def stopped(self, now):
-        """O ultrassom parou o carro durante a aproximacao: e a parada da placa."""
+        """Trava a parada da placa, pela visao ou pelo ultrassom."""
         if self.state == "APROXIMANDO":
             self.state, self.stopped_at = "PARADO", now
             return True

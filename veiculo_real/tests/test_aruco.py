@@ -47,10 +47,14 @@ class DetectorTests(unittest.TestCase):
         first = detector.observe_frame(frame, 1.)
         self.assertEqual(first.markers[0][0], 1)
         self.assertEqual(first.debug['aruco'][0][0], 1)
-        detector.observe_frame(np.full_like(frame, 140), 1.1)   # sem busca: repete a ultima
-        self.assertEqual(detector.markers[0][0], 1)
+        second = detector.observe_frame(np.full_like(frame, 140), 1.1)   # sem busca: repete a ultima
+        self.assertEqual(second.markers, first.markers)
+        self.assertEqual(second.marker_timestamp, first.marker_timestamp)
+        self.assertEqual(second.marker_scan, first.marker_scan)
         third = detector.observe_frame(np.full_like(frame, 140), 1.2)
         self.assertEqual(third.markers, ())
+        self.assertEqual(third.marker_timestamp, 1.2)
+        self.assertEqual(third.marker_scan, first.marker_scan + 1)
         self.assertIsNotNone(detector.preview_bgr(first))
         self.assertIsNone(RealConeDetector(calibration, corridor=True).aruco)
         self.assertTrue(math.isnan(first.markers[0][4]))   # sem o tamanho do marcador: sem posicao
@@ -63,15 +67,19 @@ class DetectorTests(unittest.TestCase):
 class StopSignTests(unittest.TestCase):
     def test_confirmed_stop_sign_slows_then_stops_close_and_waits_for_the_button(self):
         signs = SignController({1: 'pare'}, confirm_frames=2, approach_speed=.3, stop_gap_m=.08)
-        sign = Marker(1, 320, 200, 40)
+        sign = Marker(1, 320, 200, 40, 2., 0., .2)
+        pose = (0., 0., 0.)
         self.assertEqual(signs.update(seen(1., sign), 1.).state, 'LIVRE')   # 1 quadro: ainda nao
-        command = signs.update(seen(1.1, sign), 1.1)
+        command = signs.update(seen(1.1, sign), 1.1, pose, lambda _: pose, .3)
         self.assertEqual(command.state, 'APROXIMANDO')
         self.assertIn('PARE', command.message)
         self.assertEqual(command.speed_limit, .3)
-        # Ultrassom: comeca a parar perto (0,08 m + 7 cm do pneu + reacao a 0,3 m/s)
-        self.assertLess(signs.trigger_distance(.3), .3)
-        self.assertTrue(signs.stopped(1.5))
+        self.assertTrue(command.in_path)
+        self.assertAlmostEqual(command.remaining_m, 2. - .07 - .08)
+        # A placa saiu do quadro. Sem eco, a odometria ainda dispara a parada.
+        command = signs.update(seen(1.5), 1.5, (1.75, 0., 0.), speed=.3)
+        self.assertTrue(command.stop)
+        self.assertEqual(command.state, 'PARADO')
         self.assertEqual(signs.update(seen(1.6, sign), 1.6).speed_limit, 0.)
         for t in (5., 30.):  # sem hold_s: fica parado
             self.assertEqual(signs.update(seen(t, sign), t).state, 'PARADO')
@@ -80,20 +88,32 @@ class StopSignTests(unittest.TestCase):
             self.assertEqual(signs.update(seen(t, sign), t).speed_limit, math.inf)
         self.assertEqual(signs.update(seen(36., sign), 36.).state, 'LIVRE')
 
-    def test_hold_time_and_forgotten_sign(self):
-        signs = SignController({1: 'pare'}, hold_s=3., memory_s=1.)
+    def test_confirmed_sign_without_geometry_stops_and_honors_hold_time(self):
+        signs = SignController({1: 'pare'}, hold_s=3.)
         sign = Marker(1, 320, 200, 40)
         signs.update(seen(0., sign), 0.)
-        signs.update(seen(.1, sign), .1)
-        signs.stopped(.5)
+        command = signs.update(seen(.1, sign), .1)
+        self.assertTrue(command.stop)
+        self.assertTrue(math.isnan(command.remaining_m))
         self.assertEqual(signs.update(seen(2., sign), 2.).state, 'PARADO')
         self.assertIn('liberado', signs.update(seen(3.6, sign), 3.6).message)
-        other = SignController({1: 'pare'}, memory_s=1.)
-        other.update(seen(0., sign), 0.)
-        other.update(seen(.1, sign), .1)
-        command = other.update(seen(1.5), 1.5)  # placa sumiu sem o carro parar (falso)
-        self.assertEqual(command.state, 'LIVRE')
-        self.assertIn('sumiu', command.message)
+
+    def test_confirmation_requires_fresh_consecutive_scans(self):
+        signs = SignController()
+        sign = Marker(1, 320, 200, 40)
+        def sample(stamp, scan):
+            observation = seen(stamp, sign)
+            observation.marker_timestamp = stamp
+            observation.marker_scan = scan
+            return observation
+
+        first = sample(1., 1)
+        self.assertEqual(signs.update(first, 1.1).state, 'LIVRE')
+        first.timestamp = 1.2  # quadro intermediario reutiliza o ArUco anterior
+        self.assertEqual(signs.update(first, 1.2).state, 'LIVRE')
+        self.assertEqual(signs.update(sample(1.3, 2), 3.).state, 'LIVRE')
+        self.assertEqual(signs.update(sample(3.1, 3), 3.1).state, 'LIVRE')
+        self.assertTrue(signs.update(sample(3.3, 4), 3.3).stop)
 
     def test_other_ids_and_bad_actions(self):
         signs = SignController({1: 'pare', 7: 'ignorar'})
@@ -146,16 +166,15 @@ class SideSignTests(unittest.TestCase):
 
 class MissionTests(unittest.TestCase):
     """O laco de controle para perto do cone da placa e libera pelo botao."""
-    def test_mission_uses_the_short_stop_distance_and_resume_releases(self):
+    def test_mission_uses_coasting_deceleration_and_marker_size(self):
         import main
         self.assertEqual(main.aruco_every(main.parameters), 2)
         self.assertEqual(main.aruco_every({'aruco': False}), 0)
         signs = main.sign_controller(main.parameters, 'cones')
         self.assertEqual(signs.actions, {1: 'pare'})
         self.assertIsNone(main.sign_controller(main.parameters, 'line'))
-        # A distancia de parada da placa e bem menor que a normal do ultrassom.
-        confirm = main.parameters['obstacle_confirm_s']
-        self.assertLess(signs.trigger_distance(.3), main.stopping_distance(.3, confirm) - .1)
+        self.assertEqual(signs.deceleration, main.parameters['coast_deceleration'])
+        self.assertEqual(main.aruco_marker_m({'aruco': True}), .1)
 
     def test_command_line(self):
         from unittest.mock import patch

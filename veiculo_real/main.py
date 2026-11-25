@@ -2,6 +2,7 @@
 """Stanley no veiculo real: linha amarela ou centro de cones pela camera."""
 
 import argparse
+from dataclasses import replace
 import json
 import math
 import os
@@ -160,6 +161,8 @@ parameters = {
     # 60 graus/s levava 0,33 s (0,5 m a 1,5 m/s) para chegar ao batente:
     # quase todo o trecho visivel antes da curva.
     "stanley_max_rate_deg_s": 120.0,
+    # Em cones, libera o esterco progressivamente nos primeiros 24 cm em movimento.
+    "cone_steering_start_distance_m": 0.24,
     # Esterco de regime atan(L*kappa) somado ao Stanley; 0 desliga.
     "stanley_curvature_ff": 1.0,
     "wheelbase": 0.36,  # m: mesmo CAR["L"] de fva_car/car.py
@@ -265,11 +268,13 @@ parameters = {
     # A posicao vem da imagem: direcao pela homografia e distancia pelo tamanho
     # do marcador. marker_m = LADO DO QUADRADO PRETO impresso (medir com regua!);
     # a altura estimada do centro da placa sai no terminal e confere a medida.
-    # Placa na frente: o ultrassom tambem para (stop_gap_m do pneu ao cone).
+    # Placa na frente: a visao antecipa a parada em stop_gap_m (do pneu ao
+    # cone). O ultrassom mantem a distancia de seguranca normal.
     # Fica parado ate o botao "Liberar parada" da GUI (ou hold_s segundos).
     # "ignorar": so registra. every: busca a cada N quadros. False desliga.
     "aruco": {"every": 2, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
-              "marker_m": 0.10, "stop_at_m": 0.0, "hold_s": None, "ignore_s": 4.0},
+              "marker_m": 0.10, "stop_at_m": 0.0, "front_half_width_m": 0.25,
+              "hold_s": None, "ignore_s": 4.0},
     # Depois de "Liberar parada", o ultrassom fica ignorado por isto (s): o carro
     # quase sempre parou encostado no cone, e sem a carencia travava de novo em
     # 0,15 s (o bipe nao parava e o botao parecia nao funcionar).
@@ -561,7 +566,9 @@ def aruco_every(config):
 def aruco_marker_m(config):
     """Lado do quadrado preto dos marcadores (m); 0: sem posicao das placas."""
     value = config.get("aruco")
-    return float(value.get("marker_m", 0.0) or 0.0) if isinstance(value, dict) else 0.0
+    if not value:
+        return 0.0
+    return float(value.get("marker_m", 0.10) or 0.0) if isinstance(value, dict) else 0.10
 
 
 def sign_controller(config, mode):
@@ -578,11 +585,13 @@ def sign_controller(config, mode):
         stop_gap_m=float(value.get("stop_gap_m", 0.08)),
         front_overhang_m=FRONT_OVERHANG_M,
         reaction_s=STOP_REACTION_TIME + float(config.get("obstacle_confirm_s", 0.0) or 0.0),
-        deceleration=STOP_DECELERATION,
+        deceleration=float(config.get("coast_deceleration", 0.5)),
         hold_s=value.get("hold_s"),
         ignore_s=float(value.get("ignore_s", 4.0)),
         stop_at_m=float(value.get("stop_at_m", 0.0)),
         wheelbase=float(config.get("wheelbase", 0.36)),
+        front_half_width_m=float(value.get("front_half_width_m", 0.25)),
+        max_frame_age=float(config.get("vision_timeout", 1.0)),
     )
 
 
@@ -779,6 +788,7 @@ def follower_config(config, mode, corridor):
     radius = float(config.get("min_curve_radius_m", 0) or 0)
     config["speed_sight_curvature"] = 1.0 / radius if radius > 0 and corridor is not None else 0.0
     config["line_search_rate_deg_s"] = 0.
+    config["steering_start_distance_m"] = config.get("cone_steering_start_distance_m", 0.)
     config["loss_speed_ramp"] = True
     config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
     config["max_heading_jump_rad"] = config.get("cone_max_heading_jump_rad", 0.35)
@@ -1101,17 +1111,13 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                     poses.pose_at if poses is not None else None, float(car.v))
                 if sign.message:
                     print(sign.message, flush=True)
-                follower.external_speed_limit = sign.speed_limit
-                if sign.stop and not obstacle_detected and signs.stopped(clock()):
-                    # Placa ao lado alcancada (pela odometria): mesma parada travada
-                    # do ultrassom, liberada pelo botao da GUI.
-                    obstacle_detected = True
-                    print(f"PARE: parando com a frente do carro na altura da placa"
-                          f" (faltavam {100*sign.remaining_m:.0f} cm). Botao Liberar parada na GUI para seguir.",
-                          flush=True)
-                if sign.state == "APROXIMANDO":
-                    # O cone da placa e o "obstaculo": para bem mais perto dele.
-                    stop_distance = signs.trigger_distance(car.v)
+                if sign.stop:
+                    if not math.isfinite(sign.remaining_m):
+                        reason = "placa confirmada sem posicao confiavel"
+                    else:
+                        location = "cone a frente" if sign.in_path else "placa lateral"
+                        reason = f"{location}, faltam {100*sign.remaining_m:.0f} cm ate o ponto de parada"
+                    print(f"PARE (ArUco {sign.marker_id}) acionado pela visao ({reason}).", flush=True)
             echo_ignored = False
             close = (valid and np.isfinite(dist) and ULTRASONIC_MIN_VALID_M <= dist <= stop_distance)
             if RESUME_REQUEST.is_set():
@@ -1119,27 +1125,30 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 # destrava a parada e ignora o ultrassom por obstacle_resume_grace_s,
                 # para o carro sair de perto do cone em que parou.
                 RESUME_REQUEST.clear()
-                if signs is not None and signs.state in ("PARADO", "APROXIMANDO"):
+                sign_stopped = sign is not None and sign.state == "PARADO"
+                if sign_stopped:
                     print(signs.release(clock()), flush=True)
-                grace = float(config.get("obstacle_resume_grace_s", 2.0) or 0.0)
-                resume_until = float(car.t) + grace
-                if obstacle_detected:
+                    sign = replace(sign, state="SAINDO", speed_limit=math.inf, stop=False)
+                if obstacle_detected or sign_stopped:
+                    grace = float(config.get("obstacle_resume_grace_s", 2.0) or 0.0)
+                    resume_until = float(car.t) + grace
                     obstacle_detected = False
                     echo_since = None
-                    print("Parada do ultrassom liberada pela interface: seguindo"
+                    print("Parada liberada pela interface"
                           + (f"; ultrassom ignorado por {grace:.1f} s para sair de perto"
                              + (f" (le {dist:.2f} m)" if close else "") if grace > 0 else "")
                           + ".", flush=True)
                 else:
-                    print("Liberar parada: o carro nao estava parado pelo ultrassom.", flush=True)
+                    print("Liberar parada: nenhuma parada estava travada.", flush=True)
             if float(car.t) < resume_until:
                 close = False  # carencia depois de liberar (obstacle_resume_grace_s)
-            if not close:
+            sign_stopped = sign is not None and sign.state == "PARADO"
+            if not close or sign_stopped:
                 echo_since = None
-            if not obstacle_detected and close:
+            if not obstacle_detected and not sign_stopped and close:
                 reason = ""
-                approaching_sign = sign is not None and sign.state == "APROXIMANDO"
-                if mode == "cones" and config.get("ultrasonic_curve_filter", True) and not approaching_sign:
+                frontal_sign = sign is not None and sign.state == "APROXIMANDO" and sign.in_path
+                if mode == "cones" and config.get("ultrasonic_curve_filter", True) and not frontal_sign:
                     # Em curva, ja virando, o eco pode ser o cone da borda de fora:
                     # a visao diz se ele esta fora do caminho (fva_car/obstacle.py).
                     echo_ignored, reason = curve_echo(
@@ -1156,17 +1165,21 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                     # o eco continuar por confirm_s (~2 leituras).
                     echo_since = float(car.t)
                 if not echo_ignored and (confirm_s <= 0 or float(car.t) - echo_since >= confirm_s):
-                    obstacle_detected = True
-                    if signs is not None and signs.stopped(clock()):
-                        print(f"PARE: parado com o ultrassom a {dist:.2f} m do cone"
-                              f" (~{100*max(0.0, dist - FRONT_OVERHANG_M):.0f} cm da frente do pneu)."
-                              " Botao Liberar parada na GUI para seguir.", flush=True)
+                    if frontal_sign and signs.stopped(clock()):
+                        sign = replace(sign, state="PARADO", speed_limit=0.)
+                        sign_stopped = True
+                        print(f"PARE (ArUco {sign.marker_id}) acionado pelo ultrassom a {dist:.2f} m do cone.",
+                              flush=True)
                     else:
+                        obstacle_detected = True
                         print(
                             f"Obstaculo a {dist:.2f} m: parada travada (botao Liberar parada na GUI)"
                             + (f" ({reason})." if reason else "."),
                             flush=True,
                         )
+            stop_required = obstacle_detected or sign_stopped
+            if sign is not None:
+                follower.external_speed_limit = sign.speed_limit
             manual = (
                 getattr(car, "sel_direcao", 1) == 0
                 and getattr(car, "sel_tracao", 1) == 0
@@ -1175,7 +1188,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 manual
                 and encoder_valid
                 and not car.emergencia
-                and not obstacle_detected
+                and not stop_required
                 and np.isfinite(car.v)
                 and np.isfinite(car.dt)
                 and car.dt > 0
@@ -1189,9 +1202,9 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 control_status = "Controle manual RC"
             else:
                 follower.apply(
-                    car, observation, clock(), obstacle_detected=obstacle_detected
+                    car, observation, clock(), obstacle_detected=stop_required
                 )
-                control_status = follower.status
+                control_status = f"Parada ArUco {sign.marker_id} travada" if sign_stopped else follower.status
             if mode == "cones" and observation is not None:
                 debug = getattr(observation, "debug", None) or {}
                 sides = debug.get("sides") or {}
@@ -1209,11 +1222,14 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             if recorder is not None and observation is not None:
                 recorder.record(observation, dict(
                     {"active": False} if manual else follower.last_state, status=control_status, manual=bool(manual),
-                    obstacle=bool(obstacle_detected), t=float(car.t), v=float(car.v),
+                    obstacle=bool(stop_required), aruco_state=None if sign is None else sign.state,
+                    aruco_id=None if sign is None else sign.marker_id,
+                    aruco_remaining_m=None if sign is None else sign.remaining_m,
+                    t=float(car.t), v=float(car.v),
                     vref=float(car.vref), steer_cmd_rad=float(car.st)))
             car.log(
                 obstacle_ignored=int(echo_ignored),
-                obstacle_stop=int(obstacle_detected),
+                obstacle_stop=int(stop_required),
                 aruco_state=-1 if sign is None else ("LIVRE", "APROXIMANDO", "PARADO", "SAINDO").index(sign.state),
                 aruco_id=-1 if sign is None else sign.marker_id,
                 aruco_remaining_m=math.nan if sign is None else sign.remaining_m,
@@ -1251,7 +1267,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 )
                 t_diagnostic = now
                 last_diagnostic_sequence = sequence
-            if obstacle_detected and now >= next_stop_beep:
+            if stop_required and now >= next_stop_beep:
                 if car.bz.beep([0.15, 0.15], silence=0.15):
                     next_stop_beep = now + 1.0
             # O controle roda em todo passo; somente a telemetria usa 10 Hz.

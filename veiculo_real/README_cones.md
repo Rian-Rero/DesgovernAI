@@ -1186,9 +1186,10 @@ concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracad
 - **Ação por ID:** `aruco.actions` no `main.py`, decidida num `match`/`case`.
   Hoje só a ID 1 tem ação (`"pare"`); `"ignorar"` só registra.
 
-**PARE (ID 1), placa AO LADO da pista:**
-1. A placa precisa ser vista em 2 quadros seguidos, para um reflexo não parar o
-   carro. O carro então reduz para 0,3 m/s (`approach_speed`).
+**PARE (ID 1), placa lateral ou cone à frente:**
+1. A placa precisa aparecer em duas buscas seguidas. Com a posição estimada,
+   o carro reduz para 0,3 m/s (`approach_speed`). Se confirmar o ID sem
+   conseguir localizar a placa, corta a tração imediatamente.
 2. **Onde está a placa** (`fva_car/camera_pose.py`):
    - a calibração guarda só a homografia do chão; dela sai o foco da câmera
      (521 px, 63° de campo) e a altura dela (~25 cm);
@@ -1196,17 +1197,17 @@ concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracad
      tamanho aparente do marcador (o lado vertical, que não encolhe com a placa
      vista de lado);
    - o terminal mostra a distância, o lado e a **altura estimada do centro da
-     placa**. Se essa altura não bater com a real, o tamanho configurado está
-     errado.
+     placa**. Se essa altura divergir da real, confira o tamanho configurado
+     e a calibração da câmera.
 3. **Lembrada pela odometria:** a placa ao lado sai da imagem ~1,5 m antes de o
    carro chegar. A posição dela fica guardada no referencial da odometria, com
    peso maior para as leituras de perto, e o carro segue contando quanto falta.
-4. **Parada:** quando falta só a distância de frear, o carro para, com a
-   **frente do carro na altura da placa** (`stop_at_m` 0; negativo para antes).
-   Se a placa estiver na frente, o ultrassom também para (8 cm do pneu ao cone).
+4. **Parada:** o corte de tração é antecipado pela distância de desaceleração
+   em neutro. Com a placa lateral, o alvo é a **frente do carro na altura da
+   placa** (`stop_at_m` igual a 0). Com o cone à frente, o alvo visual fica
+   8 cm antes do cone (`stop_gap_m`). O ultrassom mantém seu limiar normal.
 5. Fica parado até **🔓 Liberar parada** (ou `--pare-segundos S`) e depois
-   ignora a placa por 4 s. Se a placa sumir sem posição e sem parada, é
-   esquecida em 2,5 s.
+   ignora a placa por 4 s.
 
 **Medir antes do ensaio:** o lado do **quadrado preto** do marcador impresso
 (`marker_m`, padrão 0,10 m; `--placa-lado 0.12`). Um erro de 20% no tamanho
@@ -1214,9 +1215,14 @@ desloca a parada ~20% da distância da última leitura (~30 cm a 1,5 m). No test
 com 5% de ruído no tamanho, a frente do carro parou a menos de 12 cm da placa.
 
 O terminal mostra cada passo; o `car.csv` tem `aruco_state` (0 livre,
-1 aproximando, 2 parado, 3 saindo), `aruco_id` e `aruco_remaining_m` (quanto
-faltava até a placa); o `cones_debug.jsonl` tem as
-placas de cada quadro. `--sem-aruco` ou a caixa "Placas ArUco" na GUI desligam.
+1 aproximando, 2 comando de parada travado, 3 saindo), `aruco_id` e
+`aruco_remaining_m` (distância até o ponto de parada). O `cones_debug.jsonl`
+registra o número da busca e o horário da imagem que mediu a placa.
+`--sem-aruco` ou a caixa "Placas ArUco" na GUI desligam a detecção.
+
+No modo cones, o comando de direção parte do centro calibrado e cresce ao
+longo dos primeiros 24 cm medidos pelo encoder (`cone_steering_start_distance_m`).
+O fator aplicado fica em `steer_start_factor` no log.
 
 ## Relatório do ensaio e versão do código
 

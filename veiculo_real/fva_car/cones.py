@@ -230,8 +230,10 @@ class ConeObservation(LineObservation):
     cone_settings: object = None
     corridor: object = None   # CorridorEstimate do quadro (estimador ligado)
     debug: dict | None = None  # Detalhes serializaveis do quadro (cones_debug.jsonl).
-    # Placas ArUco do quadro: (id, cx, cy, lado px) na imagem cheia (fva_car/aruco.py).
+    # Placas da ultima busca ArUco, com o horario do quadro que as mediu.
     markers: tuple = ()
+    marker_timestamp: float | None = None
+    marker_scan: int | None = None
 
 
 
@@ -339,6 +341,8 @@ class RealConeDetector:
         self.aruco = None
         self.aruco_frames = 0
         self.markers = ()
+        self.marker_timestamp = None
+        self.marker_scan = 0
         self.aruco_marker_m = float(aruco_marker_m or 0.)
         self.camera_pose = None
         if self.aruco_every > 0:
@@ -347,11 +351,11 @@ class RealConeDetector:
             self.aruco = ArucoDetector()
             self.camera_pose = camera_pose(self.full_homography, calibration.image_size)
 
-    def _detect_markers(self, frame):
-        if self.aruco is None:
-            return ()
+    def _detect_markers(self, frame, timestamp):
         self.aruco_frames += 1
         if (self.aruco_frames - 1) % self.aruco_every == 0:
+            self.marker_timestamp = timestamp
+            self.marker_scan += 1
             from dataclasses import replace as with_fields
             from .camera_pose import marker_ground
             try:
@@ -365,7 +369,6 @@ class RealConeDetector:
                 self.markers = tuple(found)
             except cv2.error:
                 self.markers = ()
-        return self.markers
 
     def observe_frame(self, frame, timestamp):
         metadata = dict(processing_size=self.processing_size)
@@ -377,9 +380,12 @@ class RealConeDetector:
         if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
             return ConeObservation(timestamp, reason='Imagem deve ser BGR uint8', **metadata)
         metadata['source_frame'] = frame
-        metadata['markers'] = self._detect_markers(frame)
         if frame.shape[1::-1] != self.calibration.image_size:
             return ConeObservation(timestamp, reason='Resolucao diferente da calibracao da camera', **metadata)
+        if self.aruco is not None:
+            self._detect_markers(frame, timestamp)
+            metadata.update(markers=self.markers, marker_timestamp=self.marker_timestamp,
+                            marker_scan=self.marker_scan)
         started = time.perf_counter()
         small = frame if frame.shape[1::-1] == self.processing_size else cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
         motion = None
@@ -464,8 +470,10 @@ class RealConeDetector:
             metadata['corridor'] = estimate
         metadata['geometry_seconds'] = time.perf_counter()-started
         debug = dict(result.debug)
-        if metadata.get('markers'):
-            debug['aruco'] = [list(m) for m in metadata['markers']]
+        if self.aruco is not None:
+            debug.update(aruco_scan=self.marker_scan, aruco_timestamp=self.marker_timestamp)
+            if self.markers:
+                debug['aruco'] = [list(m) for m in self.markers]
         if estimate is not None:
             debug.update(corridor=dict(estimate.debug(), sides=self.corridor_sides,
                                        line_points=int(self.corridor.used_center)), legacy_errors=legacy)

@@ -74,6 +74,8 @@ class MissionTests(unittest.TestCase):
         events=self.events
         args=kwargs['args']
         capture = kwargs.get('name') == 'captura-camera'
+        if not capture:
+            self.vision_data = args[1]
         class Thread:
             def start(self):
                 if capture:
@@ -241,6 +243,37 @@ class MissionTests(unittest.TestCase):
                          [False,True,True])
         logs=[call.kwargs for call in self.car.log.call_args_list if 'obstacle_stop' in call.kwargs]
         self.assertEqual([log['obstacle_stop'] for log in logs],[0,1,1])
+
+    def test_aruco_stop_cuts_throttle_and_releases_without_sonar_echo(self):
+        from fva_car.aruco import Marker
+        from fva_car.cones import ConeObservation
+
+        self.car.steps_left = 4
+        self.car.distances = iter([(4., True)]*4)
+        original_step = self.car.step
+
+        def step():
+            if not original_step():
+                return False
+            stamp = 10. + self.car.t
+            markers = (Marker(1, 320., 350., 80.).to_tuple(),) if self.car.t <= 2. else ()
+            self.vision_data['observation'] = ConeObservation(
+                stamp, errors=(.1, 0., 0.), markers=markers,
+                marker_timestamp=stamp, marker_scan=int(self.car.t))
+            if self.car.t == 4.:
+                mission.RESUME_REQUEST.set()
+            return True
+
+        self.car.step = step
+        self.addCleanup(mission.RESUME_REQUEST.clear)
+        with patch.object(mission.threading, 'Thread', side_effect=self.fake_thread):
+            mission.run_mission(dict(self.settings, ts=5., navigation_mode='cones', save=False),
+                                car_factory=lambda _: self.car, clock=lambda: 10. + self.car.t)
+        logs = [call.kwargs for call in self.car.log.call_args_list if 'aruco_state' in call.kwargs]
+        self.assertEqual([log['aruco_state'] for log in logs], [0, 2, 2, 3])
+        control = [call.kwargs for call in self.car.log.call_args_list if 'steer_cmd_rad' in call.kwargs]
+        self.assertEqual([(log['vref'], log['u']) for log in control[1:3]], [(0., 0.), (0., 0.)])
+        self.assertGreater(control[-1]['vref'], 0.)
 
     def test_interface_releases_the_obstacle_stop(self):
         """Botao "Liberar parada" (SIGUSR1 -> RESUME_REQUEST): destrava; se o eco voltar, trava de novo."""

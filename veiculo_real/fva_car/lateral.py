@@ -468,7 +468,8 @@ class StanleyController:
         self.raw_steer = 0.
         self.target_steer = 0.
 
-    def update(self, cross_track, heading_error, speed, dt, curvature=0., search=0., yaw_rate=math.nan):
+    def update(self, cross_track, heading_error, speed, dt, curvature=0., search=0.,
+               yaw_rate=math.nan, steering_factor=1.):
         """cross_track: linha a esquerda do eixo dianteiro (+), em metros.
 
         heading_error = direcao da linha - direcao do carro, em radianos.
@@ -492,16 +493,17 @@ class StanleyController:
             self.damping_term = float(np.clip(-self.yaw_damping*(yaw_rate - speed*curvature),
                                               -self.max_steer/2, self.max_steer/2))
         return self.steer_to(self.heading_term + self.cross_track_term + self.feedforward_term
-                             + self.damping_term + self.search_term, dt, self.gain_scale, self.rate_scale)
+                             + self.damping_term + self.search_term, dt, self.gain_scale,
+                             self.rate_scale, steering_factor)
 
-    def steer_to(self, raw_steer, dt, gain=1., rate=1.):
+    def steer_to(self, raw_steer, dt, gain=1., rate=1., steering_factor=1.):
         """Satura no batente e limita a taxa (comum ao Stanley e ao pure pursuit).
 
         gain multiplica o esterco pedido; rate, a taxa maxima do volante; trim
         (correcao de centralizacao, rad) e somado depois.
         """
         self.raw_steer = float(raw_steer)*gain + self.trim
-        self.target_steer = float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
+        self.target_steer = steering_factor*float(np.clip(self.raw_steer, -self.max_steer, self.max_steer))
         limit = self.max_rate*rate*dt
         self.steer += float(np.clip(self.target_steer - self.steer, -limit, limit))
         return self.steer
@@ -866,9 +868,10 @@ class RealStanleyFollower:
         # Rampa assimetrica da vref: sobe no maximo speed_rise_m_s2 (m/s^2) e
         # desce na hora. 0 mantem o passa-baixas simetrico speed_filter_s.
         self.speed_rise = nonnegative('speed_rise_m_s2', 0.)
+        self.steering_start_distance = nonnegative('steering_start_distance_m', 0.)
         self.reset()
 
-    def reset(self):
+    def reset(self, restart_steering=True):
         """Neutraliza o Stanley e esquece a ultima faixa vista."""
         self.controller.reset()
         self.line_memory = None
@@ -893,6 +896,8 @@ class RealStanleyFollower:
         self.lost_frames = 0
         self.missed_frames = 0  # quadros sem deteccao alguma (sem contar descartes)
         self.search_direction = None
+        if restart_steering:
+            self.distance_since_start = 0.
 
     def _remember_path(self, errors, observation, now, car):
         """Memoria do tracado: um quadro novo nao troca o caminho de uma vez.
@@ -1116,6 +1121,7 @@ class RealStanleyFollower:
         age = float('nan')
         errors = None
         stanley_speed = float('nan')
+        steering_factor = float('nan')
         speed_raw = float('nan')
         reference_valid = True
         if (isinstance(now, (int, float, np.number)) and math.isfinite(now)
@@ -1295,6 +1301,14 @@ class RealStanleyFollower:
             gain = self.one_border_steer_gain if boost else 1.
             rate = self.one_border_rate_gain if boost else 1.
             self.controller.gain_scale, self.controller.rate_scale = gain, rate
+            # Com v quase zero, o Stanley amplifica o erro lateral e chega ao
+            # batente antes de sair. Libera o angulo pelo deslocamento medido.
+            steering_factor = 1.
+            if self.steering_start_distance > 0:
+                if car.v > .08:
+                    self.distance_since_start = min(self.steering_start_distance,
+                                                    self.distance_since_start + car.v*car.dt)
+                steering_factor = self.distance_since_start / self.steering_start_distance
             pursuit = (active and self.steering_law == 'pure_pursuit'
                        and math.isfinite(self.path_dkappa) and not search)
             self.pursuit_target = None
@@ -1304,7 +1318,7 @@ class RealStanleyFollower:
                                           self.pursuit_min, self.pursuit_max))
                 raw, x, y = pure_pursuit_steer(errors, self.path_dkappa, lookahead,
                                                self.controller.wheelbase, self.max_curvature)
-                steer = self.controller.steer_to(raw, car.dt, gain, rate)
+                steer = self.controller.steer_to(raw, car.dt, gain, rate, steering_factor)
                 self.pursuit_target = (lookahead, x, y)
                 car.set_steer(self.steering_sign * steer)
                 active = bool(getattr(car, 'encoder_valid', True))
@@ -1313,7 +1327,7 @@ class RealStanleyFollower:
                 gyro = (self.steering_sign*float(gyro) if isinstance(gyro, (int, float, np.number))
                         and math.isfinite(gyro) else math.nan)
                 steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature, search,
-                                               yaw_rate=gyro)
+                                               yaw_rate=gyro, steering_factor=steering_factor)
                 car.set_steer(self.steering_sign * steer)
                 # O setter revalida a serial antes de enviar a direcao.
                 active = bool(getattr(car, 'encoder_valid', True))
@@ -1322,7 +1336,7 @@ class RealStanleyFollower:
             car.vel_error_integral = 0.
             car.set_u(0.)
             car.set_steer(0.)
-            self.reset()
+            self.reset(restart_steering=not finite_sample or car.v <= .08)
             steer = 0.
         if active and holding and outlier:
             self.status = 'Quadro com salto impossivel descartado; seguindo ultima trajetoria'
@@ -1391,6 +1405,7 @@ class RealStanleyFollower:
                 stanley_use_vref=int(self.use_vref),
                 stanley_raw_rad=self.controller.raw_steer if active else invalid,
                 stanley_target_rad=self.controller.target_steer if active else invalid,
+                steer_start_factor=steering_factor if active else invalid,
                 pursuit_lookahead_m=self.pursuit_target[0] if active and self.pursuit_target else invalid,
                 racing_offset_m=self.racing_offset if active else invalid,
                 pursuit_target_y_m=self.pursuit_target[2] if active and self.pursuit_target else invalid,
@@ -1406,6 +1421,7 @@ class RealStanleyFollower:
             hold_speed_factor=self.hold_speed_factor if active else invalid,
             reference_speed_factor=self.line_speed_factor if active else invalid,
             speed_target=speed_raw, vref=float(car.vref), steer_rad=steer,
+            steer_start_factor=steering_factor if active else invalid,
             steering_law='pure_pursuit' if active and self.pursuit_target else 'stanley',
             steer_trim_deg=round(math.degrees(self.steer_trim), 2),
             pursuit=None if not (active and self.pursuit_target) else [round(v, 3) for v in self.pursuit_target],

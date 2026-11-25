@@ -92,6 +92,29 @@ class FollowerTests(unittest.TestCase):
         follower.apply(car, observation, now)
         return car
 
+    def test_startup_keeps_wheels_centered_then_ramps_both_steering_laws(self):
+        for law in ('stanley', 'pure_pursuit'):
+            with self.subTest(law=law):
+                follower = RealStanleyFollower(dict(self.settings, steering_law=law,
+                                                     steering_start_distance_m=.24))
+                car = fake_car()
+                car.v = 0.
+                observation = LineObservation(10., errors=(.3, .2, .1), path_dkappa=0.)
+                self.apply(follower, observation, car)
+                self.assertEqual(car.st, 0.)
+                self.assertGreater(car.vref, 0.)
+                car.v = .3
+                self.apply(follower, observation, car, now=10.02)
+                self.assertAlmostEqual(follower.last_state['steer_start_factor'], .025)
+                self.assertGreater(car.st, 0.)
+                self.assertLessEqual(car.st, math.radians(.5) + 1e-9)
+                for i in range(2, 51):
+                    now = 10. + i*car.dt
+                    self.apply(follower, LineObservation(now, errors=observation.errors, path_dkappa=0.),
+                               car, now=now)
+                self.assertEqual(follower.last_state['steer_start_factor'], 1.)
+                self.assertGreater(car.st, math.radians(10.))
+
     def test_pure_pursuit_needs_the_estimator_path(self):
         follower = RealStanleyFollower(dict(self.settings, steering_law='pure_pursuit'))
         self.apply(follower, LineObservation(10., errors=(.1, 0., 0.), path_dkappa=0.))
