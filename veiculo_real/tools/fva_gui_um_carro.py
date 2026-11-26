@@ -48,48 +48,53 @@ DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
 # m/s; nos cones e a velocidade MAXIMA NAS RETAS (o carro reduz sozinho antes
 # das curvas e pelo limite de visibilidade, ~1,6 m/s com curva de R = 1,5 m).
-SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "4.0")
-CURVE_RADII = ("1.2", "1.5", "2.0", "3.0")  # m: curva mais fechada da pista (--min-radius)
+SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "3.5" "4.0", "4.5", "5.0")
+CURVE_RADII = (
+    "1.2",
+    "1.5",
+    "2.0",
+    "3.0",
+)  # m: curva mais fechada da pista (--min-radius)
 CURVE_ACCELS = ("0.35", "0.40", "0.45", "0.50", "0.55", "0.60")  # m/s²
 STREAM_PORT = 8080  # main.py --stream
 
 
 # Opcoes da missao na aba de comandos: cada uma vira um argumento do main.py.
 MISSION_DEFAULTS = {
-    "navigation": "cones",        # cones | line
+    "navigation": "cones",  # cones | line
     "speed": SPEED_PRESETS[0],
-    "stream": True,               # --stream 8080 (video no navegador)
-    "estimator": True,            # False: --no-estimator
-    "pure_pursuit": False,        # True: --pure-pursuit (padrao do main.py: Stanley)
-    "preview": True,              # False: --no-preview
-    "cone_debug": True,           # False: --no-cone-debug
-    "record_frames": False,       # --record-frames HZ (coleta para a rede)
+    "stream": True,  # --stream 8080 (video no navegador)
+    "estimator": True,  # False: --no-estimator
+    "pure_pursuit": False,  # True: --pure-pursuit (padrao do main.py: Stanley)
+    "preview": True,  # False: --no-preview
+    "cone_debug": True,  # False: --no-cone-debug
+    "record_frames": False,  # --record-frames HZ (coleta para a rede)
     "record_hz": "3",
-    "classifier": True,           # --classifier CAMINHO (rede de 19/11: 93,6% de acuracia balanceada)
+    "classifier": True,  # --classifier CAMINHO (rede de 19/11: 93,6% de acuracia balanceada)
     "classifier_path": "modelos/cones.onnx",
     "vision_width": "320",
     "steering_filter": "3",
-    "min_radius": "1.2",          # --min-radius (so cones; 1.2 e o padrao do main.py)
-    "curve_lateral_accel": "0.45", # --curve-lateral-accel
-    "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
-    "trim_learning": True,        # False: --no-trim-learning (trim da direcao fixo)
-    "line_highcam": True,         # linha amarela com a camera alta; False: --line-classic
-    "refine": True,               # False: --no-refine (base dos cones longe na imagem reduzida)
-    "new_start": True,            # False: --old-start (partida como antes de 17/11, para comparar)
-    "cone_map": True,             # False: --sem-mapa (mapa SLAM + tracado SVM de reserva)
-    "speed_cap": True,            # False: --sem-teto-ultrassom (teto ~2,8 m/s pela parada no ultrassom)
-    "cpu_cores": True,            # False: --sem-nucleos (controle e visao sem nucleos fixos)
-    "imu": True,                  # False: --sem-imu (guinada pelo modelo da direcao)
-    "aruco": True,                # False: --sem-aruco (placas ArUco: ID 1 = PARE)
-    "path_memory": True,          # False: --memoria-tracado 0 (sem a memoria contra o esterco "pedalando")
-    "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
-    "racing_line": "0.15",        # --abrir-curva (m para fora antes da curva; 0.15 e o padrao do main.py)
-    "mission_time": "50",         # --tempo (s): a missao acaba sozinha depois disto
-    "marker_side_cm": "",         # --placa-lado (cm na GUI): lado do quadrado preto do ArUco
-    "marker_height_cm": "",       # --placa-altura (cm na GUI): altura do centro do ArUco
-    "steer_left": "100",          # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
-    "steer_right": "100",         # --esterco-direita
-    "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
+    "min_radius": "1.2",  # --min-radius (so cones; 1.2 e o padrao do main.py)
+    "curve_lateral_accel": "0.45",  # --curve-lateral-accel
+    "curve_echo": True,  # False: --strict-ultrasonic (para em qualquer eco)
+    "trim_learning": True,  # False: --no-trim-learning (trim da direcao fixo)
+    "line_highcam": True,  # linha amarela com a camera alta; False: --line-classic
+    "refine": True,  # False: --no-refine (base dos cones longe na imagem reduzida)
+    "new_start": True,  # False: --old-start (partida como antes de 17/11, para comparar)
+    "cone_map": True,  # False: --sem-mapa (mapa SLAM + tracado SVM de reserva)
+    "speed_cap": True,  # False: --sem-teto-ultrassom (teto ~2,8 m/s pela parada no ultrassom)
+    "cpu_cores": True,  # False: --sem-nucleos (controle e visao sem nucleos fixos)
+    "imu": True,  # False: --sem-imu (guinada pelo modelo da direcao)
+    "aruco": True,  # False: --sem-aruco (placas ArUco: ID 1 = PARE)
+    "path_memory": True,  # False: --memoria-tracado 0 (sem a memoria contra o esterco "pedalando")
+    "stanley_gain": "2.5",  # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
+    "racing_line": "0.15",  # --abrir-curva (m para fora antes da curva; 0.15 e o padrao do main.py)
+    "mission_time": "50",  # --tempo (s): a missao acaba sozinha depois disto
+    "marker_side_cm": "",  # --placa-lado (cm na GUI): lado do quadrado preto do ArUco
+    "marker_height_cm": "",  # --placa-altura (cm na GUI): altura do centro do ArUco
+    "steer_left": "100",  # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
+    "steer_right": "100",  # --esterco-direita
+    "throttle_offset": "auto",  # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
 }
 VISION_WIDTHS = ("0", "320", "480")
 STEERING_FILTERS = ("1", "3", "5")
@@ -99,8 +104,19 @@ RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20", "0.25")
 MISSION_TIMES = ("30", "50", "60", "120", "180", "300", "600")
 STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
-CONE_ONLY_OPTIONS = ("estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",
-                     "curve_echo", "refine", "cone_map", "aruco", "path_memory")
+CONE_ONLY_OPTIONS = (
+    "estimator",
+    "pure_pursuit",
+    "preview",
+    "cone_debug",
+    "record_frames",
+    "classifier",
+    "curve_echo",
+    "refine",
+    "cone_map",
+    "aruco",
+    "path_memory",
+)
 LINE_ONLY_OPTIONS = ("line_highcam",)
 
 
@@ -111,14 +127,20 @@ def build_main_command(options: dict) -> str:
     de curva dependem do estimador (sem ele o main.py ja usa o Stanley).
     """
     o = {**MISSION_DEFAULTS, **options}
-    parts = ["python3 -u main.py", f"--navigation {o['navigation']}",
-             f"--vision-width {o['vision_width']}", f"--steering-filter {o['steering_filter']}",
-             f"--speed {o['speed']}"]
+    parts = [
+        "python3 -u main.py",
+        f"--navigation {o['navigation']}",
+        f"--vision-width {o['vision_width']}",
+        f"--steering-filter {o['steering_filter']}",
+        f"--speed {o['speed']}",
+    ]
     try:
         curve_accel = float(str(o["curve_lateral_accel"]).replace(",", "."))
     except ValueError:
-        curve_accel = 0.
-    if 0 < curve_accel < float("inf") and curve_accel != float(MISSION_DEFAULTS["curve_lateral_accel"]):
+        curve_accel = 0.0
+    if 0 < curve_accel < float("inf") and curve_accel != float(
+        MISSION_DEFAULTS["curve_lateral_accel"]
+    ):
         parts.append(f"--curve-lateral-accel {curve_accel:g}")
     try:
         seconds = float(str(o.get("mission_time", "")).replace(",", "."))
@@ -149,7 +171,9 @@ def build_main_command(options: dict) -> str:
         if str(o["min_radius"]) != MISSION_DEFAULTS["min_radius"]:
             parts.append(f"--min-radius {o['min_radius']}")
         if o["classifier"] and str(o["classifier_path"]).strip():
-            parts.append(f"--classifier {shlex.quote(str(o['classifier_path']).strip())}")
+            parts.append(
+                f"--classifier {shlex.quote(str(o['classifier_path']).strip())}"
+            )
         if not o["refine"]:
             parts.append("--no-refine")
         if o["estimator"] and not o["cone_map"]:
@@ -169,29 +193,42 @@ def build_main_command(options: dict) -> str:
             gain = float(str(o["stanley_gain"]).replace(",", "."))
         except ValueError:
             gain = None
-        if gain is not None and 0 < gain <= 10 and abs(gain - float(MISSION_DEFAULTS["stanley_gain"])) > 1e-9:
+        if (
+            gain is not None
+            and 0 < gain <= 10
+            and abs(gain - float(MISSION_DEFAULTS["stanley_gain"])) > 1e-9
+        ):
             parts.append(f"--stanley-gain {gain:g}")
     if o["navigation"] == "cones":
         try:
             racing = float(str(o["racing_line"]).replace(",", "."))
         except ValueError:
             racing = None
-        if racing is not None and 0 <= racing <= .5 and abs(racing - float(MISSION_DEFAULTS["racing_line"])) > 1e-9:
+        if (
+            racing is not None
+            and 0 <= racing <= 0.5
+            and abs(racing - float(MISSION_DEFAULTS["racing_line"])) > 1e-9
+        ):
             parts.append(f"--abrir-curva {racing:g}")
-        for key, flag, low, high in (("marker_side_cm", "--placa-lado", 2., 50.),
-                                     ("marker_height_cm", "--placa-altura", 0., 20.)):
+        for key, flag, low, high in (
+            ("marker_side_cm", "--placa-lado", 2.0, 50.0),
+            ("marker_height_cm", "--placa-altura", 0.0, 20.0),
+        ):
             try:
                 value = float(str(o.get(key, "")).replace(",", "."))
             except ValueError:
                 continue
             if low <= value <= high:
                 parts.append(f"{flag} {value/100:g}")
-    for key, flag in (("steer_left", "--esterco-esquerda"), ("steer_right", "--esterco-direita")):
+    for key, flag in (
+        ("steer_left", "--esterco-esquerda"),
+        ("steer_right", "--esterco-direita"),
+    ):
         try:
             value = float(str(o[key]).replace(",", "."))
         except ValueError:
             value = None
-        if value is not None and 50 <= value <= 150 and abs(value - 100.) > 1e-9:
+        if value is not None and 50 <= value <= 150 and abs(value - 100.0) > 1e-9:
             parts.append(f"{flag} {value:g}")
     if not o["new_start"]:
         parts.append("--old-start")  # ja traz o acelerador antigo
@@ -200,7 +237,9 @@ def build_main_command(options: dict) -> str:
             offset = float(str(o["throttle_offset"]).replace(",", "."))
         except ValueError:
             offset = None
-        if offset is not None and 0 <= offset <= .6:  # "auto" (ou invalido): aprendido no carro
+        if (
+            offset is not None and 0 <= offset <= 0.6
+        ):  # "auto" (ou invalido): aprendido no carro
             parts.append(f"--throttle-offset {offset:g}")
     return " ".join(parts)
 
@@ -208,8 +247,12 @@ def build_main_command(options: dict) -> str:
 def with_main_command(command: str, main_line: str) -> str:
     """Troca as linhas que executam main.py pela nova; sem nenhuma, poe no inicio."""
     lines = command.splitlines()
-    replaced = [main_line if re.search(r"\bmain\.py\b", line) else line for line in lines]
-    if replaced == lines and not any(re.search(r"\bmain\.py\b", line) for line in lines):
+    replaced = [
+        main_line if re.search(r"\bmain\.py\b", line) else line for line in lines
+    ]
+    if replaced == lines and not any(
+        re.search(r"\bmain\.py\b", line) for line in lines
+    ):
         replaced = [main_line] + [line for line in lines if line.strip()]
     return "\n".join(replaced)
 
@@ -263,8 +306,12 @@ def _slug(text: str) -> str:
 def remote_log_path(workdir: str, label: str, now=None):
     """(pasta, arquivo) do log no carro para um comando com este rotulo."""
     now = time.localtime() if now is None else now
-    folder = posixpath.join(workdir, REMOTE_TERMINAL_DIR, time.strftime("%Y-%m-%d", now))
-    return folder, posixpath.join(folder, f"{time.strftime('%Hh%Mm%S', now)}_{label}.log")
+    folder = posixpath.join(
+        workdir, REMOTE_TERMINAL_DIR, time.strftime("%Y-%m-%d", now)
+    )
+    return folder, posixpath.join(
+        folder, f"{time.strftime('%Hh%Mm%S', now)}_{label}.log"
+    )
 
 
 # Missao em andamento no carro (main.py MISSION_*_FILE).
@@ -277,8 +324,13 @@ MISSION_SIGNALS = {"encerrar": "SIGTERM", "liberar": "SIGUSR1"}
 MISSION_OK, MISSION_NONE, MISSION_SIGNAL_ONLY = 0, 2, 4
 
 
-def mission_command(action: str, pid_file: str = MISSION_PID_FILE, cmd_file: str = MISSION_CMD_FILE,
-                    ack_file: str = MISSION_ACK_FILE, wait_s: float = 3.0) -> str:
+def mission_command(
+    action: str,
+    pid_file: str = MISSION_PID_FILE,
+    cmd_file: str = MISSION_CMD_FILE,
+    ack_file: str = MISSION_ACK_FILE,
+    wait_s: float = 3.0,
+) -> str:
     """Comando (no carro) que pede `action` a missao e espera a confirmacao dela.
 
     1. Acha o main.py: pelo arquivo de PID; sem ele (main.py antigo, que nao o
@@ -404,7 +456,9 @@ def command_label(command: str) -> str:
             if "--no-estimator" in options:
                 parts.append("sem-estimador")
             else:
-                parts.append("purepursuit" if "--pure-pursuit" in options else "stanley")
+                parts.append(
+                    "purepursuit" if "--pure-pursuit" in options else "stanley"
+                )
                 if "--no-preview" in options:
                     parts.append("sem-previa")
             if "--record-frames" in options:
@@ -432,7 +486,11 @@ def command_label(command: str) -> str:
         return "testes_unitarios"
     if script:
         return _slug(script)
-    return _slug(Path(argv[0]).name if argv[0] not in ("sudo", "nohup") or len(argv) < 2 else argv[1])
+    return _slug(
+        Path(argv[0]).name
+        if argv[0] not in ("sudo", "nohup") or len(argv) < 2
+        else argv[1]
+    )
 
 
 # ---------------------------------------------------------------- envio incremental
@@ -443,15 +501,63 @@ def command_label(command: str) -> str:
 #    2026-11-10) ou por conterem arquivos de ensaio (car.csv, cones_debug.jsonl);
 #  - arquivos de dados (.csv, .jsonl, .npz, .zip, .jpg, videos, .log).
 # Codigo, calibracao (.json), modelos (.onnx/.pt), firmware (.ino) e scripts vao.
-SYNC_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".idea", ".vscode", "venv", ".venv",
-                  "node_modules", "__MACOSX"}
-SYNC_DATA_DIR_WORDS = ("log", "experimento", "ajuste_camera", "frames", "recorte", "dataset", "coleta",
-                       "ensaio", "download", "captura", "gravac")
+SYNC_SKIP_DIRS = {
+    "__pycache__",
+    ".git",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".idea",
+    ".vscode",
+    "venv",
+    ".venv",
+    "node_modules",
+    "__MACOSX",
+}
+SYNC_DATA_DIR_WORDS = (
+    "log",
+    "experimento",
+    "ajuste_camera",
+    "frames",
+    "recorte",
+    "dataset",
+    "coleta",
+    "ensaio",
+    "download",
+    "captura",
+    "gravac",
+)
 SYNC_DATA_DIR_DATE = re.compile(r"^\d{8}_\d{4,6}|^\d{4}-\d{2}-\d{2}")
-SYNC_RUN_FILES = {"car.csv", "cones_debug.jsonl", "cones_summary.json", "vision_status.json"}
-SYNC_SKIP_SUFFIXES = (".pyc", ".pyo", ".swp", ".csv", ".jsonl", ".npz", ".npy", ".zip", ".tar", ".gz", ".7z",
-                      ".rar", ".jpg", ".jpeg", ".bmp", ".mp4", ".avi", ".mov", ".mkv", ".log", ".bag", ".h264",
-                      ".pdf")
+SYNC_RUN_FILES = {
+    "car.csv",
+    "cones_debug.jsonl",
+    "cones_summary.json",
+    "vision_status.json",
+}
+SYNC_SKIP_SUFFIXES = (
+    ".pyc",
+    ".pyo",
+    ".swp",
+    ".csv",
+    ".jsonl",
+    ".npz",
+    ".npy",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".7z",
+    ".rar",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".log",
+    ".bag",
+    ".h264",
+    ".pdf",
+)
 SYNC_SKIP_FILES = {".DS_Store", "Thumbs.db"}
 # Compatibilidade: pastas de dados do carro que nunca sao apagadas nem enviadas.
 SYNC_SKIP_TOP_DIRS = {"logs", "experimentos", "ajuste_camera"}
@@ -460,7 +566,9 @@ SYNC_SKIP_TOP_DIRS = {"logs", "experimentos", "ajuste_camera"}
 def is_data_dir(name: str, path: str = None) -> bool:
     """Pasta de dados (nao vai para o carro)? Pelo nome ou pelo conteudo."""
     lower = name.lower()
-    if any(word in lower for word in SYNC_DATA_DIR_WORDS) or SYNC_DATA_DIR_DATE.match(name):
+    if any(word in lower for word in SYNC_DATA_DIR_WORDS) or SYNC_DATA_DIR_DATE.match(
+        name
+    ):
         return True
     if path is not None:
         try:
@@ -500,14 +608,20 @@ def local_tree(local_dir: str, skipped: dict = None) -> dict:
             path = os.path.join(root, d)
             if is_data_dir(d, path):
                 if skipped is not None:
-                    skipped["pastas"].append(d if top else posixpath.join(*rel_root.split(os.sep), d))
+                    skipped["pastas"].append(
+                        d if top else posixpath.join(*rel_root.split(os.sep), d)
+                    )
                 skip_tree(path)
                 continue
             keep.append(d)
         dirs[:] = keep
         for name in names:
             if name in SYNC_SKIP_FILES or name.lower().endswith(SYNC_SKIP_SUFFIXES):
-                if skipped is not None and not name.endswith((".pyc", ".pyo")) and name not in SYNC_SKIP_FILES:
+                if (
+                    skipped is not None
+                    and not name.endswith((".pyc", ".pyo"))
+                    and name not in SYNC_SKIP_FILES
+                ):
                     skipped["arquivos"] += 1
                     try:
                         skipped["bytes"] += os.path.getsize(os.path.join(root, name))
@@ -525,13 +639,17 @@ def local_tree(local_dir: str, skipped: dict = None) -> dict:
 
 def _output_text(stream) -> str:
     data = stream.read()
-    return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+    return (
+        data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+    )
 
 
 def remote_tree(client, remote_dir: str) -> dict:
     """{caminho relativo: (tamanho, mtime inteiro)} no carro, numa so ida e volta (find)."""
-    command = (f"cd {shlex.quote(remote_dir)} 2>/dev/null && "
-               "find . -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null")
+    command = (
+        f"cd {shlex.quote(remote_dir)} 2>/dev/null && "
+        "find . -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null"
+    )
     _, out, _ = client.exec_command(command, timeout=60)
     files = {}
     for line in _output_text(out).splitlines():
@@ -553,10 +671,27 @@ def clean_target_is_safe(remote_dir: str) -> bool:
     parts = [p for p in path.split("/") if p]
     if not path.startswith("/") or len(parts) < 3:
         return False
-    if parts[0] in ("etc", "usr", "var", "bin", "boot", "lib", "proc", "sys", "dev", "root", "tmp", "opt"):
+    if parts[0] in (
+        "etc",
+        "usr",
+        "var",
+        "bin",
+        "boot",
+        "lib",
+        "proc",
+        "sys",
+        "dev",
+        "root",
+        "tmp",
+        "opt",
+    ):
         return False
-    return not (parts[0] == "home" and len(parts) == 3 and parts[2] in ("Desktop", "Documents", "Downloads",
-                                                                       "Área de Trabalho", "Documentos"))
+    return not (
+        parts[0] == "home"
+        and len(parts) == 3
+        and parts[2]
+        in ("Desktop", "Documents", "Downloads", "Área de Trabalho", "Documentos")
+    )
 
 
 def clean_remote(client, remote_dir: str, keep=CLEAN_KEEP, check=True):
@@ -565,11 +700,15 @@ def clean_remote(client, remote_dir: str, keep=CLEAN_KEEP, check=True):
     check=False so nos testes (pasta temporaria); a GUI sempre confere a pasta.
     """
     if check and not clean_target_is_safe(remote_dir):
-        raise RuntimeError(f"Pasta remota {remote_dir!r} nao parece pasta de projeto; limpeza recusada.")
+        raise RuntimeError(
+            f"Pasta remota {remote_dir!r} nao parece pasta de projeto; limpeza recusada."
+        )
     quoted = shlex.quote(remote_dir)
     _, out, _ = client.exec_command(
         f"cd {quoted} 2>/dev/null && find . -mindepth 1 -maxdepth 1 -printf '%P\\n' | "
-        "while IFS= read -r f; do printf '%s\\t' \"$f\"; du -sk -- \"$f\" | cut -f1; done", timeout=120)
+        'while IFS= read -r f; do printf \'%s\\t\' "$f"; du -sk -- "$f" | cut -f1; done',
+        timeout=120,
+    )
     entries = []
     for line in _output_text(out).splitlines():
         name, _, size = line.rpartition("\t")
@@ -577,7 +716,9 @@ def clean_remote(client, remote_dir: str, keep=CLEAN_KEEP, check=True):
             entries.append((name, int(size) if size.isdigit() else 0))
     if entries:
         names = " ".join(shlex.quote(name) for name, _ in entries)
-        _, out, err = client.exec_command(f"cd {quoted} && rm -rf -- {names}", timeout=300)
+        _, out, err = client.exec_command(
+            f"cd {quoted} && rm -rf -- {names}", timeout=300
+        )
         _output_text(out)
     return entries
 
@@ -587,9 +728,10 @@ def remote_md5(client, remote_dir: str, paths, chunk=150) -> dict:
     sums = {}
     paths = list(paths)
     for start in range(0, len(paths), chunk):
-        names = " ".join(shlex.quote(p) for p in paths[start:start + chunk])
-        _, out, _ = client.exec_command(f"cd {shlex.quote(remote_dir)} && md5sum -- {names} 2>/dev/null",
-                                        timeout=60)
+        names = " ".join(shlex.quote(p) for p in paths[start : start + chunk])
+        _, out, _ = client.exec_command(
+            f"cd {shlex.quote(remote_dir)} && md5sum -- {names} 2>/dev/null", timeout=60
+        )
         for line in _output_text(out).splitlines():
             digest, _, name = line.partition("  ")
             if name:
@@ -620,15 +762,21 @@ def sync_plan(local: dict, remote: dict, force=False):
     return send, check, same
 
 
-def sync_directory(client, sftp, local_dir, remote_dir, log, force=False, delete_py=False):
+def sync_directory(
+    client, sftp, local_dir, remote_dir, log, force=False, delete_py=False
+):
     """Envia so o que mudou de local_dir para remote_dir. Devolve um resumo (dict)."""
     started = time.monotonic()
     skipped = {}
     local = local_tree(local_dir, skipped)
     if skipped["pastas"] or skipped["arquivos"]:
-        names = ", ".join(skipped["pastas"][:8]) + (" ..." if len(skipped["pastas"]) > 8 else "")
-        log(f"   ⏭ fora do envio (dados): {skipped['arquivos']} arquivo(s), {skipped['bytes']/1e6:.1f} MB"
-            + (f" — pastas: {names}" if names else ""))
+        names = ", ".join(skipped["pastas"][:8]) + (
+            " ..." if len(skipped["pastas"]) > 8 else ""
+        )
+        log(
+            f"   ⏭ fora do envio (dados): {skipped['arquivos']} arquivo(s), {skipped['bytes']/1e6:.1f} MB"
+            + (f" — pastas: {names}" if names else "")
+        )
     remote = remote_tree(client, remote_dir)
     send, check, same = sync_plan(local, remote, force)
     touched = []
@@ -668,13 +816,23 @@ def sync_directory(client, sftp, local_dir, remote_dir, log, force=False, delete
         # branch); nunca dentro das pastas de dados.
         for rel in sorted(set(remote) - set(local)):
             parts = rel.split("/")
-            if (rel.endswith(".py") and parts[0] not in SYNC_SKIP_TOP_DIRS
-                    and not any(part in SYNC_SKIP_DIRS or is_data_dir(part) for part in parts[:-1])):
+            if (
+                rel.endswith(".py")
+                and parts[0] not in SYNC_SKIP_TOP_DIRS
+                and not any(
+                    part in SYNC_SKIP_DIRS or is_data_dir(part) for part in parts[:-1]
+                )
+            ):
                 sftp.remove(posixpath.join(remote_dir, rel))
                 removed.append(rel)
                 log(f"   ✗ {rel} (não existe mais aqui)")
-    return {"sent": len(send), "same": len(same) + len(touched), "bytes": sent_bytes,
-            "removed": len(removed), "seconds": time.monotonic() - started}
+    return {
+        "sent": len(send),
+        "same": len(same) + len(touched),
+        "bytes": sent_bytes,
+        "removed": len(removed),
+        "seconds": time.monotonic() - started,
+    }
 
 
 def local_code_version():
@@ -682,6 +840,7 @@ def local_code_version():
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from fva_car.version import code_version
+
         return code_version()
     except Exception:  # noqa: BLE001 - so informativo
         return None
@@ -692,12 +851,13 @@ def remote_code_version(client, remote_dir: str):
     try:
         _, out, _ = client.exec_command(
             f"cd {shlex.quote(remote_dir)} && python3 -c 'from fva_car.version import code_version;"
-            f" print(code_version())'", timeout=30)
+            f" print(code_version())'",
+            timeout=30,
+        )
         text = _output_text(out).strip().splitlines()
         return text[-1] if text and re.fullmatch(r"[0-9a-f]{8}", text[-1]) else None
     except Exception:  # noqa: BLE001 - so informativo
         return None
-
 
 
 ########################################
@@ -708,8 +868,12 @@ def remote_code_version(client, remote_dir: str):
 COLLECT_MANIFEST = ".coletados.json"
 # Estado do carro dentro de logs/: vem na coleta, mas nunca e apagado do carro.
 COLLECT_KEEP = {"direcao_trim.json", "direcao_trim_v2.json", "acelerador.json"}
-COLLECT_TAR_MIN_FILES = 8      # a partir disto, um fluxo tar (frames: milhares de arquivos pequenos)
-DELETE_MIN_AGE_S = 60          # arquivo mexido ha menos disso pode ser de uma corrida em andamento
+COLLECT_TAR_MIN_FILES = (
+    8  # a partir disto, um fluxo tar (frames: milhares de arquivos pequenos)
+)
+DELETE_MIN_AGE_S = (
+    60  # arquivo mexido ha menos disso pode ser de uma corrida em andamento
+)
 CLOCK_TOLERANCE_S = 2.0
 
 
@@ -735,7 +899,9 @@ def remote_listing(client, remote_dir: str):
     folder = shlex.quote(remote_dir)
     _, out, _ = client.exec_command(
         f"test -d {folder} || {{ echo FVA_MISSING; exit 0; }}; cd {folder} && "
-        "find . -type f -printf '%P\\t%s\\t%T@\\n'; echo FVA_NOW:$(date +%s)", timeout=60)
+        "find . -type f -printf '%P\\t%s\\t%T@\\n'; echo FVA_NOW:$(date +%s)",
+        timeout=60,
+    )
     text = _output_text(out)
     if "FVA_MISSING" in text.splitlines()[:1]:
         return None, None
@@ -754,7 +920,9 @@ def remote_listing(client, remote_dir: str):
 
 def load_manifest(local_dest: str) -> dict:
     try:
-        with open(os.path.join(local_dest, COLLECT_MANIFEST), encoding="utf-8") as handle:
+        with open(
+            os.path.join(local_dest, COLLECT_MANIFEST), encoding="utf-8"
+        ) as handle:
             data = json.load(handle)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
@@ -784,18 +952,24 @@ def already_collected(rel: str, info, local_dest: str, manifest: dict) -> bool:
 
 def collect_plan(remote: dict, local_dest: str, manifest: dict, force=False):
     """Arquivos a baixar (os que faltam no PC), em ordem."""
-    return sorted(rel for rel, info in remote.items()
-                  if force or not already_collected(rel, info, local_dest, manifest))
+    return sorted(
+        rel
+        for rel, info in remote.items()
+        if force or not already_collected(rel, info, local_dest, manifest)
+    )
 
 
 def deletable(remote: dict, local_dest: str, manifest: dict, remote_now) -> list:
     """O que pode sair do carro: ja no PC, parado ha 1 min e nao e estado do carro."""
     if remote_now is None:
         return []
-    return sorted(rel for rel, info in remote.items()
-                  if rel not in COLLECT_KEEP
-                  and remote_now - info[1] >= DELETE_MIN_AGE_S
-                  and already_collected(rel, info, local_dest, manifest))
+    return sorted(
+        rel
+        for rel, info in remote.items()
+        if rel not in COLLECT_KEEP
+        and remote_now - info[1] >= DELETE_MIN_AGE_S
+        and already_collected(rel, info, local_dest, manifest)
+    )
 
 
 def _mb(size) -> str:
@@ -819,7 +993,9 @@ def clock_command(epoch: float, password: str = None, timezone: str = None):
     steps = [f"date -s @{int(round(epoch))} >/dev/null"]
     if timezone and re.fullmatch(r"[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)*", timezone):
         steps.append(f"(timedatectl set-timezone {timezone} 2>/dev/null || true)")
-    steps.append("(command -v fake-hwclock >/dev/null && fake-hwclock save >/dev/null 2>&1; true)")
+    steps.append(
+        "(command -v fake-hwclock >/dev/null && fake-hwclock save >/dev/null 2>&1; true)"
+    )
     inner = " && ".join(steps)
     if password:
         return f"sudo -S -p '' sh -c {shlex.quote(inner)}", password + "\n"
@@ -848,11 +1024,23 @@ def sync_car_clock(client, password: str, report, force=False):
         return True
     late = "atrasado" if offset < 0 else "adiantado"
     amount = abs(offset)
-    text = (f"{amount / 86400:.1f} dias" if amount >= 86400 else f"{amount / 3600:.1f} h" if amount >= 3600
-            else f"{amount / 60:.1f} min" if amount >= 60 else f"{amount:.1f} s")
-    report(f"🕒 Relógio do carro {late} {text}" + (f" e fuso {zone} (notebook {local_zone})" if wrong_zone else "")
-           + ": acertando...")
-    command, secret = clock_command(time.time() + 0.05, password, local_timezone() if wrong_zone else None)
+    text = (
+        f"{amount / 86400:.1f} dias"
+        if amount >= 86400
+        else (
+            f"{amount / 3600:.1f} h"
+            if amount >= 3600
+            else f"{amount / 60:.1f} min" if amount >= 60 else f"{amount:.1f} s"
+        )
+    )
+    report(
+        f"🕒 Relógio do carro {late} {text}"
+        + (f" e fuso {zone} (notebook {local_zone})" if wrong_zone else "")
+        + ": acertando..."
+    )
+    command, secret = clock_command(
+        time.time() + 0.05, password, local_timezone() if wrong_zone else None
+    )
     stdin, out, err = client.exec_command(command, timeout=20)
     if secret:
         stdin.write(secret)
@@ -865,10 +1053,15 @@ def sync_car_clock(client, password: str, report, force=False):
     except Exception:  # noqa: BLE001
         offset = math.inf
     if status == 0 and abs(offset) <= CLOCK_TOLERANCE_S:
-        report(f"✅ Relógio do carro acertado ({time.strftime('%d/%m/%Y %H:%M:%S')}, diferença {offset:+.1f} s).")
+        report(
+            f"✅ Relógio do carro acertado ({time.strftime('%d/%m/%Y %H:%M:%S')}, diferença {offset:+.1f} s)."
+        )
         return True
-    report(f"❌ Não foi possível acertar o relógio (sudo pede a senha do usuário?): {problem or status}")
+    report(
+        f"❌ Não foi possível acertar o relógio (sudo pede a senha do usuário?): {problem or status}"
+    )
     return False
+
 
 def open_folder(path: Path):
     """Abre a pasta no gerenciador de arquivos do sistema."""
@@ -1226,11 +1419,17 @@ class RsyncGUI(tk.Tk):
         # 1a vez (ou carro "pesado"): apaga a pasta do codigo no carro, menos logs/,
         # e envia so o codigo. Desmarca sozinho depois: os proximos sao incrementais.
         self.sync_clean_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(send, text="Limpar a pasta no carro e enviar só o código (1ª vez)",
-                        variable=self.sync_clean_var).pack(side="left", padx=(12, 4))
+        ttk.Checkbutton(
+            send,
+            text="Limpar a pasta no carro e enviar só o código (1ª vez)",
+            variable=self.sync_clean_var,
+        ).pack(side="left", padx=(12, 4))
         self.sync_delete_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(send, text="Apagar no carro .py que não existem mais aqui",
-                        variable=self.sync_delete_var).pack(side="left", padx=(12, 4))
+        ttk.Checkbutton(
+            send,
+            text="Apagar no carro .py que não existem mais aqui",
+            variable=self.sync_delete_var,
+        ).pack(side="left", padx=(12, 4))
 
         # Log
         log_frame = ttk.Frame(parent)
@@ -1395,7 +1594,11 @@ class RsyncGUI(tk.Tk):
         box.pack(fill="x", padx=10, pady=(4, 2))
         self.mission_vars = {}
         for key, value in MISSION_DEFAULTS.items():
-            variable = tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=value)
+            variable = (
+                tk.BooleanVar(value=value)
+                if isinstance(value, bool)
+                else tk.StringVar(value=value)
+            )
             variable.trace_add("write", lambda *_: self.apply_mission_options())
             self.mission_vars[key] = variable
         self.speed_var = self.mission_vars["speed"]  # compatibilidade
@@ -1404,22 +1607,38 @@ class RsyncGUI(tk.Tk):
         row.pack(fill="x", padx=6, pady=(4, 2))
         ttk.Label(row, text="Navegação:").pack(side="left")
         for value, label in (("cones", "Cones"), ("line", "Linha amarela")):
-            ttk.Radiobutton(row, text=label, value=value,
-                            variable=self.mission_vars["navigation"]).pack(side="left", padx=(4, 8))
+            ttk.Radiobutton(
+                row, text=label, value=value, variable=self.mission_vars["navigation"]
+            ).pack(side="left", padx=(4, 8))
         # Duas linhas: numa so (1156 px) passava da janela de 1120.
         row2 = ttk.Frame(box)
         row2.pack(fill="x", padx=6, pady=(0, 2))
-        for index, (label, key, values, width) in enumerate((
+        for index, (label, key, values, width) in enumerate(
+            (
                 ("Vel. máx. retas [m/s]:", "speed", SPEED_PRESETS, 6),
                 ("Curva mais fechada R [m]:", "min_radius", CURVE_RADII, 5),
-                ("Acel. lateral em curva [m/s²]:", "curve_lateral_accel", CURVE_ACCELS, 5),
+                (
+                    "Acel. lateral em curva [m/s²]:",
+                    "curve_lateral_accel",
+                    CURVE_ACCELS,
+                    5,
+                ),
                 ("Largura da visão:", "vision_width", VISION_WIDTHS, 5),
-                ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4))):
+                ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4),
+            )
+        ):
             parent_row = row if index < 2 else row2
-            ttk.Label(parent_row, text=label).pack(side="left", padx=(12 if index != 2 else 0, 4))
+            ttk.Label(parent_row, text=label).pack(
+                side="left", padx=(12 if index != 2 else 0, 4)
+            )
             state = "normal" if key == "curve_lateral_accel" else "readonly"
-            combo = ttk.Combobox(parent_row, textvariable=self.mission_vars[key], state=state,
-                                 values=values, width=width)
+            combo = ttk.Combobox(
+                parent_row,
+                textvariable=self.mission_vars[key],
+                state=state,
+                values=values,
+                width=width,
+            )
             combo.pack(side="left")
             self.mission_combos = {**getattr(self, "mission_combos", {}), key: combo}
 
@@ -1446,62 +1665,112 @@ class RsyncGUI(tk.Tk):
         )
         for index, (key, label) in enumerate(items):
             check = ttk.Checkbutton(checks, text=label, variable=self.mission_vars[key])
-            check.grid(row=index // 3, column=index % 3, sticky="w", padx=(0, 18), pady=1)
+            check.grid(
+                row=index // 3, column=index % 3, sticky="w", padx=(0, 18), pady=1
+            )
             self.mission_checks[key] = check
 
         extra = ttk.Frame(box)
         extra.pack(fill="x", padx=6, pady=(2, 6))
-        check = ttk.Checkbutton(extra, text="Gravar quadros para a rede, Hz:",
-                                variable=self.mission_vars["record_frames"])
+        check = ttk.Checkbutton(
+            extra,
+            text="Gravar quadros para a rede, Hz:",
+            variable=self.mission_vars["record_frames"],
+        )
         check.pack(side="left")
         self.mission_checks["record_frames"] = check
-        self.record_combo = ttk.Combobox(extra, textvariable=self.mission_vars["record_hz"],
-                                         state="readonly", values=RECORD_RATES, width=3)
+        self.record_combo = ttk.Combobox(
+            extra,
+            textvariable=self.mission_vars["record_hz"],
+            state="readonly",
+            values=RECORD_RATES,
+            width=3,
+        )
         self.record_combo.pack(side="left", padx=(4, 18))
-        check = ttk.Checkbutton(extra, text="Classificador (rede):",
-                                variable=self.mission_vars["classifier"])
+        check = ttk.Checkbutton(
+            extra,
+            text="Classificador (rede):",
+            variable=self.mission_vars["classifier"],
+        )
         check.pack(side="left")
         self.mission_checks["classifier"] = check
-        self.classifier_entry = ttk.Entry(extra, textvariable=self.mission_vars["classifier_path"], width=26)
+        self.classifier_entry = ttk.Entry(
+            extra, textvariable=self.mission_vars["classifier_path"], width=26
+        )
         self.classifier_entry.pack(side="left", padx=(4, 0))
         throttle = ttk.Frame(box)
         throttle.pack(fill="x", padx=6, pady=(0, 4))
         ttk.Label(throttle, text="Acelerador mínimo:").pack(side="left")
         # Editavel: aceita outro valor alem da lista.
-        self.throttle_combo = ttk.Combobox(throttle, textvariable=self.mission_vars["throttle_offset"],
-                                           values=THROTTLE_OFFSETS, width=5)
+        self.throttle_combo = ttk.Combobox(
+            throttle,
+            textvariable=self.mission_vars["throttle_offset"],
+            values=THROTTLE_OFFSETS,
+            width=5,
+        )
         self.throttle_combo.pack(side="left", padx=(4, 8))
         ttk.Label(throttle, text="Ganho Stanley k:").pack(side="left", padx=(8, 0))
-        self.gain_combo = ttk.Combobox(throttle, textvariable=self.mission_vars["stanley_gain"],
-                                       values=STANLEY_GAINS, width=4)
+        self.gain_combo = ttk.Combobox(
+            throttle,
+            textvariable=self.mission_vars["stanley_gain"],
+            values=STANLEY_GAINS,
+            width=4,
+        )
         self.gain_combo.pack(side="left", padx=(4, 8))
         ttk.Label(throttle, text="Abrir na curva (m):").pack(side="left", padx=(8, 0))
-        ttk.Combobox(throttle, textvariable=self.mission_vars["racing_line"], values=RACING_LINES,
-                     width=5).pack(side="left", padx=(4, 8))
+        ttk.Combobox(
+            throttle,
+            textvariable=self.mission_vars["racing_line"],
+            values=RACING_LINES,
+            width=5,
+        ).pack(side="left", padx=(4, 8))
         ttk.Label(throttle, text="Tempo da missão (s):").pack(side="left", padx=(8, 0))
-        ttk.Combobox(throttle, textvariable=self.mission_vars["mission_time"], values=MISSION_TIMES,
-                     width=5).pack(side="left", padx=(4, 8))
+        ttk.Combobox(
+            throttle,
+            textvariable=self.mission_vars["mission_time"],
+            values=MISSION_TIMES,
+            width=5,
+        ).pack(side="left", padx=(4, 8))
         steering = ttk.Frame(box)
         steering.pack(fill="x", padx=6, pady=(0, 4))
         ttk.Label(steering, text="Esterço à esquerda (%):").pack(side="left")
-        ttk.Combobox(steering, textvariable=self.mission_vars["steer_left"], values=STEER_SCALES,
-                     width=4).pack(side="left", padx=(4, 12))
+        ttk.Combobox(
+            steering,
+            textvariable=self.mission_vars["steer_left"],
+            values=STEER_SCALES,
+            width=4,
+        ).pack(side="left", padx=(4, 12))
         ttk.Label(steering, text="à direita (%):").pack(side="left")
-        ttk.Combobox(steering, textvariable=self.mission_vars["steer_right"], values=STEER_SCALES,
-                     width=4).pack(side="left", padx=(4, 8))
+        ttk.Combobox(
+            steering,
+            textvariable=self.mission_vars["steer_right"],
+            values=STEER_SCALES,
+            width=4,
+        ).pack(side="left", padx=(4, 8))
         ttk.Label(steering, text="ArUco: lado (cm):").pack(side="left", padx=(12, 0))
-        ttk.Entry(steering, textvariable=self.mission_vars["marker_side_cm"], width=5).pack(side="left", padx=(4, 8))
+        ttk.Entry(
+            steering, textvariable=self.mission_vars["marker_side_cm"], width=5
+        ).pack(side="left", padx=(4, 8))
         ttk.Label(steering, text="altura do centro (cm):").pack(side="left")
-        ttk.Entry(steering, textvariable=self.mission_vars["marker_height_cm"], width=5).pack(side="left", padx=(4, 8))
-        ttk.Label(steering, foreground="#555",
-                  text="curva fecha demais para um lado: baixe esse lado (comando do servo)").pack(side="left")
-        ttk.Label(throttle, foreground="#555",
-                  text="(auto = o carro aprende)"
-                  ).pack(side="left")
-        ttk.Label(box, foreground="#b06000", wraplength=1000, justify="left",
-                  text="Gravar quadros deixa a visão ~20% mais lenta: só para coleta, nunca em corrida "
-                       "valendo. Relatório do ensaio: python3 tools/analisar_ensaio.py <pasta> --linha").pack(
-            anchor="w", padx=6, pady=(0, 4))
+        ttk.Entry(
+            steering, textvariable=self.mission_vars["marker_height_cm"], width=5
+        ).pack(side="left", padx=(4, 8))
+        ttk.Label(
+            steering,
+            foreground="#555",
+            text="curva fecha demais para um lado: baixe esse lado (comando do servo)",
+        ).pack(side="left")
+        ttk.Label(throttle, foreground="#555", text="(auto = o carro aprende)").pack(
+            side="left"
+        )
+        ttk.Label(
+            box,
+            foreground="#b06000",
+            wraplength=1000,
+            justify="left",
+            text="Gravar quadros deixa a visão ~20% mais lenta: só para coleta, nunca em corrida "
+            "valendo. Relatório do ensaio: python3 tools/analisar_ensaio.py <pasta> --linha",
+        ).pack(anchor="w", padx=6, pady=(0, 4))
         self._update_mission_widgets()
 
     def _fit_to_screen(self):
@@ -1514,7 +1783,10 @@ class RsyncGUI(tk.Tk):
         self.geometry(f"{min(width, screen_w)}x{min(height, screen_h)}")
 
     def mission_options(self):
-        return {key: variable.get() for key, variable in getattr(self, "mission_vars", {}).items()}
+        return {
+            key: variable.get()
+            for key, variable in getattr(self, "mission_vars", {}).items()
+        }
 
     def _update_mission_widgets(self):
         """Desabilita o que nao se aplica: opcoes de cones na linha amarela,
@@ -1522,24 +1794,37 @@ class RsyncGUI(tk.Tk):
         options = self.mission_options()
         cones = options.get("navigation") == "cones"
         for key, check in self.mission_checks.items():
-            enabled = (cones or key not in CONE_ONLY_OPTIONS) and (not cones or key not in LINE_ONLY_OPTIONS)
+            enabled = (cones or key not in CONE_ONLY_OPTIONS) and (
+                not cones or key not in LINE_ONLY_OPTIONS
+            )
             if key in ("pure_pursuit", "preview", "cone_map"):
                 enabled = enabled and options.get("estimator", True)
             check.state(["!disabled"] if enabled else ["disabled"])
-        self.record_combo.state(["!disabled"] if cones and options.get("record_frames") else ["disabled"])
+        self.record_combo.state(
+            ["!disabled"] if cones and options.get("record_frames") else ["disabled"]
+        )
         radius = getattr(self, "mission_combos", {}).get("min_radius")
         if radius is not None:  # limite de visibilidade usa o caminho do estimador
-            radius.state(["readonly", "!disabled"] if cones and options.get("estimator", True)
-                         else ["disabled"])
-        self.classifier_entry.state(["!disabled"] if cones and options.get("classifier") else ["disabled"])
-        self.throttle_combo.state(["!disabled"] if options.get("new_start", True) else ["disabled"])
+            radius.state(
+                ["readonly", "!disabled"]
+                if cones and options.get("estimator", True)
+                else ["disabled"]
+            )
+        self.classifier_entry.state(
+            ["!disabled"] if cones and options.get("classifier") else ["disabled"]
+        )
+        self.throttle_combo.state(
+            ["!disabled"] if options.get("new_start", True) else ["disabled"]
+        )
 
     def apply_mission_options(self):
         if not hasattr(self, "cmd_text") or not hasattr(self, "mission_checks"):
             return
         self._update_mission_widgets()
-        command = with_main_command(self.cmd_text.get("1.0", "end-1c"),
-                                    build_main_command(self.mission_options()))
+        command = with_main_command(
+            self.cmd_text.get("1.0", "end-1c"),
+            build_main_command(self.mission_options()),
+        )
         self.cmd_text.delete("1.0", "end")
         self.cmd_text.insert("end", command + "\n")
 
@@ -1560,11 +1845,23 @@ class RsyncGUI(tk.Tk):
         # Missao: os botoes ficam aqui, junto do video (o que se olha durante o teste).
         mission = ttk.LabelFrame(parent, text="Missão")
         mission.pack(fill="x", padx=10, pady=(0, 6))
-        for text, action in (("▶ Iniciar", None), ("⏹ Encerrar", "encerrar"), ("🔄 Reiniciar", "reiniciar"),
-                             ("🔓 Liberar parada", "liberar")):
-            command = self.run_cmds_on_selected if action is None else (lambda a=action: self.mission_action(a))
-            ttk.Button(mission, text=text, command=command).pack(side="left", padx=4, pady=4)
-        self.mission_status = ttk.Label(mission, text="Iniciar usa o comando da aba Comandos.")
+        for text, action in (
+            ("▶ Iniciar", None),
+            ("⏹ Encerrar", "encerrar"),
+            ("🔄 Reiniciar", "reiniciar"),
+            ("🔓 Liberar parada", "liberar"),
+        ):
+            command = (
+                self.run_cmds_on_selected
+                if action is None
+                else (lambda a=action: self.mission_action(a))
+            )
+            ttk.Button(mission, text=text, command=command).pack(
+                side="left", padx=4, pady=4
+            )
+        self.mission_status = ttk.Label(
+            mission, text="Iniciar usa o comando da aba Comandos."
+        )
         self.mission_status.pack(side="left", padx=10)
         self.video_status = ttk.Label(
             parent, text="Execute main.py com a camera habilitada e clique em Conectar."
@@ -1796,18 +2093,18 @@ class RsyncGUI(tk.Tk):
         ttk.Button(controls, text="Limpar", command=self.clear_test_log).pack(
             side="left", padx=4
         )
-        ttk.Button(controls, text="📂 Dados coletados", command=self.open_collected_data).pack(
-            side="left", padx=4
-        )
+        ttk.Button(
+            controls, text="📂 Dados coletados", command=self.open_collected_data
+        ).pack(side="left", padx=4)
         calibration = ttk.Frame(parent)
         calibration.pack(fill="x", padx=10, pady=(0, 6))
         ttk.Label(calibration, text="Calibração da câmera:").pack(side="left")
-        ttk.Button(calibration, text="🖨 Marcadores da grade", command=self.calibration_markers).pack(
-            side="left", padx=4
-        )
-        ttk.Button(calibration, text="📷 Foto p/ calibração", command=self.calibration_photo).pack(
-            side="left", padx=4
-        )
+        ttk.Button(
+            calibration, text="🖨 Marcadores da grade", command=self.calibration_markers
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            calibration, text="📷 Foto p/ calibração", command=self.calibration_photo
+        ).pack(side="left", padx=4)
 
         ttk.Label(parent, text="Saída do teste:").pack(
             anchor="w", padx=10, pady=(10, 2)
@@ -2026,16 +2323,28 @@ class RsyncGUI(tk.Tk):
         """PDF com o mapa dos pontos que a camera ve e um marcador por ponto (grade_calibracao.py)."""
         root = Path(__file__).resolve().parents[1]
         pdf = root / "calibracao" / "marcadores_grade.pdf"
-        result = subprocess.run([sys.executable, str(root / "tools" / "grade_calibracao.py"), "--pdf", str(pdf)],
-                                cwd=str(root), capture_output=True, text=True)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "tools" / "grade_calibracao.py"),
+                "--pdf",
+                str(pdf),
+            ],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
         self.clear_test_log()
         self._queue_test_output((result.stdout + result.stderr).strip())
         if result.returncode != 0:
-            messagebox.showerror("Marcadores", "Não foi possível gerar o PDF (veja a saída do teste).")
+            messagebox.showerror(
+                "Marcadores", "Não foi possível gerar o PDF (veja a saída do teste)."
+            )
             return
         self._queue_test_output(
             "Imprima em tamanho real. Página 1: onde marcar e como medir. Depois: cole cada marcador com o "
-            "centro (onde os pretos se tocam) no ponto. A foto p/ calibração usa a mesma numeração.")
+            "centro (onde os pretos se tocam) no ponto. A foto p/ calibração usa a mesma numeração."
+        )
         open_file(pdf)
 
     def calibration_photo(self):
@@ -2045,7 +2354,9 @@ class RsyncGUI(tk.Tk):
             messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado.")
             return
         if self.test_running:
-            messagebox.showinfo("Câmera ocupada", "Pare o teste em execução antes da foto.")
+            messagebox.showinfo(
+                "Câmera ocupada", "Pare o teste em execução antes da foto."
+            )
             return
         if not messagebox.askokcancel(
             "Foto para calibração",
@@ -2055,12 +2366,16 @@ class RsyncGUI(tk.Tk):
         ):
             return
         self.clear_test_log()
-        threading.Thread(target=self._calibration_photo_worker, args=targets[0], daemon=True).start()
+        threading.Thread(
+            target=self._calibration_photo_worker, args=targets[0], daemon=True
+        ).start()
 
     def _calibration_photo_worker(self, name, ip):
         workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         root = Path(__file__).resolve().parents[1]
-        local = root / "calibracao" / "fotos" / time.strftime("foto_%Y-%m-%d_%Hh%Mm%S.jpg")
+        local = (
+            root / "calibracao" / "fotos" / time.strftime("foto_%Y-%m-%d_%Hh%Mm%S.jpg")
+        )
         remote = "/tmp/fva_calibracao.jpg"
         client = None
         try:
@@ -2068,7 +2383,9 @@ class RsyncGUI(tk.Tk):
             client = self._connect_ssh(ip)
             _, out, err = client.exec_command(
                 f"cd {shlex.quote(workdir)} && python3 tools/calibrar_camera_lateral.py"
-                f" --capturar {remote}", timeout=60)
+                f" --capturar {remote}",
+                timeout=60,
+            )
             text = _output_text(out).strip()
             if out.channel.recv_exit_status() != 0:
                 raise RuntimeError(text + " " + _output_text(err).strip())
@@ -2083,8 +2400,16 @@ class RsyncGUI(tk.Tk):
             self._queue_test_output(
                 "Abrindo a calibração manual. Ao salvar, envie ao carro (Enviar arquivos)."
             )
-            subprocess.Popen([sys.executable, str(root / "tools" / "calibrar_camera_lateral.py"),
-                              "--image", str(local), "--livre"], cwd=str(root))
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(root / "tools" / "calibrar_camera_lateral.py"),
+                    "--image",
+                    str(local),
+                    "--livre",
+                ],
+                cwd=str(root),
+            )
         except Exception as exc:
             self._queue_test_output(f"Erro na foto para calibração: {exc}")
         finally:
@@ -2138,7 +2463,9 @@ class RsyncGUI(tk.Tk):
         """Inicia camera.py --stream por SSH e exibe /frame.png na janela Tkinter."""
         workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         run_id = self.test_run_id
-        log_dir, log_path = remote_log_path(workdir, "teste_camera_" + _slug(camera_mode))
+        log_dir, log_path = remote_log_path(
+            workdir, "teste_camera_" + _slug(camera_mode)
+        )
         exit_path = f"/tmp/fva_camera_http_{run_id}.exit"
         port = 8081  # independente da porta 8080 utilizada pelo main.py
         client = None
@@ -2228,7 +2555,9 @@ class RsyncGUI(tk.Tk):
         """Executa módulo em sessão independente e acompanha log persistente por SFTP."""
         remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
         run_id = self.test_run_id
-        log_dir, log_path = remote_log_path(remote_workdir, "teste_" + _slug(Path(module_path).stem))
+        log_dir, log_path = remote_log_path(
+            remote_workdir, "teste_" + _slug(Path(module_path).stem)
+        )
         exit_path = f"/tmp/fva_teste_{run_id}.exit"
         client = None
         sftp = None
@@ -2294,9 +2623,7 @@ class RsyncGUI(tk.Tk):
                                 buffer[match.end() :],
                             )
                             if line:
-                                emit(
-                                    line.decode("utf-8", errors="replace")
-                                )
+                                emit(line.decode("utf-8", errors="replace"))
                     try:
                         with sftp.open(exit_path, "r") as status_file:
                             rc = int(status_file.read().strip())
@@ -2319,9 +2646,7 @@ class RsyncGUI(tk.Tk):
                             pass
                     client = None
                     if connection_errors == 1:
-                        emit(
-                            f"Comunicação interrompida; recuperando log: {exc}"
-                        )
+                        emit(f"Comunicação interrompida; recuperando log: {exc}")
                     if connection_errors >= 15:
                         raise RuntimeError(
                             f"Sem SSH após 15 tentativas; log preservado em {log_path}"
@@ -2335,9 +2660,7 @@ class RsyncGUI(tk.Tk):
                 emit("\nTeste interrompido.")
         except Exception as exc:
             if self.test_running:
-                emit(
-                    f"Erro no teste de {name.upper()} ({ip}): {exc}"
-                )
+                emit(f"Erro no teste de {name.upper()} ({ip}): {exc}")
         finally:
             if sftp:
                 try:
@@ -2403,7 +2726,9 @@ class RsyncGUI(tk.Tk):
 
         self.data_dest_entry = ttk.Entry(local_frame)
         # Fora da pasta do codigo: dados coletados nunca se misturam ao que vai para o carro.
-        self.data_dest_entry.insert(0, os.path.join(os.path.expanduser("~"), "fva_experimentos"))
+        self.data_dest_entry.insert(
+            0, os.path.join(os.path.expanduser("~"), "fva_experimentos")
+        )
         self.data_dest_entry.pack(side="left", fill="x", expand=True, padx=8)
 
         ttk.Button(
@@ -2413,20 +2738,33 @@ class RsyncGUI(tk.Tk):
         # botoes de coleta
         actions = ttk.Frame(parent)
         actions.pack(fill="x", padx=10, pady=6)
-        ttk.Button(actions, text="📥 Coletar dados", command=self.collect_data).pack(side="left")
+        ttk.Button(actions, text="📥 Coletar dados", command=self.collect_data).pack(
+            side="left"
+        )
         self.recollect_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(actions, text="Baixar de novo o que já foi coletado",
-                        variable=self.recollect_var).pack(side="left", padx=(6, 18))
-        ttk.Button(actions, text="🗑 Apagar do carro o que já está no PC…",
-                   command=self.free_car_space).pack(side="left")
-        ttk.Button(actions, text="🕒 Acertar relógio do carro",
-                   command=self.sync_clock).pack(side="left", padx=(18, 0))
+        ttk.Checkbutton(
+            actions,
+            text="Baixar de novo o que já foi coletado",
+            variable=self.recollect_var,
+        ).pack(side="left", padx=(6, 18))
+        ttk.Button(
+            actions,
+            text="🗑 Apagar do carro o que já está no PC…",
+            command=self.free_car_space,
+        ).pack(side="left")
+        ttk.Button(
+            actions, text="🕒 Acertar relógio do carro", command=self.sync_clock
+        ).pack(side="left", padx=(18, 0))
         training = ttk.Frame(parent)
         training.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Button(training, text="🏷 Rotular cones (sim/não)", command=self.label_cones).pack(side="left")
-        ttk.Label(training, foreground="#888",
-                  text="Recorta os candidatos de todos os quadros coletados (só os novos) e abre a grade.").pack(
-            side="left", padx=8)
+        ttk.Button(
+            training, text="🏷 Rotular cones (sim/não)", command=self.label_cones
+        ).pack(side="left")
+        ttk.Label(
+            training,
+            foreground="#888",
+            text="Recorta os candidatos de todos os quadros coletados (só os novos) e abre a grade.",
+        ).pack(side="left", padx=8)
 
         # Mensagens da coleta (altura reduzida para liberar espaço)
         ttk.Label(parent, text="Transferências:").pack(anchor="w", padx=10, pady=(4, 2))
@@ -2449,9 +2787,9 @@ class RsyncGUI(tk.Tk):
         ttk.Button(
             selector, text="Atualizar lista", command=self.refresh_experiments
         ).pack(side="left")
-        ttk.Button(
-            selector, text="📋 Relatório", command=self.experiment_report
-        ).pack(side="left", padx=(6, 0))
+        ttk.Button(selector, text="📋 Relatório", command=self.experiment_report).pack(
+            side="left", padx=(6, 0)
+        )
 
         self.experiment_graphs = [
             ("Velocidade", "Velocidade medida e referência"),
@@ -2580,15 +2918,24 @@ class RsyncGUI(tk.Tk):
         folder = os.path.dirname(path)
         window = tk.Toplevel(self)
         window.title("Relatório — " + os.path.basename(folder))
-        text = scrolledtext.ScrolledText(window, width=120, height=24, font=("Courier", 10))
+        text = scrolledtext.ScrolledText(
+            window, width=120, height=24, font=("Courier", 10)
+        )
         text.pack(fill="both", expand=True, padx=8, pady=8)
-        text.insert("end", "Analisando (com quadros gravados, mede a posição pela fita amarela)...\n")
+        text.insert(
+            "end",
+            "Analisando (com quadros gravados, mede a posição pela fita amarela)...\n",
+        )
 
         def worker():
             script = Path(__file__).resolve().parent / "analisar_ensaio.py"
             try:
-                result = subprocess.run([sys.executable, str(script), folder, "--linha"],
-                                        capture_output=True, text=True, timeout=600)
+                result = subprocess.run(
+                    [sys.executable, str(script), folder, "--linha"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
                 output = (result.stdout + result.stderr).strip()
             except Exception as exc:  # noqa: BLE001 - mostrado na janela
                 output = f"Erro: {exc}"
@@ -2596,7 +2943,12 @@ class RsyncGUI(tk.Tk):
             def show():
                 if text.winfo_exists():
                     text.delete("1.0", "end")
-                    text.insert("end", output + f"\n\n(salvo em {os.path.join(folder, 'relatorio.txt')})")
+                    text.insert(
+                        "end",
+                        output
+                        + f"\n\n(salvo em {os.path.join(folder, 'relatorio.txt')})",
+                    )
+
             self.ui(show)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2956,14 +3308,17 @@ class RsyncGUI(tk.Tk):
         if getattr(self, "sync_clean_var", None) and self.sync_clean_var.get():
             dest = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
             if not clean_target_is_safe(dest):
-                messagebox.showerror("Limpeza recusada",
-                                     f"A pasta remota {dest} não parece a pasta do projeto no carro.")
+                messagebox.showerror(
+                    "Limpeza recusada",
+                    f"A pasta remota {dest} não parece a pasta do projeto no carro.",
+                )
                 return
             if not messagebox.askyesno(
-                    "Limpar a pasta no carro",
-                    f"Isto APAGA tudo em {dest} no carro {targets[0][0].upper()}, menos a pasta "
-                    f"logs/ (missões ainda não coletadas), e envia só o código de novo.\n\n"
-                    "Não dá para desfazer. Continuar?"):
+                "Limpar a pasta no carro",
+                f"Isto APAGA tudo em {dest} no carro {targets[0][0].upper()}, menos a pasta "
+                f"logs/ (missões ainda não coletadas), e envia só o código de novo.\n\n"
+                "Não dá para desfazer. Continuar?",
+            ):
                 return
         threading.Thread(
             target=self._run_sftp_for_targets, args=(targets,), daemon=True
@@ -3040,15 +3395,26 @@ class RsyncGUI(tk.Tk):
                 self.ui(self.log_write, "   - " + item)
             return
 
-        clean = bool(getattr(self, "sync_clean_var", None) and self.sync_clean_var.get())
+        clean = bool(
+            getattr(self, "sync_clean_var", None) and self.sync_clean_var.get()
+        )
         force = clean
-        delete_py = bool(getattr(self, "sync_delete_var", None) and self.sync_delete_var.get())
+        delete_py = bool(
+            getattr(self, "sync_delete_var", None) and self.sync_delete_var.get()
+        )
         log = lambda text: self.ui(self.log_write, text)
         all_ok = True
         for name, ip in targets:
             self.ui(self.log_write, "=" * 60)
-            self.ui(self.log_write, f"🚀 Enviando via SFTP para {name.upper()} ({ip})"
-                    + (" — limpando a pasta e enviando todo o código" if clean else " — só o que mudou"))
+            self.ui(
+                self.log_write,
+                f"🚀 Enviando via SFTP para {name.upper()} ({ip})"
+                + (
+                    " — limpando a pasta e enviando todo o código"
+                    if clean
+                    else " — só o que mudou"
+                ),
+            )
             client = None
             sftp = None
             try:
@@ -3057,9 +3423,15 @@ class RsyncGUI(tk.Tk):
                 if clean:
                     removed = clean_remote(client, dest)
                     freed = sum(size for _, size in removed)
-                    log(f"🧹 Apagado no carro: {len(removed)} item(ns), {freed/1024:.1f} MB"
-                        + (f" — {', '.join(n for n, _ in sorted(removed, key=lambda e: -e[1])[:6])}" if removed else "")
-                        + "; mantido: logs/")
+                    log(
+                        f"🧹 Apagado no carro: {len(removed)} item(ns), {freed/1024:.1f} MB"
+                        + (
+                            f" — {', '.join(n for n, _ in sorted(removed, key=lambda e: -e[1])[:6])}"
+                            if removed
+                            else ""
+                        )
+                        + "; mantido: logs/"
+                    )
                 self._sftp_mkdir_p(sftp, dest)
 
                 for path in self.selected_files:
@@ -3067,20 +3439,30 @@ class RsyncGUI(tk.Tk):
                     if os.path.isdir(path) and is_data_dir(base, path):
                         log(f"⏭ {path}: pasta de dados, não vai para o carro")
                         continue
-                    if os.path.isfile(path) and (base.lower().endswith(SYNC_SKIP_SUFFIXES)
-                                                 or is_data_dir(Path(path).resolve().parent.name)):
+                    if os.path.isfile(path) and (
+                        base.lower().endswith(SYNC_SKIP_SUFFIXES)
+                        or is_data_dir(Path(path).resolve().parent.name)
+                    ):
                         log(f"⏭ {path}: arquivo de dados, não vai para o carro")
                         continue
                     if os.path.isdir(path):
                         # Mesmo comportamento do antigo rsync com barra final:
                         # envia o CONTEÚDO da pasta para o destino.
                         self.ui(self.log_write, f"📁 {path} -> {dest}/")
-                        summary = sync_directory(client, sftp, path, dest, log, force, delete_py)
-                        self.ui(self.log_write,
-                                f"   {summary['sent']} enviado(s) ({summary['bytes']/1024:.0f} kB),"
-                                f" {summary['same']} igual(is) pulado(s)"
-                                + (f", {summary['removed']} apagado(s)" if summary["removed"] else "")
-                                + f" — {summary['seconds']:.1f} s")
+                        summary = sync_directory(
+                            client, sftp, path, dest, log, force, delete_py
+                        )
+                        self.ui(
+                            self.log_write,
+                            f"   {summary['sent']} enviado(s) ({summary['bytes']/1024:.0f} kB),"
+                            f" {summary['same']} igual(is) pulado(s)"
+                            + (
+                                f", {summary['removed']} apagado(s)"
+                                if summary["removed"]
+                                else ""
+                            )
+                            + f" — {summary['seconds']:.1f} s",
+                        )
                     else:
                         remote_path = posixpath.join(dest, os.path.basename(path))
                         self.ui(self.log_write, f"📄 {path} -> {remote_path}")
@@ -3099,7 +3481,10 @@ class RsyncGUI(tk.Tk):
         if clean and all_ok:
             # Limpeza feita: os proximos envios voltam a ser so o que mudou.
             self.ui(self.sync_clean_var.set, False)
-            self.ui(self.log_write, "ℹ️ Limpeza concluída; os próximos envios mandam só o que mudar.")
+            self.ui(
+                self.log_write,
+                "ℹ️ Limpeza concluída; os próximos envios mandam só o que mudar.",
+            )
         self.ui(self.log_write, "🏁 Todas as transferências finalizadas.")
 
     ########################################
@@ -3151,9 +3536,14 @@ class RsyncGUI(tk.Tk):
         """Encerrar, reiniciar ou liberar a parada do ultrassom da missao em andamento."""
         targets = self.get_selected_devices()
         if not targets:
-            messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.")
+            messagebox.showinfo(
+                "Nenhum alvo",
+                "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.",
+            )
             return
-        threading.Thread(target=self._mission_action, args=(targets, action), daemon=True).start()
+        threading.Thread(
+            target=self._mission_action, args=(targets, action), daemon=True
+        ).start()
 
     def _mission_report(self, text):
         """Resultado dos botoes da missao: na aba da camera e no terminal de comandos."""
@@ -3173,36 +3563,52 @@ class RsyncGUI(tk.Tk):
                 text = out.read().decode(errors="replace").strip()
                 code = out.channel.recv_exit_status()
                 answer = text.split(" ", 1)[1] if " " in text else ""
-                pid = int(text.split()[0]) if text.split() and text.split()[0].isdigit() else None
+                pid = (
+                    int(text.split()[0])
+                    if text.split() and text.split()[0].isdigit()
+                    else None
+                )
                 if code == MISSION_NONE:
-                    report(f"ℹ️ {name.upper()}: {answer or 'nenhuma missão rodando no carro'}.")
+                    report(
+                        f"ℹ️ {name.upper()}: {answer or 'nenhuma missão rodando no carro'}."
+                    )
                     if action == "reiniciar":
-                        report(f"🔄 {name.upper()}: iniciando com o comando da aba Comandos.")
+                        report(
+                            f"🔄 {name.upper()}: iniciando com o comando da aba Comandos."
+                        )
                         self.ui(self.run_cmds_on_selected)
                     continue
                 if code == MISSION_OK:
                     report(f"✅ {name.upper()}: {answer}.")
                 elif code == MISSION_SIGNAL_ONLY:
-                    report(f"⚠️ {name.upper()}: o carro não respondeu ao pedido; sinal enviado como reserva."
-                           " O código no carro está atualizado (Enviar Arquivos)?")
+                    report(
+                        f"⚠️ {name.upper()}: o carro não respondeu ao pedido; sinal enviado como reserva."
+                        " O código no carro está atualizado (Enviar Arquivos)?"
+                    )
                 else:
                     detail = (answer or err.read(300).decode(errors="replace")).strip()
-                    report(f"❌ {name.upper()}: não foi possível pedir '{request}' (código {code}) {detail}")
+                    report(
+                        f"❌ {name.upper()}: não foi possível pedir '{request}' (código {code}) {detail}"
+                    )
                     continue
                 if action == "liberar" or pid is None:
                     continue
-                deadline = time.monotonic() + 20.
+                deadline = time.monotonic() + 20.0
                 while time.monotonic() < deadline:
-                    _, alive, _ = client.exec_command(mission_alive_command(pid), timeout=10)
+                    _, alive, _ = client.exec_command(
+                        mission_alive_command(pid), timeout=10
+                    )
                     if alive.channel.recv_exit_status() != 0:
                         break
-                    time.sleep(.5)
+                    time.sleep(0.5)
                 else:
                     report(f"⚠️ {name.upper()}: a missão não terminou em 20 s.")
                     continue
                 report(f"⏹ {name.upper()}: missão encerrada (logs salvos).")
                 if action == "reiniciar":
-                    report(f"🔄 {name.upper()}: iniciando de novo com o comando da aba Comandos.")
+                    report(
+                        f"🔄 {name.upper()}: iniciando de novo com o comando da aba Comandos."
+                    )
                     self.ui(self.run_cmds_on_selected)
             except Exception as exc:
                 report(f"❌ {name.upper()}: {exc}")
@@ -3334,7 +3740,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                 try:
                     # Nome exclusivo evita misturar execuções antigas e novas.
                     run_id = uuid.uuid4().hex
-                    label = "gravar_arduino" if arduino_flash else command_label(raw_cmd)
+                    label = (
+                        "gravar_arduino" if arduino_flash else command_label(raw_cmd)
+                    )
                     log_dir, log_path = remote_log_path(remote_workdir, label)
                     exit_path = f"/tmp/fva_gui_{run_id}.exit"
                     if not arduino_flash:
@@ -3346,14 +3754,22 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                             try:
                                 remote = remote_code_version(checker, remote_workdir)
                                 # Relogio errado = logs com data errada (o Pi nao tem bateria).
-                                sync_car_clock(checker, self.pass_entry.get().strip() or None, report)
+                                sync_car_clock(
+                                    checker,
+                                    self.pass_entry.get().strip() or None,
+                                    report,
+                                )
                             finally:
                                 checker.close()
                             if local and remote and local != remote:
-                                report(f"⚠️ CÓDIGO DIFERENTE: carro {remote}, notebook {local}."
-                                       " Envie os arquivos antes de testar.")
+                                report(
+                                    f"⚠️ CÓDIGO DIFERENTE: carro {remote}, notebook {local}."
+                                    " Envie os arquivos antes de testar."
+                                )
                             elif local and remote:
-                                report(f"✅ Código igual ao do notebook (versão {local}).")
+                                report(
+                                    f"✅ Código igual ao do notebook (versão {local})."
+                                )
                     # Processo remoto em segundo plano: grava stdout/stderr na Raspberry.
                     # O status é escrito em arquivo separado APÓS a saída terminar.
                     inner = (
@@ -3503,7 +3919,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
     ########################################
     def open_collected_data(self):
         """Abre a pasta onde o Coletar Dados salva (aba Coletar Dados)."""
-        open_folder(os.path.abspath(self.data_dest_entry.get().strip() or "experimentos"))
+        open_folder(
+            os.path.abspath(self.data_dest_entry.get().strip() or "experimentos")
+        )
 
     def collect_data(self, then_delete=False):
 
@@ -3528,7 +3946,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         force = bool(self.recollect_var.get()) and not then_delete
 
         threading.Thread(
-            target=self._collect_data, args=(targets, local_base, force, then_delete), daemon=True
+            target=self._collect_data,
+            args=(targets, local_base, force, then_delete),
+            daemon=True,
         ).start()
 
     def free_car_space(self):
@@ -3574,16 +3994,23 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         for entry in entries:
             if not LEGACY_TMP_LOGS.match(entry.filename) or not entry.st_size:
                 continue
-            stamp = time.strftime("%Y-%m-%d_%Hh%Mm%S", time.localtime(entry.st_mtime or 0))
+            stamp = time.strftime(
+                "%Y-%m-%d_%Hh%Mm%S", time.localtime(entry.st_mtime or 0)
+            )
             local_path = os.path.join(folder, f"{stamp}_{entry.filename}")
-            if os.path.isfile(local_path) and os.path.getsize(local_path) == entry.st_size:
+            if (
+                os.path.isfile(local_path)
+                and os.path.getsize(local_path) == entry.st_size
+            ):
                 continue
             os.makedirs(folder, exist_ok=True)
             sftp.get(posixpath.join("/tmp", entry.filename), local_path)
             count += 1
         return count
 
-    def _download_files(self, client, sftp, remote_dir, local_dest, remote, todo, manifest, report):
+    def _download_files(
+        self, client, sftp, remote_dir, local_dest, remote, todo, manifest, report
+    ):
         """Baixa `todo`: um fluxo tar para muitos arquivos, SFTP para poucos (ou se o tar falhar)."""
         wanted = set(todo)
         done = 0
@@ -3604,7 +4031,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         if len(todo) >= COLLECT_TAR_MIN_FILES:
             try:
                 stdin, out, _ = client.exec_command(
-                    f"cd {shlex.quote(remote_dir)} && tar -cf - --null -T -", timeout=600)
+                    f"cd {shlex.quote(remote_dir)} && tar -cf - --null -T -",
+                    timeout=600,
+                )
                 stdin.write("\0".join(todo) + "\0")
                 stdin.flush()
                 stdin.channel.shutdown_write()
@@ -3621,7 +4050,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                         os.replace(path + ".part", path)
                         finished(rel, path)
             except Exception as exc:  # noqa: BLE001 - o resto vai por SFTP
-                report(f"   (fluxo tar interrompido: {exc}; seguindo arquivo a arquivo)")
+                report(
+                    f"   (fluxo tar interrompido: {exc}; seguindo arquivo a arquivo)"
+                )
         failed = []
         for rel in sorted(wanted):
             path = _local_path(local_dest, rel)
@@ -3656,9 +4087,15 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                 started = time.monotonic()
                 try:
                     remote, remote_now = remote_listing(client, remote_logs)
-                except Exception as exc:  # noqa: BLE001 - carro sem find GNU: caminho antigo
-                    report(f"   (listagem rápida falhou: {exc}; usando o caminho antigo)")
-                    self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - carro sem find GNU: caminho antigo
+                    report(
+                        f"   (listagem rápida falhou: {exc}; usando o caminho antigo)"
+                    )
+                    self._sftp_download_directory_contents(
+                        sftp, remote_logs, local_dest
+                    )
                     remote, remote_now = {}, None
                 if remote is None:
                     report(f"❌ Pasta remota não encontrada: {remote_logs}")
@@ -3666,22 +4103,46 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
                 todo = collect_plan(remote, local_dest, manifest, force)
                 total = sum(size for size, _ in remote.values())
                 new = sum(remote[rel][0] for rel in todo)
-                report(f"   No carro: {len(remote)} arquivos ({_mb(total)}); já no PC: {len(remote) - len(todo)};"
-                       f" baixando {len(todo)} ({_mb(new)})")
-                done = self._download_files(client, sftp, remote_logs, local_dest, remote, todo, manifest, report)
+                report(
+                    f"   No carro: {len(remote)} arquivos ({_mb(total)}); já no PC: {len(remote) - len(todo)};"
+                    f" baixando {len(todo)} ({_mb(new)})"
+                )
+                done = self._download_files(
+                    client,
+                    sftp,
+                    remote_logs,
+                    local_dest,
+                    remote,
+                    todo,
+                    manifest,
+                    report,
+                )
                 recovered = self._collect_legacy_tmp_logs(sftp, local_dest)
                 if recovered:
-                    report(f"   + {recovered} log(s) antigo(s) de /tmp em terminal/recuperados_tmp/")
-                report(f"✅ {done} arquivo(s) novo(s) de {name.upper()} em {time.monotonic() - started:.0f} s:"
-                       f" {os.path.abspath(local_dest)}")
+                    report(
+                        f"   + {recovered} log(s) antigo(s) de /tmp em terminal/recuperados_tmp/"
+                    )
+                report(
+                    f"✅ {done} arquivo(s) novo(s) de {name.upper()} em {time.monotonic() - started:.0f} s:"
+                    f" {os.path.abspath(local_dest)}"
+                )
                 if then_delete:
                     candidates = deletable(remote, local_dest, manifest, remote_now)
                     if candidates:
                         size = sum(remote[rel][0] for rel in candidates)
-                        self.ui(self._confirm_delete, name, ip, remote_logs, candidates, size,
-                                len(remote) - len(candidates))
+                        self.ui(
+                            self._confirm_delete,
+                            name,
+                            ip,
+                            remote_logs,
+                            candidates,
+                            size,
+                            len(remote) - len(candidates),
+                        )
                     else:
-                        report("   Nada para apagar do carro (tudo é recente ou é o trim).")
+                        report(
+                            "   Nada para apagar do carro (tudo é recente ou é o trim)."
+                        )
             except Exception as e:
                 report(f"❌ Erro em {name.upper()} ({ip}): {e}")
             finally:
@@ -3699,7 +4160,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
 
     def _confirm_delete(self, name, ip, remote_logs, candidates, size, kept):
         runs = sorted({rel.split("/", 1)[0] for rel in candidates if "/" in rel})
-        sample = ", ".join(runs[:6]) + (f" e mais {len(runs) - 6}" if len(runs) > 6 else "")
+        sample = ", ".join(runs[:6]) + (
+            f" e mais {len(runs) - 6}" if len(runs) > 6 else ""
+        )
         if not messagebox.askyesno(
             "Confirmar: apagar do carro",
             f"Apagar do carro {name.upper()} {len(candidates)} arquivos ({_mb(size)}),"
@@ -3709,8 +4172,11 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         ):
             self.datalog_write("   Nada apagado.")
             return
-        threading.Thread(target=self._delete_remote, args=(name, ip, remote_logs, candidates, size),
-                         daemon=True).start()
+        threading.Thread(
+            target=self._delete_remote,
+            args=(name, ip, remote_logs, candidates, size),
+            daemon=True,
+        ).start()
 
     def _delete_remote(self, name, ip, remote_logs, candidates, size):
         report = lambda text: self.ui(self.datalog_write, text)
@@ -3720,7 +4186,9 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             folder = shlex.quote(remote_logs)
             stdin, out, err = client.exec_command(
                 f"cd {folder} && xargs -0 rm -f -- && find . -mindepth 1 -type d -empty -delete;"
-                f" df -h {folder} | tail -1", timeout=300)
+                f" df -h {folder} | tail -1",
+                timeout=300,
+            )
             stdin.write("\0".join(candidates) + "\0")
             stdin.flush()
             stdin.channel.shutdown_write()
@@ -3728,8 +4196,10 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             problem = _output_text(err).strip()
             if out.channel.recv_exit_status() != 0 or problem:
                 report(f"⚠️ Apagando em {name.upper()}: {problem}")
-            report(f"🗑 Apagados {len(candidates)} arquivos ({_mb(size)}) de {name.upper()}."
-                   + (f" Livre no carro: {free[3]}" if len(free) >= 4 else ""))
+            report(
+                f"🗑 Apagados {len(candidates)} arquivos ({_mb(size)}) de {name.upper()}."
+                + (f" Livre no carro: {free[3]}" if len(free) >= 4 else "")
+            )
         except Exception as exc:
             report(f"❌ Erro apagando em {name.upper()}: {exc}")
         finally:
@@ -3745,18 +4215,26 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
         report = lambda text: self.ui(self.datalog_write, text)
 
         def worker():
-            report(f"🏷 Preparando os recortes dos quadros coletados em {base} (só os novos)...")
+            report(
+                f"🏷 Preparando os recortes dos quadros coletados em {base} (só os novos)..."
+            )
             try:
-                result = subprocess.run([sys.executable, script, "preparar", base, "--saida", out],
-                                        capture_output=True, text=True, timeout=3600)
+                result = subprocess.run(
+                    [sys.executable, script, "preparar", base, "--saida", out],
+                    capture_output=True,
+                    text=True,
+                    timeout=3600,
+                )
                 lines = (result.stdout + result.stderr).strip().splitlines()
                 for line in lines[-6:]:
                     report("   " + line)
                 if result.returncode != 0:
                     return
                 subprocess.Popen([sys.executable, script, "rotular", out])
-                report("   Grade aberta. Ao terminar: rotular_sim_nao.py exportar "
-                       f"{out} --out {os.path.join(out, 'cones.npz')}")
+                report(
+                    "   Grade aberta. Ao terminar: rotular_sim_nao.py exportar "
+                    f"{out} --out {os.path.join(out, 'cones.npz')}"
+                )
             except Exception as exc:  # noqa: BLE001 - mostrado no log
                 report(f"❌ Rotulagem: {exc}")
 
@@ -3775,14 +4253,18 @@ echo 'SUCESSO: firmware gravado no Arduino Nano.'"""
             client = None
             try:
                 client = self._connect_ssh(ip)
-                sync_car_clock(client, self.pass_entry.get().strip() or None, report, force=True)
+                sync_car_clock(
+                    client, self.pass_entry.get().strip() or None, report, force=True
+                )
             except Exception as exc:
                 report(f"❌ Relógio de {name.upper()}: {exc}")
             finally:
                 if client:
                     client.close()
 
-        report(f"🕒 Acertando o relógio de {name.upper()} pelo do notebook ({time.strftime('%d/%m/%Y %H:%M:%S')})...")
+        report(
+            f"🕒 Acertando o relógio de {name.upper()} pelo do notebook ({time.strftime('%d/%m/%Y %H:%M:%S')})..."
+        )
         threading.Thread(target=worker, daemon=True).start()
 
     ########################################
