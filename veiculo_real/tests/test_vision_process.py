@@ -153,6 +153,26 @@ class VisionProcessTests(unittest.TestCase):
         finally:
             vision.stop()
 
+    @unittest.skipUnless(hasattr(os, 'sched_getaffinity') and len(os.sched_getaffinity(0)) >= 2, 'poucos nucleos')
+    def test_vision_cores_apply_even_with_the_parent_pinned_elsewhere(self):
+        # Como no carro: o principal se fixa nos nucleos do controle ANTES de
+        # criar a visao; o filho herdava isso e ficava nos nucleos do controle.
+        original = os.sched_getaffinity(0)
+        control, vision_core = min(original), max(original)
+        os.sched_setaffinity(0, {control})
+        try:
+            data, vision = self.start(FakeCamera, cpu_cores=[vision_core])
+            vision.start()
+            try:
+                self.assertEqual(vision.cpu_cores, [vision_core])
+                self.assertEqual(os.sched_getaffinity(vision.process.pid), {vision_core})
+                for worker in getattr(vision, 'workers', []):
+                    self.assertEqual(os.sched_getaffinity(worker.pid), {vision_core})
+            finally:
+                vision.stop()
+        finally:
+            os.sched_setaffinity(0, original)
+
     def test_camera_failure_is_reported_before_start_returns(self):
         _, vision = self.start(failing_camera)
         with self.assertRaisesRegex(RuntimeError, 'camera nao encontrada'):

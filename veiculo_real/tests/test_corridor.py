@@ -334,5 +334,43 @@ class KnownWidthTests(unittest.TestCase):
         self.assertIsNone(CorridorEstimator(CorridorSettings()).learned_width)
 
 
+class SteerDelayPreviewTests(unittest.TestCase):
+    """RealStanleyFollower._preview_actuator: estado quando o esterco de agora chegar a roda."""
+    def follower(self, delay):
+        return RealStanleyFollower({'steer_delay_s': delay, 'steering_response': 1., 'wheelbase': .36})
+
+    def test_commands_in_flight_turn_the_path_seen_by_the_controller(self):
+        car = fake_car()
+        car.v = 1.
+        steer = math.radians(10.)
+        for delay in (0., .2):
+            with self.subTest(delay=delay):
+                follower = self.follower(delay)
+                for k in range(20):  # 0,4 s esterçando 10 graus a esquerda
+                    follower._record_command(.02*k, steer)
+                errors = follower._preview_actuator((0., 0., 0.), car, .4)
+                if delay == 0.:
+                    self.assertEqual(errors, (0., 0., 0.))
+                    continue
+                # O carro ainda vai girar v/L*tan(st)*atraso para a esquerda: o
+                # caminho reto fica a direita e com rumo negativo.
+                turn = 1./.36*math.tan(steer)*delay
+                self.assertAlmostEqual(errors[1], -turn, delta=.01)
+                self.assertLess(errors[0], 0.)
+                self.assertAlmostEqual(follower.steer_preview[2], turn, places=6)
+
+    def test_only_the_commands_still_in_flight_count(self):
+        car = fake_car()
+        car.v = 1.
+        follower = self.follower(.2)
+        for k in range(10):
+            follower._record_command(.02*k, math.radians(15.))  # antigo: ja chegou a roda
+        for k in range(10, 30):
+            follower._record_command(.02*k, 0.)                  # ultimos 0,4 s: reto
+        errors = follower._preview_actuator((.1, .05, 0.), car, .58)
+        self.assertAlmostEqual(errors[1], .05, places=6)  # sem giro previsto
+        self.assertAlmostEqual(follower.steer_preview[2], 0., places=9)
+
+
 if __name__ == '__main__':
     unittest.main()

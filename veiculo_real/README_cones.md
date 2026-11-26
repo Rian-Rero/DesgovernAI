@@ -1570,3 +1570,70 @@ completa.
 A transmissão mostra a contagem de cones aceitos por cor, inclusive quando
 a geometria do corredor é inválida. Regiões unidas por sobreposição podem
 fornecer a base inferior visível; bases ocultas não são inventadas.
+
+## Ensaio de 26/11: esterço de lado a lado e PARE de 5 s
+
+### Esterço "pedalando" (direita-esquerda a ~1,7 Hz)
+Volta de 19:15 (`archive_2611`): o esterço oscilava ±15° e o giroscópio
+confirmou que o carro balançava de verdade (±35°/s). Ajustando atraso puro +
+1ª ordem entre o comando e a guinada medida, **a direção leva ~0,18 s** para
+responder (filtro de 3 amostras do Car + servo + pneu). O simulador supunha
+~0,08 s, por isso os ajustes testados lá oscilavam no carro.
+
+Duas causas, as duas corrigidas:
+1. **O `main.py` não passava o histórico de poses ao seguidor.**
+   - A foto era levada ao instante do comando pela guinada *de agora* × idade
+     da foto. Com o carro balançando, essa guinada não representa o giro desde
+     a foto, e o erro realimentava a oscilação.
+   - Agora: `follower.odometry = poses`, ou seja, o movimento real registrado
+     (com o giroscópio).
+2. **O atraso da direção não era previsto.**
+   - O Stanley agora mira o estado em que o carro estará quando o esterço de
+     agora chegar à roda (`steer_delay_s` 0,16; `_preview_actuator` em
+     `fva_car/lateral.py`).
+   - Ele integra os comandos já enviados que ainda estão "no caminho"
+     (preditor de Smith).
+   - Sem isso, só o histórico tira a oscilação mas vira tarde em curva
+     fechada. A guinada antiga antecipava por acaso, e essa antecipação era
+     justamente o que oscilava.
+
+**Pista virtual** com o atraso real (5 pistas × 5 sementes, 1,5 m/s,
+calibração atual):
+
+| | voltas | erro RMS | pedaladas |
+|---|---|---|---|
+| antes | 96% | 10,5 cm | 1040 |
+| só histórico | 96% | 5,4 cm | 4 |
+| histórico + preditor | **100%** | **4,6 cm** | **2** |
+
+- **Velocidade forçada a 3 m/s** (curvas a 1,5 m/s²): continua sem pedalar (6
+  pedaladas contra 652 antes).
+- **O simulador agora tem o atraso do carro por padrão**
+  (`STEER_DELAY_S` 0,10 + filtro + servo ≈ 0,18 s).
+- **Teste de regressão:** `SteeringDelayTests`.
+- **Ajuste em campo:** `--atraso-direcao S` (0 desliga o preditor).
+
+**Núcleos:** o processo principal se fixava nos núcleos 0–1 *antes* de criar
+a visão, e o filho herdava isso. `pin_process` só aceitava núcleos da
+afinidade atual, então a visão e o auxiliar ficavam nos núcleos do controle,
+com 2–3 ociosos (`"vision": null` no resumo). Agora valem os núcleos ligados da
+máquina.
+
+### PARE (ArUco ID 1): para 5 s e segue
+- **Tempo parado** (`aruco.hold_s` 5,0): contado com o carro **já parado**
+  (abaixo de 0,05 m/s), não da ordem de parar, que ainda freia. Depois segue
+  sozinho e ignora a mesma placa por `ignore_s`.
+- **Antes do tempo:** o botão "Liberar parada" libera na hora.
+- **Linha de comando:** `--pare-segundos S` (0 = só pelo botão).
+- **Ultrassom ao seguir:** placa ao lado ganha a mesma carência de 2 s do
+  botão, para o ultrassom não travar no cone da borda. Placa num cone **à
+  frente** não ganha carência: seguir bateria no cone, então o ultrassom
+  trava a parada.
+- **Bipe** (`STOP_BEEPS` no `main.py`):
+  - **placa: um bipe LONGO (0,7 s) a cada 1,5 s**;
+  - ultrassom: dois curtos por segundo, como antes.
+
+No ensaio de 19:16 a placa foi confirmada e o carro parou. A posição veio pelo
+modo "chão", com **lado implícito de 5,7–6,1 cm** contra os 10 cm
+configurados: o quadrado preto impresso deve ter ~6 cm. Meçam e ponham o valor
+em "ArUco: lado (cm)" na GUI (ou `--placa-lado 0.06`).

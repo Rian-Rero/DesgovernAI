@@ -11,8 +11,9 @@ por match/case:
                e lembrada pela odometria depois que ela sai da imagem (a ~1,5 m).
                Se ela estiver NA FRENTE, para antes do cone (stop_gap_m entre o
                pneu e o cone), com o ultrassom como protecao adicional. Fica parado
-               ate o botao "Liberar parada" da GUI
-               (ou hold_s); depois ignora a placa por ignore_s.
+               hold_s segundos CONTADOS COM O CARRO JA PARADO (5 s no main.py) e
+               segue sozinho; o botao "Liberar parada" da GUI libera antes (hold_s
+               None: so o botao). Depois ignora a placa por ignore_s.
     "ignorar"  so registra.
 
 A placa so vale vista em confirm_frames buscas seguidas. Confirmada sem
@@ -25,6 +26,8 @@ import cv2
 import numpy as np
 
 ACTIONS = ("pare", "ignorar")
+STILL_SPEED = .05      # m/s: abaixo disto o carro esta parado (conta hold_s)
+STILL_TIMEOUT_S = 3.   # s: sem chegar a STILL_SPEED, conta hold_s depois disto
 STATES = ("LIVRE", "APROXIMANDO", "PARADO", "SAINDO")
 
 
@@ -111,6 +114,7 @@ class SignController:
         self.last_frame = None
         self.last_scan = None
         self.stopped_at = None
+        self.still_since = None  # quando a velocidade zerou em PARADO (conta hold_s)
         self.ignore_until = {}  # id -> instante ate quando ignorar (depois de parar nela)
         self.reported = set()
         self.stop_at_m = float(stop_at_m)
@@ -210,8 +214,18 @@ class SignController:
                 return SignCommand(self.state, 0., self.marker_id, message, True, remaining, in_path)
             return SignCommand(self.state, self.approach_speed, self.marker_id, message,
                                remaining_m=remaining, in_path=in_path)
-        if self.state == "PARADO" and self.hold_s is not None and now - self.stopped_at >= self.hold_s:
-            message = self.release(now)
+        if self.state == "PARADO" and self.hold_s is not None:
+            # O tempo conta com o carro parado: PARADO comeca ainda freando. Sem
+            # velocidade, conta da ordem de parar; com o encoder sem zerar
+            # (ruido), dela mais STILL_TIMEOUT_S, para nao ficar preso.
+            if self.still_since is None and math.isfinite(speed) and abs(speed) < STILL_SPEED:
+                self.still_since = now
+            if self.still_since is not None:
+                start = self.still_since
+            else:
+                start = self.stopped_at + (STILL_TIMEOUT_S if math.isfinite(speed) else 0.)
+            if now - start >= self.hold_s:
+                message = self.release(now)
         if self.state == "SAINDO" and now >= self.ignore_until.get(self.marker_id, -1):
             self.state = "LIVRE"
         if self.state == "PARADO":
@@ -222,7 +236,7 @@ class SignController:
     def stopped(self, now):
         """Trava a parada da placa, pela visao ou pelo ultrassom."""
         if self.state == "APROXIMANDO":
-            self.state, self.stopped_at = "PARADO", now
+            self.state, self.stopped_at, self.still_since = "PARADO", now, None
             return True
         return False
 

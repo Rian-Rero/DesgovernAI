@@ -4,6 +4,7 @@ A homografia leva pixels da camera fixa ao plano do piso: x para frente e y
 para esquerda, em metros, com origem no centro do eixo dianteiro. A selecao
 da faixa e exatamente a implementacao compartilhada de tools.yellow_path.
 """
+from collections import deque
 from dataclasses import dataclass, field, fields, replace
 import json
 import math
@@ -808,6 +809,18 @@ class RealStanleyFollower:
         self.age_average = None
         self.odometry = None  # PoseHistory do laco de controle (compensacao exata)
         self.exact_compensation = self.settings.get('exact_latency_compensation', True)
+        # Atraso da DIRECAO (s): o esterco comandado agora so vira guinada depois
+        # disto (filtro do Car + servo + pneu; 26/11: ~0,16-0,20 s, guinada do
+        # giroscopio contra o comando). O Stanley e calculado no estado em que o
+        # carro estara quando o comando de agora chegar a roda, integrando os
+        # comandos ja enviados e ainda "no caminho" (preditor de Smith). Sem
+        # isso, so o historico de poses tira a oscilacao mas vira tarde em curva
+        # fechada; a guinada de agora x idade da foto antecipava por acaso e
+        # realimentava a oscilacao (esterco de lado a lado). 0 desliga.
+        self.steer_delay = nonnegative('steer_delay_s', 0.)
+        self.steer_response = positive('steering_response', 1.)
+        self.commands = deque(maxlen=128)  # (instante, esterco geometrico comandado)
+        self.steer_preview = (0., 0., 0.)  # (frente m, esquerda m, giro rad) previstos no atraso
         # Curva vista por uma cor so: multiplica o esterco pedido e a taxa do
         # volante (1 = sem reforco). A borda interna saiu da imagem e o carro
         # tendia a virar tarde/pouco.
@@ -959,6 +972,13 @@ class RealStanleyFollower:
     def steer_trim(self):
         """Centro da direcao em uso (rad, geometrico): fixo + aprendido."""
         return self.trim_base + self.centering
+
+    def _record_command(self, now, steer):
+        """Esterco (convencao geometrica) enviado em `now`, para _preview_actuator."""
+        if isinstance(now, (int, float, np.number)) and math.isfinite(now) and math.isfinite(steer):
+            if self.commands and now <= self.commands[-1][0]:
+                self.commands.pop()  # mesmo instante: vale o ultimo
+            self.commands.append((float(now), float(steer)))
 
     def _send_trim(self, car):
         """Trim no SERVO (Car.set_steer_trim), fora do esterco usado na odometria."""
@@ -1115,6 +1135,41 @@ class RealStanleyFollower:
         moved = move_states([*errors, float(dkappa), 1.], dx, dy, dth, self.max_curvature)[0]
         return (float(moved[0]), float(moved[1]), float(moved[2])), age
 
+    def _preview_actuator(self, errors, car, now):
+        """Erros no instante em que o esterco comandado agora chega a roda.
+
+        O carro ainda vai andar steer_delay s com os comandos dos ultimos
+        steer_delay s (ja enviados, ainda no filtro/servo): integra a
+        bicicleta com eles (segurando cada comando ate o seguinte) e leva a
+        clotoide da foto ate la, como _propagate faz com a odometria."""
+        self.steer_preview = (0., 0., 0.)
+        speed = float(getattr(car, 'v', 0.))
+        if self.steer_delay <= 0 or not self.commands or not math.isfinite(speed) or speed <= .05:
+            return errors
+        step = .02
+        count = max(1, int(round(self.steer_delay/step)))
+        times = np.fromiter((c[0] for c in self.commands), float, len(self.commands))
+        values = np.fromiter((c[1] for c in self.commands), float, len(self.commands))
+        when = now - self.steer_delay + (np.arange(count) + .5)*self.steer_delay/count
+        steer = values[np.clip(np.searchsorted(times, when, side='right') - 1, 0, len(values) - 1)]
+        wheelbase = self.controller.wheelbase
+        rate = speed/wheelbase*np.tan(steer)*self.steer_response
+        dt = self.steer_delay/count
+        heading = np.concatenate(([0.], np.cumsum(rate*dt)))
+        middle = (heading[1:] + heading[:-1])/2
+        dx, dy, dth = (float(np.sum(speed*dt*np.cos(middle))), float(np.sum(speed*dt*np.sin(middle))),
+                       float(heading[-1]))
+        self.steer_preview = (dx, dy, dth)
+        dx += wheelbase*(math.cos(dth) - 1)  # eixo traseiro -> eixo dianteiro
+        dy += wheelbase*math.sin(dth)
+        try:
+            from .corridor import move_states
+        except ImportError:  # modulo carregado fora do pacote (alguns testes)
+            from corridor import move_states
+        dkappa = self.path_dkappa if math.isfinite(self.path_dkappa) else 0.
+        moved = move_states([*errors, dkappa, 1.], dx, dy, dth, self.max_curvature)[0]
+        return float(moved[0]), float(moved[1]), float(moved[2])
+
     def apply(self, car, observation, now, obstacle_detected=False):
         """Retorna True quando uma observacao atual, ou a faixa vista ha no maximo
         line_loss_frames quadros (e line_loss_tolerance segundos), autoriza seguir."""
@@ -1229,6 +1284,7 @@ class RealStanleyFollower:
                   and not moving_backward and errors is not None)
         search = 0.
         if active:
+            errors = self._preview_actuator(errors, car, float(now))
             lateral, heading, curvature = errors
             offset = self._racing_line_offset(curvature, observation, car.dt)
             if offset:
@@ -1321,6 +1377,7 @@ class RealStanleyFollower:
                 steer = self.controller.steer_to(raw, car.dt, gain, rate, steering_factor)
                 self.pursuit_target = (lookahead, x, y)
                 car.set_steer(self.steering_sign * steer)
+                self._record_command(now, steer)
                 active = bool(getattr(car, 'encoder_valid', True))
             elif active:
                 gyro = getattr(car, 'w_imu', math.nan)
@@ -1329,6 +1386,7 @@ class RealStanleyFollower:
                 steer = self.controller.update(lateral, heading, stanley_speed, car.dt, curvature, search,
                                                yaw_rate=gyro, steering_factor=steering_factor)
                 car.set_steer(self.steering_sign * steer)
+                self._record_command(now, steer)
                 # O setter revalida a serial antes de enviar a direcao.
                 active = bool(getattr(car, 'encoder_valid', True))
         if not active:
@@ -1336,6 +1394,7 @@ class RealStanleyFollower:
             car.vel_error_integral = 0.
             car.set_u(0.)
             car.set_steer(0.)
+            self._record_command(now, 0.)
             self.reset(restart_steering=not finite_sample or car.v <= .08)
             steer = 0.
         if active and holding and outlier:

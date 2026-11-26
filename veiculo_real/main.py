@@ -59,6 +59,10 @@ OBSTACLE_DISTANCE = 0.20  # folga desejada ate o obstaculo, a partir da FRENTE d
 # folga real da frente do carro.
 FRONT_OVERHANG_M = 0.07
 STOP_REACTION_TIME = 0.30
+# Bipe enquanto parado: (duracoes dos bipes em s, periodo de repeticao em s).
+# Ultrassom: dois curtos por segundo (como antes). Placa de PARE (ArUco): um
+# longo a cada 1,5 s, para a equipe saber de longe por que o carro parou.
+STOP_BEEPS = {"ultrassom": ((0.15, 0.15), 1.0), "aruco": ((0.7,), 1.5)}
 STOP_DECELERATION = 1.75  # m/s^2: ajuste experimental ja usado no veiculo
 # Abaixo disto a leitura do ultrassom e falha do sensor (ensaio de 10/11: 0,00 m
 # com nada a frente); um obstaculo real passa antes pela faixa de parada.
@@ -173,6 +177,14 @@ parameters = {
     # pelos cones parados (tools/alinhamento_camera.py): 0,88 a esquerda e 0,90
     # a direita; com 1,0 a odometria girava ~11% a mais que o carro.
     "steering_response": 0.89,
+    # Atraso da direcao (s): comando -> guinada no giroscopio. Ensaio de 26/11
+    # (13 s de oscilacao, atraso puro + 1a ordem ajustados): 0,16-0,20 s. O
+    # Stanley mira o estado em que o carro estara quando o esterco de agora
+    # chegar a roda (fva_car/lateral.py _preview_actuator). Pista virtual com
+    # esse atraso e a calibracao atual (5 pistas x 5 sementes, 1,5 m/s):
+    # antes 96% das voltas, 10,5 cm, 1040 pedaladas; com o historico de poses
+    # 96%, 5,4 cm, 4; com os dois 100%, 4,6 cm, 2. 0 desliga.
+    "steer_delay_s": 0.16,
     # 60 graus/s levava 0,33 s (0,5 m a 1,5 m/s) para chegar ao batente:
     # quase todo o trecho visivel antes da curva.
     "stanley_max_rate_deg_s": 120.0,
@@ -285,13 +297,16 @@ parameters = {
     # a altura estimada do centro da placa sai no terminal e confere a medida.
     # Placa na frente: a visao antecipa a parada em stop_gap_m (do pneu ao
     # cone). O ultrassom mantem a distancia de seguranca normal.
-    # Fica parado ate o botao "Liberar parada" da GUI (ou hold_s segundos).
+    # Fica parado hold_s segundos (5) e segue sozinho, ignorando a mesma placa
+    # por ignore_s; o botao "Liberar parada" da GUI libera antes. hold_s None:
+    # so pelo botao. Bipe proprio (um bipe LONGO, STOP_BEEPS), diferente do
+    # ultrassom (dois curtos).
     # "ignorar": so registra. every: busca a cada N quadros. False desliga.
     "aruco": {"every": 2, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
               # marker_height_m: altura do CENTRO do marcador (m). Com ela, a posicao
               # nao depende do tamanho (melhor para placa baixa). None: pelo tamanho.
               "marker_m": 0.10, "marker_height_m": None, "stop_at_m": 0.0, "front_half_width_m": 0.25,
-              "hold_s": None, "ignore_s": 4.0},
+              "hold_s": 5.0, "ignore_s": 4.0},
     # Depois de "Liberar parada", o ultrassom fica ignorado por isto (s): o carro
     # quase sempre parou encostado no cone, e sem a carencia travava de novo em
     # 0,15 s (o bipe nao parava e o botao parecia nao funcionar).
@@ -930,8 +945,15 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
     if mode == "cones" or line_estimator_settings(config) is not None:
         # A visao leva o mapa de cones (ou a linha) pela odometria registrada pelo controle.
         poses = SharedPoseHistory() if use_process else PoseHistory()
-        # O seguidor leva a foto ao instante do comando pela velocidade e guinada
-        # atuais (pista virtual, atraso de 0,3-0,4 s: melhor que pelo historico).
+        # O seguidor leva a foto ao instante do comando pelo movimento REAL
+        # registrado (historico de poses, com a guinada do giroscopio). Antes
+        # usava a guinada de agora x idade da foto: com a direcao ~0,18 s
+        # atrasada (ensaio de 26/11, guinada do giroscopio contra o comando) o
+        # carro balancava a ~1,7 Hz e a guinada de agora nao representava o giro
+        # desde a foto, realimentando a oscilacao (esterco de lado a lado).
+        # Pista virtual com esse atraso: 1007-1341 pedaladas -> 3-8, erro
+        # 8,8-17 cm -> 5 cm, em todas as latencias de imagem testadas.
+        follower.odometry = poses
         if not use_process:
             detector.odometry = poses
     vision = None
@@ -1097,6 +1119,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
         command_check = -math.inf
         resume_until = -math.inf
         sign = None
+        previous_sign_state, previous_sign_in_path = "LIVRE", False
         while car.t < config["ts"]:
             if not car.step():
                 break
@@ -1146,6 +1169,19 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                     poses.pose_at if poses is not None else None, float(car.v))
                 if sign.message:
                     print(sign.message, flush=True)
+                if previous_sign_state == "PARADO" and sign.state == "SAINDO":
+                    # Liberou sozinha (hold_s). Placa ao lado: a mesma carencia do
+                    # botao, para o ultrassom nao travar no cone da borda. Placa
+                    # num cone A FRENTE: sem carencia (seguir bateria nele): o
+                    # ultrassom trava a parada, com o bipe dele.
+                    grace = 0.0 if previous_sign_in_path else float(config.get("obstacle_resume_grace_s", 2.0) or 0.0)
+                    resume_until = float(car.t) + grace
+                    echo_since = None
+                    print(f"PARE (ArUco {sign.marker_id}): {signs.hold_s:.0f} s parado, seguindo"
+                          + (f"; ultrassom ignorado por {grace:.1f} s" if grace > 0 else "") + ".", flush=True)
+                previous_sign_state = sign.state
+                if sign.state in ("APROXIMANDO", "PARADO"):
+                    previous_sign_in_path = bool(sign.in_path)
                 if sign.stop:
                     if not math.isfinite(sign.remaining_m):
                         reason = "placa confirmada sem posicao confiavel"
@@ -1303,8 +1339,10 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                 t_diagnostic = now
                 last_diagnostic_sequence = sequence
             if stop_required and now >= next_stop_beep:
-                if car.bz.beep([0.15, 0.15], silence=0.15):
-                    next_stop_beep = now + 1.0
+                # Bipe diz POR QUE parou: placa (um longo) ou ultrassom (dois curtos).
+                pattern, period = STOP_BEEPS["ultrassom" if obstacle_detected else "aruco"]
+                if car.bz.beep(list(pattern), silence=0.15):
+                    next_stop_beep = now + period
             # O controle roda em todo passo; somente a telemetria usa 10 Hz.
             if now - t_telemetry >= TELEMETRY_PERIOD:
                 print(
@@ -1497,11 +1535,13 @@ def main():
     parser.add_argument("--placa-lado", type=float, metavar="M",
                         help="Lado do quadrado preto do ArUco impresso, em m (padrao 0.10): da a distancia da placa")
     parser.add_argument("--pare-segundos", type=float, metavar="S",
-                        help="Na placa de PARE, segue sozinho depois de S segundos (padrao: so pelo botao)")
+                        help="Na placa de PARE, segue sozinho depois de S segundos (padrao 5; 0 = so pelo botao)")
     parser.add_argument("--sem-imu", action="store_true",
                         help="Guinada pelo modelo da direcao, sem o giroscopio da IMU")
     parser.add_argument("--amortecer-guinada", type=float, metavar="K",
                         help="Amortecimento do Stanley pela guinada medida, em s (0 = desligado; teste 0.1-0.3)")
+    parser.add_argument("--atraso-direcao", type=float, metavar="S",
+                        help="Atraso da direcao previsto pelo Stanley, s (padrao 0.16; 0 desliga o preditor)")
     parser.add_argument("--sem-pipeline", action="store_true",
                         help="Visao sequencial, sem o processo auxiliar (vision_workers = 0)")
     parser.add_argument("--sem-nucleos", action="store_true",
@@ -1604,7 +1644,8 @@ def main():
     if args.pare_segundos is not None and settings.get("aruco", True) is not False:
         if args.pare_segundos < 0:
             parser.error("--pare-segundos deve ser >= 0")
-        settings["aruco"] = {**settings.get("aruco", parameters["aruco"]), "hold_s": args.pare_segundos}
+        settings["aruco"] = {**settings.get("aruco", parameters["aruco"]),
+                             "hold_s": args.pare_segundos if args.pare_segundos > 0 else None}
     if args.placa_altura is not None and settings.get("aruco", True) is not False:
         if not 0 <= args.placa_altura <= .2:
             parser.error("--placa-altura deve estar entre 0 e 0.2 m (abaixo da camera)")
@@ -1619,6 +1660,10 @@ def main():
         if not 0 <= args.amortecer_guinada <= 1:
             parser.error("--amortecer-guinada deve estar entre 0 e 1 s")
         settings["stanley_yaw_damping"] = args.amortecer_guinada
+    if args.atraso_direcao is not None:
+        if not 0 <= args.atraso_direcao <= .5:
+            parser.error("--atraso-direcao deve estar entre 0 e 0.5 s")
+        settings["steer_delay_s"] = args.atraso_direcao
     if args.sem_pipeline:
         settings["vision_workers"] = 0
     if args.sem_nucleos:

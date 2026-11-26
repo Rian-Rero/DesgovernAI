@@ -175,6 +175,21 @@ def _tasks(pid):
         return [pid]
 
 
+def online_cores():
+    """Nucleos ligados (/sys/devices/system/cpu/online, ex. "0-3"); senao 0..cpu_count-1."""
+    try:
+        text = open("/sys/devices/system/cpu/online", encoding="ascii").read().strip()
+        cores = set()
+        for part in text.split(","):
+            low, _, high = part.partition("-")
+            cores.update(range(int(low), int(high or low) + 1))
+        if cores:
+            return cores
+    except (OSError, ValueError):
+        pass
+    return set(range(os.cpu_count() or 1))
+
+
 def pin_process(cores, pid=None):
     """Fixa o processo `pid` (padrao: este) e suas threads nos nucleos `cores`.
 
@@ -183,11 +198,12 @@ def pin_process(cores, pid=None):
     if not hasattr(os, "sched_setaffinity") or not cores:
         return None
     pid = os.getpid() if pid is None else int(pid)
-    try:
-        available = os.sched_getaffinity(pid)
-    except OSError:
-        return None
-    wanted = {int(core) for core in cores} & set(available)
+    # Nucleos LIGADOS da maquina, nao a afinidade atual: o processo da visao
+    # nasce do principal ja fixado em 0-1 (controle) e herda isso; pela
+    # afinidade, {2,3} & {0,1} dava vazio e a visao ficava nos nucleos do
+    # controle, com 2-3 ociosos (ensaio de 26/11: "vision": null no resumo).
+    available = online_cores()
+    wanted = {int(core) for core in cores} & available
     if not wanted:
         return None
     applied = False

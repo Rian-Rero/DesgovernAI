@@ -74,6 +74,12 @@ def body_clearance(x, y, th, cones):
     return float(distance[k]), (1 if side[k] > 0 else -1)
 
 # (nome, segmentos): ('reta', comprimento) ou ('curva', raio com sinal (esquerda +), angulo em graus)
+# Atraso puro da direcao do carro simulado (s), alem do filtro de 3 amostras
+# (~0,02) e do servo (servo_tau 0,06): ~0,18 s do comando a guinada, como no
+# carro de 26/11 (giroscopio). Antes 0: o simulador nao reproduzia o esterco
+# "pedalando" do carro, e ajustes bons aqui oscilavam la.
+STEER_DELAY_S = .10
+
 TRACKS = {
     # Termina antes de cruzar o inicio (cones sobrepostos com largura variavel).
     'oval': [('reta', 3.), ('curva', 2.5, 180), ('reta', 5.), ('curva', 2.5, 180), ('reta', 1.)],
@@ -198,12 +204,16 @@ def add_decoys(track, count, rng, gap=(.2, .8)):
 class SimCar:
     """Mesma interface que o RealStanleyFollower usa do Car real."""
     def __init__(self, pose, rng, coast=.5, scale_error=.02, steer_bias_deg=.5, servo_tau=.06, fixed_bias_deg=0.,
-                 steer_response=1., model_response=1., gyro=False):
+                 steer_response=1., model_response=1., gyro=False, steer_delay=0.):
         """steer_response: fracao da guinada do modelo que o carro faz de verdade
         (0,88-0,90 no carro de 19/11); model_response: a que a odometria supoe
         (steering_response do main.py). gyro: odometria pela guinada medida
         (IMU), com ruido e vies pequenos, em vez do modelo."""
         self.servo_tau = servo_tau
+        # Atraso puro da direcao (s), alem do servo: no carro de 26/11 o comando
+        # so aparecia na guinada do giroscopio ~0,18 s depois (ajuste atraso
+        # puro + 1a ordem em 13 s de oscilacao), contra ~0,08 s deste modelo.
+        self.steer_queue = deque([0.]*max(0, int(round(steer_delay/.02))))
         self.steer_response, self.model_response, self.gyro = steer_response, model_response, gyro
         self.gyro_bias = rng.normal(0., .005) if gyro else 0.
         self.w_imu = math.nan
@@ -256,7 +266,11 @@ class SimCar:
     def advance(self):
         dt = self.dt
         # Direcao: media de 3 amostras (steering_filter_size) + servo ~60 ms; vies mecanico.
-        self.steer_actual += (self.st_filtered - self.steer_actual)*(1. - math.exp(-dt/self.servo_tau))
+        commanded = self.st_filtered
+        if self.steer_queue:
+            self.steer_queue.append(commanded)
+            commanded = self.steer_queue.popleft()
+        self.steer_actual += (commanded - self.steer_actual)*(1. - math.exp(-dt/self.servo_tau))
         steer = self.steer_actual + self.steer_bias + self.trim
         # Velocidade: PI rapido para subir; para descer o carro so rola.
         error = self.vref - self.v_true
@@ -374,7 +388,7 @@ def track_error(track, point, hint):
 
 def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), duration=None, coast=.5,
         camera_kwargs=None, trace=False, servo_tau=.06, steer_bias_deg=0., line=False, decoys=0,
-        steer_response=None, color_sides=False):
+        steer_response=None, color_sides=False, steer_delay=None):
     """Uma volta; devolve dicionario de metricas (e a serie, com trace).
 
     steer_response: None (padrao) = carro ideal (roda faz a curva pedida, odometria
@@ -382,8 +396,12 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
     steering_response da configuracao. config['sim_gyro']: odometria pelo giroscopio.
     color_sides: como no carro, o lado de cada cor e decidido pelos proprios
     cones (SideTracker de fva_car/cones.py), com o estimador recomecando quando
-    troca; sem isso, verde = esquerda sempre."""
+    troca; sem isso, verde = esquerda sempre. steer_delay: atraso puro da
+    direcao (s); None = STEER_DELAY_S (o do carro)."""
     import main as vehicle_main
+
+    if steer_delay is None:
+        steer_delay = STEER_DELAY_S
 
     rng = np.random.default_rng(seed)
     add_decoys(track, decoys, np.random.default_rng(1000 + seed))
@@ -408,15 +426,15 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
     follower = RealStanleyFollower(vehicle_main.follower_config(config, 'cones', corridor))
     run.last_follower = follower  # trim aprendido (corridas seguidas)
     poses = PoseHistory()
-    if config.get('exact_compensation', False):
-        follower.odometry = poses  # como no carro: compensacao exata do atraso
+    if config.get('exact_compensation', True):
+        follower.odometry = poses  # como no carro (desde 26/11): compensacao exata do atraso
     start = -WHEELBASE  # eixo dianteiro no inicio da pista
     real = steer_response is not None
     car = SimCar((start*math.cos(track.heading[0]), start*math.sin(track.heading[0]), track.heading[0]),
                  rng, coast=coast, servo_tau=servo_tau, fixed_bias_deg=steer_bias_deg,
                  steer_response=float(steer_response) if real else 1.,
                  model_response=float(config.get('steering_response', 1.)) if real else 1.,
-                 gyro=bool(config.get('sim_gyro', False)))
+                 gyro=bool(config.get('sim_gyro', False)), steer_delay=steer_delay)
     duration = duration or (track.length/.25 + 5.)
     pending, observation = [], None
     next_capture, last_capture = 0., None

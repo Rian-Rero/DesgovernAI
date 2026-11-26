@@ -176,6 +176,14 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(signs.deceleration, main.parameters['coast_deceleration'])
         self.assertEqual(main.aruco_marker_m({'aruco': True}), .1)
 
+    def test_steering_delay_command_line(self):
+        import main
+        from unittest.mock import patch
+        self.assertEqual(main.parameters['steer_delay_s'], .16)
+        with patch.object(sys, 'argv', ['main.py', '--atraso-direcao', '0.2']), patch.object(main, 'run_mission') as run:
+            main.main()
+        self.assertEqual(run.call_args[0][0]['steer_delay_s'], .2)
+
     def test_command_line(self):
         from unittest.mock import patch
         import main
@@ -235,7 +243,8 @@ class MarkerGeometryTests(unittest.TestCase):
 
 class EndToEndStopTests(unittest.TestCase):
     """run_mission de verdade (modo cones) ate parar na placa, a frente ou ao lado."""
-    def run_to_stop(self, cone_x, side_y, ultrasound_range):
+    def run_to_stop(self, cone_x, side_y, ultrasound_range, settings=None, finish=None):
+        """finish(car): fim da missao; padrao: parou depois de andar."""
         import json
         import tempfile
         from unittest.mock import Mock, patch
@@ -261,7 +270,12 @@ class EndToEndStopTests(unittest.TestCase):
                 shared['data']['observation'] = ConeObservation(
                     timestamp=stamp, errors=(0., 0., 0.), markers=markers, path_dkappa=0., corridor_width_m=1.3,
                     marker_timestamp=stamp, marker_scan=shared['scan'])
+            self.history.append((car.t, car.v, car.p[0]))
+            if finish is not None:
+                return not (car.t > 40 or finish(car))
             return not (car.t > 40 or (car.v == 0 and car.t > 3 and car.p[0] > .5))
+        self.history = []
+        self.car = car
         car.step = step
         rel = lambda: cone_x - (car.p[0] + L)
         car.get_distance = lambda: ((rel() + .07, True) if side_y == 0 and rel() < ultrasound_range else (4., True))
@@ -290,7 +304,8 @@ class EndToEndStopTests(unittest.TestCase):
                 patch.object(mission, 'RealConeDetector', return_value=detector), \
                 patch('builtins.print'):
             mission.run_mission({'camera_calibration_file': str(path), 'ts': 60., 'save': False,
-                                 'navigation_mode': 'cones'}, car_factory=lambda _: car, clock=lambda: float(car.t))
+                                 'navigation_mode': 'cones', **(settings or {})},
+                                car_factory=lambda _: car, clock=lambda: float(car.t))
         return cone_x - (car.p[0] + L + .07), car.v   # folga da frente do pneu ate o cone/placa
 
     def test_cone_in_front_even_without_the_ultrasound(self):
@@ -298,6 +313,46 @@ class EndToEndStopTests(unittest.TestCase):
             gap, speed = self.run_to_stop(3., 0., ultrasound)
             self.assertEqual(speed, 0.)
             self.assertTrue(0. < gap < .3, gap)
+
+    def test_stops_five_seconds_with_its_own_beep_then_goes_on(self):
+        # Pedido de 26/11: no ID 1 para 5 s e segue; bipe diferente do ultrassom.
+        import main
+        self.run_to_stop(2.5, .9, 0., finish=lambda car: car.p[0] > 3.5)
+        stopped = [t for t, v, _ in self.history if v == 0. and t > 1.]
+        self.assertTrue(stopped, 'nao parou')
+        still = max(stopped) - min(stopped)
+        self.assertAlmostEqual(still, 5., delta=.15)   # 5 s parado de fato
+        self.assertGreater(self.car.p[0], 3.5)           # seguiu e passou da placa
+        patterns = {tuple(call.args[0]) for call in self.car.bz.beep.call_args_list}
+        self.assertEqual(patterns, {tuple(main.STOP_BEEPS['aruco'][0])})
+        self.assertNotEqual(main.STOP_BEEPS['aruco'][0], main.STOP_BEEPS['ultrassom'][0])
+
+    def test_cone_in_front_stays_stopped_by_the_ultrasound_after_the_hold(self):
+        # Placa num cone A FRENTE: depois dos 5 s seguir bateria; o ultrassom
+        # (sem carencia) trava a parada, e o bipe passa a ser o dele.
+        import main
+        self.run_to_stop(3., 0., 4., finish=lambda car: car.t > 20.)
+        self.assertLess(self.car.p[0] + .36 + .07, 3.)  # nao encostou no cone
+        patterns = [tuple(call.args[0]) for call in self.car.bz.beep.call_args_list]
+        self.assertEqual(patterns[0], tuple(main.STOP_BEEPS['aruco'][0]))
+        self.assertEqual(patterns[-1], tuple(main.STOP_BEEPS['ultrassom'][0]))
+
+    def test_follower_compensates_latency_with_the_recorded_poses(self):
+        # 26/11: o main nunca ligava o historico de poses ao seguidor; a foto era
+        # levada ao instante do comando pela guinada de agora x idade (oscilava).
+        from unittest.mock import patch
+        import test_mission as tm
+        created, real = [], tm.mission.RealStanleyFollower
+
+        def follower(config):
+            created.append(real(config))
+            return created[-1]
+        with patch.object(tm.mission, 'RealStanleyFollower', side_effect=follower):
+            self.run_to_stop(2.5, .9, 0.)
+        self.assertEqual(len(created), 1)
+        self.assertIsNotNone(created[0].odometry)
+        self.assertTrue(hasattr(created[0].odometry, 'delta'))
+        self.assertGreater(created[0].steer_delay, 0.)
 
     def test_sign_beside_the_track_on_both_sides(self):
         for side in (.9, -.8):
