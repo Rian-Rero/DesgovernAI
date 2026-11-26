@@ -116,3 +116,35 @@ def marker_ground(pose, ground_from_pixel, pixel, side_px, side_m):
                 return float(point[0]), float(point[1]), float(camera[2]*(1 - fraction))
     point = pose.point_from_size(pixel, side_px, side_m)   # acima do horizonte: so a pose
     return None if point is None else (float(point[0]), float(point[1]), float(point[2]))
+
+
+def marker_at_height(pose, ground_from_pixel, pixel, height_m):
+    """(x, y, altura) do marcador cujo centro esta a height_m do chao, sem usar o
+    tamanho: o raio do pixel (direcao pela homografia) cortado na altura dada.
+    Bem condicionado para placa BAIXA (camera a ~25 cm olhando para baixo)."""
+    if pose is None or not math.isfinite(height_m):
+        return None
+    camera = pose.position
+    if not 0. <= height_m < camera[2] - .02:
+        return None   # na altura da camera ou acima: o raio nao corta o plano a frente
+    u, v = pixel
+    q = np.asarray(ground_from_pixel, float) @ np.array([u, v, 1.])
+    if q[2] == 0:
+        return None
+    far = q[:2]/q[2]
+    if far[0] - camera[0] <= 0:
+        return None
+    fraction = 1. - height_m/camera[2]
+    point = camera[:2] + fraction*(far - camera[:2])
+    return float(point[0]), float(point[1]), float(height_m)
+
+
+def implied_side(pose, pixel, side_px, point):
+    """Lado real (m) que o marcador teria para estar em `point` com side_px pixels:
+    confere o tamanho configurado (marker_m)."""
+    if pose is None or point is None or not side_px > 0:
+        return math.nan
+    u, v = pixel
+    normalized = np.array([(u - pose.center_px[0])/pose.focal_px, (v - pose.center_px[1])/pose.focal_px, 1.])
+    distance = float(np.linalg.norm(np.asarray(point, float) - pose.position))
+    return side_px*distance/(pose.focal_px*float(np.linalg.norm(normalized)))

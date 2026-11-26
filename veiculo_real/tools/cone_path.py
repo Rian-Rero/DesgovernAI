@@ -404,6 +404,9 @@ class ConePathDetector:
         self.signature = None
         self.learned_width = None
         self.width_time = -math.inf
+        # Largura do estimador do corredor (RealConeDetector), no lugar da
+        # nominal fixa quando a medida propria ja expirou. None: nominal.
+        self.nominal_width_m = None
         self.sides = SideEstimator()
         self.prev_center = None  # Centro no piso do ultimo corredor valido.
         self.prev_center_time = -math.inf
@@ -588,25 +591,24 @@ class ConePathDetector:
 
         reason = [None]
         def contact(component, x, y):
-            rows, columns = np.nonzero(component)
-            if not len(rows):
+            # Caixa e contagens pelo OpenCV (mascara bool vista como uint8): o
+            # np.nonzero alocava os indices de todos os pixels, ~11 mil vezes por
+            # ensaio (perfil de 26/11). Mesmos resultados.
+            left, top, w, h = cv2.boundingRect(component.view(np.uint8))
+            if not w:
                 return None
-            left, top, right, bottom = columns.min(), rows.min(), columns.max(), rows.max()
-            component = component[top:bottom+1, left:right+1]
-            x, y = x+int(left), y+int(top)
-            h, w = component.shape
+            component = component[top:top+h, left:left+w]
+            x, y = x+left, y+top
             if h >= 8:
                 # Piso brilhante: o reflexo invertido abaixo do cone se estreita.
                 # A base e a linha mais larga mais baixa; o que vem abaixo e reflexo.
                 widths = np.count_nonzero(component, axis=1)
                 base_row = int(np.flatnonzero(widths >= .85*widths.max()).max())
                 if base_row <= h-3 and base_row >= 4:
-                    component = component[:base_row+1]
-                    columns = np.flatnonzero(np.any(component, axis=0))
-                    component = component[:, columns.min():columns.max()+1]
-                    x += int(columns.min())
-                    h, w = component.shape
-            area = np.count_nonzero(component)
+                    left, _, w, h = cv2.boundingRect(component[:base_row+1].view(np.uint8))
+                    component = component[:base_row+1, left:left+w]
+                    x += left
+            area = cv2.countNonZero(component.view(np.uint8))
             px, local_min = expected(y+h-1)
             if area < local_min or h < (4 if math.isfinite(px) else max(5, height/100)) or w < 3:
                 reason[0] = reason[0] or "pequeno"
@@ -843,15 +845,44 @@ class ConePathDetector:
             'masks': (green, red), 'rejected': rejected, 'roi': roi, 'scale': scale,
             'size_check': size_check, 'frame': frame, 'light': light}
 
-    def process(self, frame, settings=None, timestamp=None, *, motion=None):
+    def detect(self, frame, settings=None):
+        """Etapa SEM estado do quadro: candidatos por cor + classificador.
+
+        So depende do quadro (nao do anterior): pode rodar em outro processo,
+        em paralelo com a etapa com estado (process(found=...)) do quadro
+        anterior (fva_car/vision_process.py). Devolve o dicionario de
+        candidates() com os pontos ja confirmados pelo classificador e
+        'classifier' (ou None) para o debug."""
+        settings = settings or ConeSettings()
+        found = self.candidates(frame, settings)
+        found['classifier'] = None
+        if self.classifier is not None and found['scale'] is not None:
+            # A CNN confirma cada candidato pelo recorte em volta da base.
+            started = time.perf_counter()
+            gp, rp, rejected = found['green'], found['red'], found['rejected']
+            verdict = self.classifier.classify(found['frame'], {'green': gp, 'red': rp}, found['scale'])
+            for color in ('green', 'red'):
+                keep = verdict[color][0]
+                dropped = int(np.count_nonzero(~keep))
+                if dropped:
+                    rejected[color]['classificador'] = rejected[color].get('classificador', 0) + dropped
+            candidates = len(gp) + len(rp)
+            found['green'], found['red'] = gp[verdict['green'][0]], rp[verdict['red'][0]]
+            found['classifier'] = {'candidates': candidates, 'kept': len(found['green']) + len(found['red']),
+                                   'ms': _r(1000*(time.perf_counter()-started), 2)}
+        return found
+
+    def process(self, frame, settings=None, timestamp=None, *, motion=None, found=None):
         """motion opcional: delta (frente m, esquerda m, yaw rad), desde o frame anterior.
 
         Com calibracao, aceita odometria externa ou estima movimento pelo piso.
         Sem calibracao, a memoria permanece em pixels e usa fluxo optico.
+        found: resultado de detect() ja calculado (em paralelo); None calcula aqui.
         """
         settings = settings or ConeSettings()
         now = time.monotonic() if timestamp is None else float(timestamp)
-        found = self.candidates(frame, settings)
+        if found is None:
+            found = self.detect(frame, settings)
         green, red = found['masks']
         gp, rp = found['green'], found['red']
         rejected = found['rejected']
@@ -861,19 +892,8 @@ class ConePathDetector:
         if found['light'] is not None:
             detection['light'] = [_r(v, 2) for v in found['light']]
         frame = found['frame']
-        if self.classifier is not None and found['scale'] is not None:
-            # A CNN confirma cada candidato pelo recorte em volta da base.
-            started = time.perf_counter()
-            verdict = self.classifier.classify(frame, {'green': gp, 'red': rp}, found['scale'])
-            for color in ('green', 'red'):
-                keep = verdict[color][0]
-                dropped = int(np.count_nonzero(~keep))
-                if dropped:
-                    rejected[color]['classificador'] = rejected[color].get('classificador', 0) + dropped
-            candidates = len(gp) + len(rp)
-            gp, rp = gp[verdict['green'][0]], rp[verdict['red'][0]]
-            detection['classifier'] = {'candidates': candidates, 'kept': len(gp) + len(rp),
-                                       'ms': _r(1000*(time.perf_counter()-started), 2)}
+        if found.get('classifier') is not None:
+            detection['classifier'] = found['classifier']
         result.green_points, result.red_points = gp, rp
         result.debug = {'detection': {
             'green': {'bases': len(gp), 'rejected': rejected['green'], 'px': _polyline(gp, 20, 1)},
@@ -1163,6 +1183,10 @@ class ConePathDetector:
         turn = abs((heading(center)-heading(previous)+math.pi) % (2*math.pi)-math.pi)
         return float(np.mean(distance)), float(turn)
 
+    def _nominal_width(self, settings):
+        """Largura sem medida recente: a aprendida pelo estimador, ou a configurada."""
+        return self.nominal_width_m if self.nominal_width_m else settings.track_width_cm/100
+
     def _recovery_border(self, observations, gaps, now, settings):
         """Seleciona a fileira proxima pelo piso, independentemente da cor."""
         candidates = []
@@ -1182,7 +1206,7 @@ class ConePathDetector:
                     x, y = track.point
                     other = observations['red' if color == 'green' else 'green']
                     if (track.hits >= 2 and .35 <= x <= 1.15
-                            and max(.12, settings.margin_cm/100) <= abs(y) < settings.track_width_cm/200
+                            and max(.12, settings.margin_cm/100) <= abs(y) < self._nominal_width(settings)/2
                             and not np.any(other[:, 0] <= x+.35)):
                         # Um cone proximo e persistente so informa deslocamento.
                         # Projeta um trecho paralelo ao carro, sem inventar curva.
@@ -1235,7 +1259,7 @@ class ConePathDetector:
             # Dois portoes bem separados ja definem um segmento entre as bordas.
             need = 2
             result.estimated = True
-        nominal_width = settings.track_width_cm/100
+        nominal_width = self._nominal_width(settings)
         if (len(mids) < need and settings.single_border_recovery
                 and min_w <= nominal_width <= max_w):
             border = self._recovery_border(observations, gaps, now, settings)

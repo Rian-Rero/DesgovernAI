@@ -169,6 +169,121 @@ class VisionProcessTests(unittest.TestCase):
             vision.stop()
 
 
+class PipelineTests(VisionProcessTests):
+    """Os mesmos casos com a etapa sem estado num processo auxiliar."""
+    def start(self, camera_factory, **kwargs):
+        return super().start(camera_factory, workers=1, **kwargs)
+
+    def test_worker_process_runs_and_stops_with_vision(self):
+        data, vision = self.start(FakeCamera)
+        self.assertEqual(len(vision.workers), 1)
+        vision.start()
+        try:
+            self.assertTrue(self.wait(lambda: vision.frames_received >= 5), 'sem quadros do pipeline')
+            self.assertTrue(vision.workers[0].is_alive())
+            # O quadro chega pelo anel do pipeline, sem a segunda copia no anel de envio.
+            self.assertTrue(np.array_equal(data['observation'].source_frame, cone_frame()))
+            self.assertEqual(max(vision.shared_frames.numbers), 0)
+            self.assertEqual(vision.frames_lost, 0)
+            sequences = [data['observation'].sequence]
+            self.assertTrue(self.wait(lambda: data['observation'].sequence > sequences[0]))
+        finally:
+            vision.stop()
+        self.assertFalse(vision.workers[0].is_alive())
+
+
+class PipelineOrderTests(unittest.TestCase):
+    """pipelined_vision sem processos: resultado igual ao sequencial."""
+    def test_same_observations_as_sequential_and_old_results_dropped(self):
+        import queue
+        import threading
+        from fva_car.vision_process import pipelined_vision
+
+        class Detector:
+            def __init__(self):
+                self.used = []
+                self.detector = type('D', (), {'calibration_suspect': False})()
+
+            def prepare(self, frame):
+                return int(frame[0, 0, 0])
+
+            def observe_frame(self, frame, timestamp, prepared=None):
+                from fva_car.lateral import LineObservation
+                self.used.append(prepared)
+                return LineObservation(timestamp=timestamp, errors=(float(prepared), 0.))
+
+        class Worker:
+            """Pipe falso: responde na hora (como um processo auxiliar)."""
+            def __init__(self, frames):
+                self.frames, self.replies = frames, []
+
+            def send(self, message):
+                slot, number, _ = message
+                self.replies.append(('ok', number, int(self.frames.get(slot, number)[0, 0, 0])))
+
+            def recv(self):
+                return self.replies.pop(0)
+
+            def fileno(self):
+                raise AttributeError
+
+        frames = queue.Queue()
+        for k in range(1, 6):
+            frames.put((np.full((2, 2, 3), k, np.uint8), .1*k, .01, None, 'v4l2'))
+        work = SharedFrames((2, 2, 3), slots=4)
+        worker, detector, data, stop = Worker(work), Detector(), {}, threading.Event()
+        import multiprocessing.connection as mc
+        original = mc.wait
+        mc.wait = lambda conns, timeout=None: [c for c in conns if c.replies]
+        try:
+            def stopper():
+                while detector.used.__len__() < 5:
+                    time.sleep(.01)
+                stop.set()
+            threading.Thread(target=stopper, daemon=True).start()
+            pipelined_vision(data, stop, detector, frames, [worker], work)
+        finally:
+            mc.wait = original
+        self.assertEqual(detector.used, [1, 2, 3, 4, 5])
+        self.assertEqual(data['observation'].sequence, 5)
+
+
+class SlimPreparedTests(unittest.TestCase):
+    """O auxiliar manda prepare() sem imagem e mascaras: mesmo resultado."""
+    def test_same_result_as_sequential_with_and_without_odometry(self):
+        from fva_car.cones import RealConeDetector
+        from fva_car.lateral import GroundCalibration
+        from fva_car.vision_process import slim_prepared
+
+        folder = tempfile.mkdtemp()
+        path = Path(folder) / 'camera.json'
+        path.write_text(json.dumps({'image_size': [640, 480], 'homography': HOMOGRAPHY}))
+        calibration = GroundCalibration.from_file(path)
+
+        class Odometry:
+            def delta(self, start, end):
+                return (.05, 0., 0.)
+
+        rng = np.random.default_rng(3)
+        frames = [np.clip(cone_frame().astype(int) + rng.integers(-12, 13, (480, 640, 3)), 0, 255).astype(np.uint8)
+                  for _ in range(6)]
+        for odometry in (None, Odometry()):
+            with self.subTest(odometria=odometry is not None):
+                sequential, stateful, worker = (RealConeDetector(calibration, corridor=True) for _ in range(3))
+                for detector in (sequential, stateful):
+                    detector.odometry = odometry
+                for k, frame in enumerate(frames):
+                    expected = sequential.observe_frame(frame, .1*(k + 1))
+                    worker.detector.calibration_suspect = stateful.detector.calibration_suspect
+                    prepared = slim_prepared(worker.prepare(frame, markers=False))
+                    self.assertIsNone(prepared['found']['masks'])
+                    got = stateful.observe_frame(frame, .1*(k + 1), prepared=prepared)
+                    self.assertEqual(got.errors, expected.errors)
+                    np.testing.assert_array_equal(got.cone_result.green_points, expected.cone_result.green_points)
+                    np.testing.assert_array_equal(got.cone_result.red_points, expected.cone_result.red_points)
+                    self.assertEqual(got.cone_result.motion_source, expected.cone_result.motion_source)
+
+
 def _failing_after_five(**_):
     return FakeCamera(fail_after=5)
 

@@ -13,8 +13,17 @@ import socket
 import threading
 import time
 
-import numpy as np
-import cv2
+# Algebra do numpy (OpenBLAS) em 1 thread, ANTES de importar o numpy: as
+# threads extras ficam em espera ativa depois de cada conta pequena (as do
+# estimador) e, com os nucleos fixados, roubavam o nucleo do auxiliar da
+# visao. Medido em 26/11 (2 nucleos): o processo da visao gastava ~60 ms de
+# CPU por quadro, com 1 thread ~16; o pipeline subiu de ~24 para 30 q/s (o
+# teto da camera). Os processos da visao herdam (spawn).
+for _variable in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_variable, "1")
+
+import numpy as np  # noqa: E402
+import cv2  # noqa: E402
 
 from fva_car.cone_debug import ConeDebugRecorder
 from fva_car.cones import RealConeDetector
@@ -64,9 +73,11 @@ parameters = {
     # Largura/espacamento da pista: so PALPITE inicial (a pista muda a cada dia).
     # O estimador do corredor mede a largura com as duas bordas e passa a usar a
     # aprendida; a checagem da calibracao so acusa erro grosseiro (0,4-2,5x).
-    # Valores dos logs 20261023_0803*/0804*: corredor 1,7-1,9 m, cones a ~0,5 m.
+    # Largura: 1,7-1,9 m em 23/10, 1,0-2,0 m (mediana 1,4) nos 38 ensaios de 24/11,
+    # mudando dentro da mesma volta. 1,4 erra menos no pior caso enquanto o carro
+    # so ve uma borda e ainda nao mediu; com as duas, vale a medida.
     "cone_settings": {"roi_top": 0, "single_border_recovery": True,
-                      "track_width_cm": 180, "cone_spacing_cm": 50},
+                      "track_width_cm": 140, "cone_spacing_cm": 50},
     "save": True,
     "logfile": "logs/",
     "camera": True,
@@ -150,9 +161,13 @@ parameters = {
     "imu_bus": 4,
     "imu_gyro_range_dps": 500,  # +-500 graus/s: 3 m/s numa curva de 1 m dao ~170
     # Amortecimento do Stanley pela guinada medida (s): esterco -= k*(guinada -
-    # v*curvatura). Na pista virtual nao deu ganho consistente (0,1-0,5): fica
-    # desligado; --amortecer-guinada K para testar no carro. Sem IMU nao age.
-    "stanley_yaw_damping": 0.0,
+    # v*curvatura). Nos ensaios de 24/11 o esterco "pedalava" a ~2 Hz, puxado pelo
+    # termo de rumo (2-4 graus nessa faixa contra 1-2 do deslocamento): o
+    # giroscopio ve a oscilacao na hora, a imagem 270 ms depois. Pista virtual
+    # (servo 0,1 s, 220-320 ms, 16 sementes x 6 pistas): pedaladas 14 -> 8 a
+    # 0,7 m/s e 12 -> 6 a 1,6 m/s, erro menor, mesmas voltas. Sem IMU valida o
+    # termo e zero. --amortecer-guinada 0 desliga.
+    "stanley_yaw_damping": 0.2,
     # Guinada real / guinada do modelo cinematico, na odometria (previsao do
     # estimador entre quadros e compensacao do atraso). Medido nos logs de 19/11
     # pelos cones parados (tools/alinhamento_camera.py): 0,88 a esquerda e 0,90
@@ -273,7 +288,9 @@ parameters = {
     # Fica parado ate o botao "Liberar parada" da GUI (ou hold_s segundos).
     # "ignorar": so registra. every: busca a cada N quadros. False desliga.
     "aruco": {"every": 2, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
-              "marker_m": 0.10, "stop_at_m": 0.0, "front_half_width_m": 0.25,
+              # marker_height_m: altura do CENTRO do marcador (m). Com ela, a posicao
+              # nao depende do tamanho (melhor para placa baixa). None: pelo tamanho.
+              "marker_m": 0.10, "marker_height_m": None, "stop_at_m": 0.0, "front_half_width_m": 0.25,
               "hold_s": None, "ignore_s": 4.0},
     # Depois de "Liberar parada", o ultrassom fica ignorado por isto (s): o carro
     # quase sempre parou encostado no cone, e sem a carencia travava de novo em
@@ -305,6 +322,13 @@ parameters = {
     # Camera e detector em processo proprio (outro nucleo, sem disputar o GIL
     # com o controle a 50 Hz). False volta as threads no mesmo processo.
     "vision_process": True,
+    # Processos auxiliares da visao (so cones, so com vision_process): a etapa
+    # SEM estado do quadro (reduzir, achar e classificar candidatos, refinar
+    # bases; ~57% do tempo) roda num processo enquanto o processo de visao faz
+    # a etapa com estado (rastreio, estimador, mapa, ArUco) do quadro anterior.
+    # Mesmo resultado quadro a quadro, ~1,7x mais quadros por segundo nos 2
+    # nucleos da visao. 0 volta ao sequencial (--sem-pipeline).
+    "vision_workers": 1,
     # Largura do processamento dos cones (0 = 640 original). 320: deteccao ~2,5x mais
     # rapida (no Pi ~95 -> ~35 ms; ensaios de 10/11 rodaram a 6-9 quadros/s com
     # 260-290 ms de atraso). Nos 617 quadros reais de 10/11, em relacao a 640:
@@ -377,9 +401,10 @@ def corridor_settings(config):
     if not isinstance(value, dict):
         raise ValueError("cone_estimator deve ser True, False ou um dicionario de ajustes.")
     # A pose do Car e do eixo traseiro; os cones tem origem no eixo dianteiro.
+    # A largura NAO e fixa: --largura-pista so muda o palpite inicial
+    # (cone_settings.track_width_cm); o estimador mede e acompanha a largura com
+    # as duas bordas. known_width_m (trava +-15%) so se posto aqui de proposito.
     settings = {"pose_offset_m": float(config.get("wheelbase", 0.36)), **value}
-    if config.get("track_width_m"):
-        settings.setdefault("known_width_m", float(config["track_width_m"]))
     if config.get("old_start", False):
         # Criterio antigo: devagar com sigma no eixo > 0,1 m e alvo sem minimo.
         settings.update(slow_sigma_e=0.1, slow_sigma_lateral=99.0, near_sigma_e=99.0)
@@ -569,6 +594,13 @@ def aruco_marker_m(config):
     if not value:
         return 0.0
     return float(value.get("marker_m", 0.10) or 0.0) if isinstance(value, dict) else 0.10
+
+
+def aruco_marker_height_m(config):
+    """Altura do centro dos marcadores (m), ou None (posicao pelo tamanho)."""
+    value = config.get("aruco")
+    height = value.get("marker_height_m") if isinstance(value, dict) else None
+    return None if height is None else float(height)
 
 
 def sign_controller(config, mode):
@@ -844,6 +876,7 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
             cone_map=config.get("cone_map", False),
             aruco_every=aruco_every(config),
             aruco_marker_m=aruco_marker_m(config),
+            aruco_marker_height_m=aruco_marker_height_m(config),
         )
         if detector.classifier is not None:
             print(f"Cones: classificador {detector.classifier.path}", flush=True)
@@ -912,7 +945,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    refine_bases=bool(config.get("cone_refine_bases", True)),
                                    cone_map=config.get("cone_map", False),
                                    aruco_every=aruco_every(config),
-                                   aruco_marker_m=aruco_marker_m(config))
+                                   aruco_marker_m=aruco_marker_m(config),
+                                   aruco_marker_height_m=aruco_marker_height_m(config))
         else:
             detector_kwargs = dict(path_settings=config.get("path_settings", {}),
                                    anchor=config.get("path_anchor", 0.5),
@@ -921,7 +955,8 @@ def run_mission(settings=None, display=False, car_factory=None, clock=time.monot
                                    estimator=line_estimator_settings(config))
         vision = VisionProcess(vision_data, mode, config["camera_calibration_file"], detector_kwargs,
                                camera_settings=config.get("camera_settings") or {}, poses=poses,
-                               cpu_cores=vision_cores)
+                               cpu_cores=vision_cores,
+                               workers=int(config.get("vision_workers", 0) or 0) if mode == "cones" else 0)
         try:
             # Abre a camera antes dos motores: falha cedo sem mover o carro.
             vision.start()
@@ -1448,7 +1483,7 @@ def main():
     parser.add_argument("--sem-teto-ultrassom", action="store_true",
                         help="Sem o teto de ~2,8 m/s pela distancia de parada no alcance do ultrassom")
     parser.add_argument("--largura-pista", type=float, metavar="M",
-                        help="Largura da pista medida hoje, de cone a cone (m): o carro ja comeca sabendo")
+                        help="Palpite inicial da largura (m). Nao trava: o carro mede e acompanha a largura")
     parser.add_argument("--apice", type=float, metavar="M",
                         help="Na curva, ir ate M metros para dentro (apice); padrao 0")
     parser.add_argument("--tempo", type=float, metavar="S",
@@ -1457,6 +1492,8 @@ def main():
                         help="Memoria do tracado contra o esterco 'pedalando' (s; 0 desliga; padrao 0.25)")
     parser.add_argument("--sem-aruco", action="store_true",
                         help="Nao procura placas ArUco (PARE)")
+    parser.add_argument("--placa-altura", type=float, metavar="M",
+                        help="Altura do CENTRO do ArUco acima do chao, em m: posicao da placa sem depender do tamanho")
     parser.add_argument("--placa-lado", type=float, metavar="M",
                         help="Lado do quadrado preto do ArUco impresso, em m (padrao 0.10): da a distancia da placa")
     parser.add_argument("--pare-segundos", type=float, metavar="S",
@@ -1465,6 +1502,8 @@ def main():
                         help="Guinada pelo modelo da direcao, sem o giroscopio da IMU")
     parser.add_argument("--amortecer-guinada", type=float, metavar="K",
                         help="Amortecimento do Stanley pela guinada medida, em s (0 = desligado; teste 0.1-0.3)")
+    parser.add_argument("--sem-pipeline", action="store_true",
+                        help="Visao sequencial, sem o processo auxiliar (vision_workers = 0)")
     parser.add_argument("--sem-nucleos", action="store_true",
                         help="Nao fixa controle e visao em nucleos separados (o sistema escolhe)")
     parser.add_argument("--sem-mapa", action="store_true",
@@ -1547,7 +1586,6 @@ def main():
     if args.largura_pista is not None:
         if not .5 <= args.largura_pista <= 3.:
             parser.error("--largura-pista deve estar entre 0.5 e 3 m")
-        settings["track_width_m"] = args.largura_pista
         settings["cone_settings"] = {**parameters["cone_settings"], "track_width_cm": round(100*args.largura_pista)}
     if args.apice is not None:
         if not 0 <= args.apice <= .3:
@@ -1567,6 +1605,10 @@ def main():
         if args.pare_segundos < 0:
             parser.error("--pare-segundos deve ser >= 0")
         settings["aruco"] = {**settings.get("aruco", parameters["aruco"]), "hold_s": args.pare_segundos}
+    if args.placa_altura is not None and settings.get("aruco", True) is not False:
+        if not 0 <= args.placa_altura <= .2:
+            parser.error("--placa-altura deve estar entre 0 e 0.2 m (abaixo da camera)")
+        settings["aruco"] = {**settings.get("aruco", parameters["aruco"]), "marker_height_m": args.placa_altura}
     if args.placa_lado is not None and settings.get("aruco", True) is not False:
         if not .02 <= args.placa_lado <= .5:
             parser.error("--placa-lado deve estar entre 0.02 e 0.5 m")
@@ -1577,6 +1619,8 @@ def main():
         if not 0 <= args.amortecer_guinada <= 1:
             parser.error("--amortecer-guinada deve estar entre 0 e 1 s")
         settings["stanley_yaw_damping"] = args.amortecer_guinada
+    if args.sem_pipeline:
+        settings["vision_workers"] = 0
     if args.sem_nucleos:
         settings["cpu_cores"] = False
     if args.sem_mapa:

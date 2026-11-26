@@ -277,12 +277,48 @@ class FollowerSpeedFactorTests(unittest.TestCase):
         self.assertAlmostEqual(speeds[.1], .3, delta=.01)
 
 
-if __name__ == '__main__':
-    unittest.main()
+
+class DynamicWidthTests(unittest.TestCase):
+    """A largura muda ao longo da pista (24/11: 1,1 a 1,8 m, ate 30 cm na mesma volta)."""
+    @staticmethod
+    def right_border(x):
+        return -.6 - .4*np.clip((x - 3.)/1., 0., 1.)  # 1,2 m ate x = 3, 1,6 m depois de x = 4
+
+    def drive(self, drop_at, frames=200, **changes):
+        est = CorridorEstimator(CorridorSettings(track_width_m=1.2, **changes))
+        xs, errors = np.arange(0., 14., .5), []
+        for k in range(frames):
+            car = .05*k
+            ahead = xs - car
+            keep = (ahead >= .8) & (ahead <= 3.)
+            left = np.c_[ahead[keep], np.full(keep.sum(), .6)]
+            right = np.c_[ahead[keep], self.right_border(xs[keep])]
+            if car > drop_at:
+                right = right[:0]  # a borda direita some (curva, cone caido)
+            estimate = est.step(.1*k, left, right, (.05, 0., 0.) if k else None, pose_frame=False)
+            if estimate.valid and car > drop_at:
+                errors.append(abs(estimate.errors[0] - (.6 + self.right_border(car))/2))
+        return np.asarray(errors), est
+
+    def test_center_follows_a_widening_track_seen_by_both_borders(self):
+        errors, est = self.drive(drop_at=99., frames=140)
+        self.assertLess(errors.size, 1)  # nunca caiu: so confere a largura
+        self.assertAlmostEqual(est.learned_width, 1.6, delta=.03)
+
+    def test_border_lost_right_after_the_track_widens_keeps_the_new_center(self):
+        # O centro com uma borda so usa a largura aprendida: ela tem de ja ser a nova.
+        errors, est = self.drive(drop_at=4.2)
+        self.assertGreater(errors.size, 50)
+        self.assertLess(np.median(errors), .015)
+        self.assertAlmostEqual(est.learned_width, 1.6, delta=.03)
+        # Com a largura quase fixa de antes (width_noise .05) o centro ficava a ~2,6 cm.
+        old, _ = self.drive(drop_at=4.2, width_noise=.05)
+        self.assertGreater(np.median(old), 2*np.median(errors))
 
 
 class KnownWidthTests(unittest.TestCase):
-    """--largura-pista (24/11): o estimador comeca sabendo W e nao foge dele."""
+    """known_width_m (so pela configuracao; --largura-pista hoje e so o palpite
+    inicial): o estimador comeca sabendo W e nao foge dele."""
     def test_known_width_overrides_the_start_pair_and_bounds_learning(self):
         settings = CorridorSettings(track_width_m=1.3, known_width_m=1.3)
         estimator = CorridorEstimator(settings)
@@ -296,3 +332,7 @@ class KnownWidthTests(unittest.TestCase):
         estimator.forget_width()
         self.assertEqual(estimator.learned_width, 1.3)
         self.assertIsNone(CorridorEstimator(CorridorSettings()).learned_width)
+
+
+if __name__ == '__main__':
+    unittest.main()

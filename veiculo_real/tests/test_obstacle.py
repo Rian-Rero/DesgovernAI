@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fva_car.corridor import CorridorEstimate  # noqa: E402
-from fva_car.obstacle import border_echo, curve_echo  # noqa: E402
+from fva_car.obstacle import border_echo, curve_echo, real_cone_echo  # noqa: E402
 import test_mission  # noqa: E402  (modulo, nao a classe: senao o unittest roda os testes dela de novo)
 mission = test_mission.mission
 
@@ -69,6 +69,34 @@ class CurveEchoTests(unittest.TestCase):
         for name, (obs, steer, now) in cases.items():
             with self.subTest(name):
                 self.assertFalse(curve_echo(distance, obs, steer, .8, now)[0])
+
+
+class StraightBorderEchoTests(unittest.TestCase):
+    """24/11: a ~1 m/s a parada comeca a ~1 m, e ali os cones das bordas de uma reta
+    de 1,3 m estao a ~33 graus, no feixe: 4 de 13 voltas pararam assim."""
+    STRAIGHT = (0., 0., 0., 0., 1.3)
+
+    def straight(self, cones=(), map_cones=()):
+        obs = observation(self.STRAIGHT, state='AMBAS')
+        obs.debug = {'detection': {'green': {'m': [list(c) for c in cones]}}, 'map_cones': [list(c) for c in map_cones]}
+        return obs
+
+    def test_real_border_cone_at_the_echo_is_ignored(self):
+        # cone visto a 0,95 m e 0,55 m a esquerda na foto; o carro andou 0,27 m desde entao
+        ignore, reason = curve_echo(.80, self.straight(cones=[(.95, .55)]), 0., 1., 10.27)
+        self.assertTrue(ignore, reason)
+        self.assertIn('esquerda na reta', reason)
+        # cone ja fora da imagem, so no mapa (ensaio 203313)
+        self.assertTrue(curve_echo(.74, self.straight(map_cones=[(.85, -.45)]), 0., .77, 10.27)[0])
+
+    def test_obstacle_in_the_lane_on_a_straight_still_stops(self):
+        # Nenhum cone real na distancia do eco (a borda continua nao conta na reta).
+        for distance in (.5, 1., 1.5, 2.):
+            with self.subTest(distance=distance):
+                self.assertFalse(curve_echo(distance, self.straight(cones=[(2.6, .65)]), 0., .8, 10.27)[0])
+
+    def test_cone_on_the_axis_does_not_count(self):
+        self.assertIsNone(real_cone_echo(1., self.straight(cones=[(1.05, .1)]), 0., 0.))
 
 
 class MissionWiringTests(unittest.TestCase):

@@ -62,7 +62,12 @@ class CorridorSettings:
     max_width_m: float = 3.
     init_width_sigma: float = .6   # incerteza do palpite ainda nao confirmado, m (pista de 1 a 2,5 m)
     width_prior_sigma: float = .2  # atracao fraca para a largura aprendida, m (por quadro)
-    width_noise: float = .05       # m/sqrt(m): a largura pode mudar ao longo da pista
+    # m/sqrt(m): a largura muda ao longo da pista (24/11: 1,1 a 1,8 m, ate 30 cm
+    # numa mesma volta). Com .05 W demorava a acompanhar e o centro ia junto:
+    # tools/avaliar_tracado.py (erro do CENTRO previsto, que nao depende de W),
+    # 38 voltas: mediana 4,5 -> 4,2 cm, p90 26 -> 18 cm; numa volta o centro
+    # caia na fileira errada (118 cm) e passou a 4 cm.
+    width_noise: float = .15
     width_learn_rate: float = .2   # peso de cada quadro AMBAS confiavel na largura aprendida
     # Largura MEDIDA na pista do dia (m; 0 = desconhecida). Com ela o estimador ja
     # comeca sabendo W (nao mede pelo primeiro par de cones, que em 24/11 deu 1,10
@@ -81,6 +86,10 @@ class CorridorSettings:
     # (cones a 1 m, 7 q/s, ruido e erro de calibracao nos longe): 0,10/m tirou os
     # toques (2 -> 0) e o pior erro (59 -> 35 cm); 0,2/m ou mais piora: com cones
     # esparsos os longe ainda sao os que mostram a curva chegando.
+    # Replay dos 13 ensaios de 24/11 (previsao dos cones vistos ate 1 s depois):
+    # model_growth 0,05 e kappa/dkappa_noise 0,2/1,0 erravam 6,8 cm contra 7,7, mas
+    # pioravam objetos falsos ao lado (15 cm contra < 12), a partida com cores
+    # trocadas e a partida so com cones longe. Ficaram os valores robustos.
     model_growth: float = .10      # m por m de caminho: o modelo vale perto
     gate_sigma: float = 3.         # cone a mais de N sigma da previsao e descartado
     # Faixa de busca: depois do ajuste com todos os cones aceitos, cone a mais de
@@ -233,28 +242,31 @@ def centerline(state, max_curvature=2.):
     return line[0], theta[0]
 
 
-def offsets_many(points, states, index, max_curvature=2.):
-    """Distancias (S, N) dos pontos a cada linha central, com a amostra `index` fixa."""
-    line, theta = centerlines(states, max_curvature)
+def offsets_many(points, states, index, max_curvature=2., lines=None):
+    """Distancias (S, N) dos pontos a cada linha central, com a amostra `index` fixa.
+    lines: (pontos, rumos) de centerlines(states) ja calculados."""
+    line, theta = centerlines(states, max_curvature) if lines is None else lines
     delta = points[None, :, :] - line[:, index]
     angle = theta[:, index]
     return delta[..., 1]*np.cos(angle) - delta[..., 0]*np.sin(angle)
 
 
-def offsets(points, state, index=None, max_curvature=2.):
+def offsets(points, state, index=None, max_curvature=2., line=None):
     """(distancia a linha central, esquerda +; avanco no caminho; indice; normal) de cada ponto.
 
     index: amostra mais proxima de cada ponto, para manter fixa nas derivadas
     numericas (trocar de amostra no meio da derivada a deixaria aos saltos).
+    line: (pontos, rumo) de centerline(state) ja calculados.
     """
     points = np.asarray(points, float).reshape(-1, 2)
-    line, theta = centerline(state, max_curvature)
+    line, theta = centerline(state, max_curvature) if line is None else line
     if index is None:
         diff = points[:, None, :] - line[None, :, :]
         index = np.argmin(np.einsum('nmk,nmk->nm', diff, diff), axis=1)
     delta = points - line[index]
-    tangent = np.c_[np.cos(theta[index]), np.sin(theta[index])]
-    normal = np.c_[-tangent[:, 1], tangent[:, 0]]
+    # column_stack em vez de np.c_ (lento: ~10 us por chamada, milhares por volta).
+    tangent = np.column_stack((np.cos(theta[index]), np.sin(theta[index])))
+    normal = np.column_stack((-tangent[:, 1], tangent[:, 0]))
     d = np.einsum('nk,nk->n', delta, normal)
     along = ARC[index] + np.einsum('nk,nk->n', delta, tangent)
     return d, along, index, normal
@@ -265,7 +277,7 @@ def sample_centerline(state, arc_lengths, offset=0., max_curvature=2.):
     line, theta = centerline(state, max_curvature)
     s = np.asarray(arc_lengths, float)
     x, y, t = (np.interp(s, ARC, v) for v in (line[:, 0], line[:, 1], theta))
-    return np.c_[x - offset*np.sin(t), y + offset*np.cos(t)]
+    return np.column_stack((x - offset*np.sin(t), y + offset*np.cos(t)))
 
 
 def move_states(states, dx, dy, dth, max_curvature=2.):
@@ -411,7 +423,7 @@ class CorridorEstimator:
             return np.zeros((n, 2, 2))
         cfg = self.settings
         H = self.homography
-        pixels = np.c_[points, np.ones(n)] @ np.linalg.inv(H).T
+        pixels = np.column_stack((points, np.ones(n))) @ np.linalg.inv(H).T
         pixels = pixels[:, :2]/pixels[:, 2:3]
         w = pixels @ H[2, :2] + H[2, 2]
         gx, gy = points[:, 0], points[:, 1]
@@ -427,10 +439,14 @@ class CorridorEstimator:
     def _measure(self, state, points, sides, covariance):
         """Residuos h (medida esperada 0), jacobiano H (N, 5), variancia R e avanco."""
         cfg = self.settings
-        d, along, index, normal = offsets(points, state, max_curvature=cfg.max_curvature)
+        # A linha e as 4 sondas das derivadas numa so chamada (antes 2: no Pi o
+        # custo e o overhead do numpy por chamada; ~5 medidas por quadro).
+        lines, thetas = centerlines(np.asarray(state, float) + PROBES, cfg.max_curvature)
+        d, along, index, normal = offsets(points, state, max_curvature=cfg.max_curvature,
+                                          line=(lines[0], thetas[0]))
         h = d - sides*state[WIDTH]/2
         H = np.zeros((len(points), 5))
-        probes = offsets_many(points, np.asarray(state, float) + PROBES[1:], index, cfg.max_curvature)
+        probes = offsets_many(points, None, index, cfg.max_curvature, lines=(lines[1:], thetas[1:]))
         H[:, :4] = ((probes - d)/PROBE).T
         H[:, WIDTH] = -sides/2
         # Derivada da distancia em relacao ao ponto: a normal da linha central.
@@ -438,12 +454,18 @@ class CorridorEstimator:
         R = R + (cfg.model_sigma + cfg.model_growth*np.abs(along))**2
         return h, H, R, along
 
-    def _solve(self, x0, P0, points, sides, covariance, iterations=4):
-        """EKF iterado (Gauss-Newton com a previsao como prior)."""
+    def _solve(self, x0, P0, points, sides, covariance, iterations=4, first=None):
+        """EKF iterado (Gauss-Newton com a previsao como prior).
+
+        first: (h, H, R) de _measure(x0, points) ja calculados (o portao mede no
+        mesmo estado: cada linha so depende do seu ponto)."""
         x = x0.copy()
         K = H = R = None
-        for _ in range(iterations):
-            h, H, R, _ = self._measure(x, points, sides, covariance)
+        for iteration in range(iterations):
+            if iteration == 0 and first is not None:
+                h, H, R = first
+            else:
+                h, H, R, _ = self._measure(x, points, sides, covariance)
             delta = x0 - x
             delta[PSI] = _wrap(delta[PSI])
             innovation = -h - H @ delta
@@ -543,7 +565,7 @@ class CorridorEstimator:
         right = np.asarray(right, float).reshape(-1, 2)
         center = np.empty((0, 2)) if center is None else np.asarray(center, float).reshape(-1, 2)
         points = np.vstack([left, right, center])
-        sides = np.r_[np.ones(len(left)), -np.ones(len(right)), np.zeros(len(center))]
+        sides = np.concatenate((np.ones(len(left)), -np.ones(len(right)), np.zeros(len(center))))
         self.used_center = 0
         self.band_rejected = 0
         near = (points[:, 0] > 0) & (points[:, 0] <= cfg.max_range_m) & np.all(np.isfinite(points), axis=1)
@@ -570,7 +592,8 @@ class CorridorEstimator:
                     self.x, self.P, keep = started
                     self.bad_frames = 0
             elif np.any(keep):
-                x, P = self._solve(self.x, self.P, points[keep], sides[keep], covariance[keep])
+                x, P = self._solve(self.x, self.P, points[keep], sides[keep], covariance[keep],
+                                   first=(h[keep], H[keep], R[keep]))
                 if cfg.band_m > 0 and np.count_nonzero(keep) > 3:
                     h, _, _, along = self._measure(x, points, sides, covariance)
                     outside = keep & (np.abs(h) > self._band(along))

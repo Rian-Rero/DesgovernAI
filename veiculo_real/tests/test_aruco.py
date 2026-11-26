@@ -189,3 +189,118 @@ class MissionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MarkerGeometryTests(unittest.TestCase):
+    """Posicao pela altura do centro e a correcao "abaixo do chao" (ensaio de 24/11)."""
+    def setUp(self):
+        from fva_car.camera_pose import camera_pose
+        f, self.size = 520., (640, 480)
+        c, s = math.cos(math.radians(20)), math.sin(math.radians(20))
+        R = np.array([[1, 0, 0], [0, c, s], [0, -s, c]]) @ np.array([[0, -1, 0], [0, 0, -1], [1, 0, 0.]])
+        self.R, self.t = R, -R @ np.array([0., 0., .25])
+        self.K = np.array([[f, 0, 319.5], [0, f, 239.5], [0, 0, 1.]])
+        self.H = np.linalg.inv(self.K @ np.c_[R[:, 0], R[:, 1], self.t])
+        self.pose = camera_pose(self.H, self.size)
+
+    def project(self, point, side_m):
+        camera = self.R @ np.asarray(point, float) + self.t
+        pixel = (self.K @ camera)[:2]/camera[2]
+        return tuple(pixel), self.K[0, 0]*side_m/camera[2]
+
+    def test_height_gives_the_position_without_the_size(self):
+        from fva_car.camera_pose import implied_side, marker_at_height
+        pixel, side_px = self.project([1.8, -.6, .05], .075)
+        point = marker_at_height(self.pose, self.H, pixel, .05)
+        np.testing.assert_allclose(point, [1.8, -.6, .05], atol=1e-6)
+        self.assertAlmostEqual(implied_side(self.pose, pixel, side_px, point), .075, places=4)
+        self.assertIsNone(marker_at_height(self.pose, self.H, pixel, .3))   # acima da camera
+
+    def test_size_too_big_puts_the_sign_below_ground_and_is_corrected(self):
+        from fva_car.aruco import Marker
+        from fva_car.cones import RealConeDetector
+        pixel, side_px = self.project([1.8, -.6, 0.], .075)       # marcador de 7,5 cm no chao
+        detector = RealConeDetector.__new__(RealConeDetector)
+        detector.camera_pose, detector.full_homography = self.pose, self.H
+        detector.aruco_marker_m, detector.aruco_marker_height_m = .10, None   # configurado 10 cm
+        fields = detector._marker_position(Marker(1, pixel[0], pixel[1], side_px))
+        self.assertEqual(fields['source'], 'chao')
+        self.assertAlmostEqual(fields['x'], 1.8, delta=.01)       # sem a correcao: ~2,4 m
+        self.assertAlmostEqual(fields['size_m'], .075, places=3)
+        detector.aruco_marker_m = .075                             # tamanho certo: vale o tamanho
+        self.assertEqual(detector._marker_position(Marker(1, pixel[0], pixel[1], side_px))['source'], 'tamanho')
+        detector.aruco_marker_height_m = 0.                        # altura dada: vale a altura
+        self.assertEqual(detector._marker_position(Marker(1, pixel[0], pixel[1], side_px))['source'], 'altura')
+
+
+class EndToEndStopTests(unittest.TestCase):
+    """run_mission de verdade (modo cones) ate parar na placa, a frente ou ao lado."""
+    def run_to_stop(self, cone_x, side_y, ultrasound_range):
+        import json
+        import tempfile
+        from unittest.mock import Mock, patch
+        import test_mission as tm
+        from fva_car.cones import ConeObservation
+        mission, L = tm.mission, .36
+        car = tm.FakeCar([])
+        car.p, car.th, car.v, car.steps_left, car.dt = np.array([-L, 0.]), 0., 0., 10**6, .02
+        shared = {'scan': 0}
+
+        def step():
+            car.t += .02
+            target = max(0., car.vref)
+            car.v = target if target >= car.v else max(target, car.v - .5*.02)
+            car.p = car.p + [car.v*.02, 0.]
+            if 'data' in shared:
+                x_rel = cone_x - (car.p[0] + L) + .05
+                visible = x_rel > .9 and math.atan2(abs(side_y), x_rel) < math.radians(31)
+                stamp = round(car.t, 1)
+                if stamp != shared.get('stamp'):
+                    shared['stamp'], shared['scan'] = stamp, shared['scan'] + 1
+                markers = ((1, 320., 400., 40., x_rel, side_y, 0., .075, 'altura'),) if visible else ()
+                shared['data']['observation'] = ConeObservation(
+                    timestamp=stamp, errors=(0., 0., 0.), markers=markers, path_dkappa=0., corridor_width_m=1.3,
+                    marker_timestamp=stamp, marker_scan=shared['scan'])
+            return not (car.t > 40 or (car.v == 0 and car.t > 3 and car.p[0] > .5))
+        car.step = step
+        rel = lambda: cone_x - (car.p[0] + L)
+        car.get_distance = lambda: ((rel() + .07, True) if side_y == 0 and rel() < ultrasound_range else (4., True))
+
+        def fake_thread(**kwargs):
+            args = kwargs['args']
+
+            class Thread:
+                def start(self):
+                    if kwargs.get('name') != 'captura-camera':
+                        shared['data'] = args[1]
+
+                def is_alive(self):
+                    return True
+
+                def join(self, timeout=None):
+                    pass
+            return Thread()
+        path = Path(tempfile.mkdtemp())/'camera.json'
+        path.write_text(json.dumps({'image_size': [640, 480],
+                                    'image_points_px': [[160, 400], [480, 400], [260, 200], [380, 200]],
+                                    'ground_points_m': [[.4, .3], [.4, -.3], [1.5, .3], [1.5, -.3]]}))
+        detector = Mock()
+        detector.with_preview.side_effect = lambda observation: observation
+        with patch.object(mission.threading, 'Thread', side_effect=fake_thread), \
+                patch.object(mission, 'RealConeDetector', return_value=detector), \
+                patch('builtins.print'):
+            mission.run_mission({'camera_calibration_file': str(path), 'ts': 60., 'save': False,
+                                 'navigation_mode': 'cones'}, car_factory=lambda _: car, clock=lambda: float(car.t))
+        return cone_x - (car.p[0] + L + .07), car.v   # folga da frente do pneu ate o cone/placa
+
+    def test_cone_in_front_even_without_the_ultrasound(self):
+        for ultrasound in (4., 0.):
+            gap, speed = self.run_to_stop(3., 0., ultrasound)
+            self.assertEqual(speed, 0.)
+            self.assertTrue(0. < gap < .3, gap)
+
+    def test_sign_beside_the_track_on_both_sides(self):
+        for side in (.9, -.8):
+            gap, speed = self.run_to_stop(2.5, side, 0.)
+            self.assertEqual(speed, 0.)
+            self.assertTrue(-.05 < gap < .2, gap)

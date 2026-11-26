@@ -223,6 +223,26 @@ fora do centro, mas sem tocar cones. A checagem de calibração do detector só
 acusa largura fora de 0,4–2,5× o palpite. `cones_summary.json` traz
 `learned_width_m`.
 
+**Largura dinâmica (26/11).** A largura não é fixa nem configurada: muda de
+um dia para o outro e dentro da mesma volta (24/11: 1,0–2,0 m entre ensaios,
+até 30 cm numa volta).
+- **Com as duas bordas**, o centro é o meio delas e não depende de `W`.
+- **Com uma borda**, vale a largura medida mais recente.
+- **`width_noise` subiu de 0,05 para 0,15 m/√m.** Assim `W` e a largura
+  aprendida acompanham a mudança em poucos quadros.
+- **Medição no avaliador** (`tools/avaliar_tracado.py`, nova métrica "centro":
+  erro do centro previsto pela média das duas bordas vistas depois, sem
+  depender de `W`). Em 38 voltas: mediana 4,5 → 4,2 cm e p90 26 → 18 cm. Numa
+  volta, o centro caía na fileira errada (118 cm) e passou a 4 cm.
+- **Teste:** pista que alarga de 1,2 para 1,6 m e perde a borda logo depois. O
+  erro do centro caiu de 2,6 para 0,5 cm (`DynamicWidthTests`).
+- **Palpite inicial:** 1,4 m (mediana de 24/11; antes 1,8). Só vale até ver as
+  duas bordas.
+- **Recuperação com uma borda no detector:** usa a largura aprendida pelo
+  estimador, não mais a nominal fixa.
+- **GUI:** o campo "Largura da pista" saiu. `--largura-pista` agora só muda o
+  palpite inicial e não trava mais a largura em ±15%.
+
 ## Direção e velocidade com o estimador
 
 ### Stanley (padrão desde 19/11)
@@ -402,10 +422,59 @@ carregada. Para fixar o clock no máximo:
 `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
 (volta ao normal ao religar).
 
-**Próximo passo, se ainda faltar velocidade:** o resto do atraso é
-processamento em Python no Pi. Dá para rodar dois processos de detecção
-alternando quadros (dobra a taxa, não reduz o atraso de cada um) ou levar os
-laços de `tools/cone_path.py` (`_bases`/`contact`) para operações do OpenCV.
+**Pipeline da visão (26/11, `vision_workers: 1`).** O quadro foi dividido em
+duas etapas:
+- **Etapa sem estado** (`RealConeDetector.prepare`): reduzir, achar e
+  classificar candidatos e refinar as bases. Só depende do próprio quadro.
+- **Etapa com estado** (`observe_frame(..., prepared=)`): rastreio, estimador,
+  mapa e ArUco.
+
+A etapa sem estado roda num **processo auxiliar** enquanto o processo da visão
+faz a etapa com estado do quadro anterior. As duas rodam ao mesmo tempo nos 2
+núcleos da visão.
+- **O resultado é o mesmo**, quadro a quadro: 361 quadros reais com saída
+  idêntica (erros de cada quadro comparados).
+- **ArUco** ficou do lado com estado. Ele equilibra as duas etapas (~5,3 ms
+  sem estado, ~4,5 ms com estado, no notebook).
+- **Medido em 2 núcleos**, com os processos reais e quadros gravados:
+  35,6 → **52,5 quadros/s** (+47%), e a idade da imagem caiu de 92 para 68 ms.
+- **No Pi**, ~12× mais lento por quadro, o ganho esperado é proporcional: de
+  ~9–10 para ~14–15 quadros/s.
+
+Também ficou mais rápido: `contact()` (caixa e contagem pelo OpenCV em vez de
+`np.nonzero`), com saída idêntica. `--sem-pipeline` volta ao sequencial para
+comparar.
+
+**Ajustes de 26/11, segunda rodada (saída bit a bit idêntica).** Conferido
+nos 361 quadros reais: erros, vetor de estado e pontos dos cones, com e sem
+odometria.
+- **OpenBLAS em 1 thread** (`main.py`, antes de importar o numpy; os processos
+  da visão herdam). Era o maior desperdício. As threads da álgebra do numpy
+  ficam em espera ativa depois de cada conta pequena do estimador e, com os
+  núcleos fixados, disputavam o núcleo do auxiliar. Medido com os processos
+  reais em 2 núcleos, câmera a 30 q/s e odometria:
+  - CPU do processo da visão: 47–50 → **12 ms por quadro**;
+  - o pipeline saiu de 27–28 q/s (abaixo da câmera) para o teto de 30 q/s.
+
+  No Pi, o numpy instalado pelo pip também traz OpenBLAS: o efeito deve
+  aparecer lá. Para conferir, use o `htop` (o processo da visão não deve
+  passar de ~1 núcleo).
+- **Estimador:** a linha central e as 4 sondas das derivadas saem numa só
+  chamada. A 1ª iteração do ajuste reaproveita a medida do portão, e os
+  `np.c_` foram trocados por `np.column_stack` (o `np.c_` é ~10× mais lento
+  por chamada). Etapa com estado: 3,46 → **3,2 ms** (−8%).
+- **Transporte entre processos:**
+  - o auxiliar lê o quadro do anel compartilhado sem copiar;
+  - o controle lê o quadro do mesmo anel, sem uma segunda cópia;
+  - o auxiliar manda ~3 kB em vez de 387 kB por quadro (sem a imagem
+    reduzida e sem as máscaras). A etapa com estado só usa o formato delas e
+    só refaz a imagem reduzida quando falta odometria, para o fluxo óptico.
+
+  No notebook isso economizou só ~0,5 ms de CPU por quadro. No Pi a cópia de
+  memória pesa mais.
+- **Testado sem ganho e desfeito:** pré-filtro das peças em `contact()` e
+  perfis de coluna no lugar dos `np.any`. O tempo da etapa da imagem não
+  mudou (3,94 ms), então o código ficou como estava.
 
 ### Rápido nas retas, cuidado nas curvas
 
@@ -1115,9 +1184,9 @@ Levar o carro de fato para dentro no ápice (0,05 m, com 0,25 m para fora) tirou
 folga (25 cm). Por isso o ápice fica em 0 por padrão. `--apice 0.05` testa, e
 `--abrir-curva` (campo "Abrir na curva" na GUI) muda a abertura.
 
-**Largura da pista medida** (`--largura-pista 1.3`, campo "Largura da pista" na
-GUI): o estimador já começa sabendo a largura e a aprendida não sai de ±15%
-dela. Meçam com a trena de cone a cone. Vazio, o carro estima como antes.
+**Largura da pista:** a trava de ±15% pelo campo da GUI saiu em 26/11, porque
+a largura muda na pista. Veja "Largura dinâmica" acima. `known_width_m`
+continua existindo no `cone_estimator`, só para quem quiser forçar.
 
 ### Rotatória: cores e engasgo
 
@@ -1223,6 +1292,90 @@ registra o número da busca e o horário da imagem que mediu a placa.
 No modo cones, o comando de direção parte do centro calibrado e cresce ao
 longo dos primeiros 24 cm medidos pelo encoder (`cone_steering_start_distance_m`).
 O fator aplicado fica em `steer_start_factor` no log.
+
+### PARE no ensaio de 24/11 (20h26): por que não parou
+
+Na volta 202644 a placa ID 1 foi vista a ~2,7 m, o carro reduziu para 0,3 m/s e
+a odometria foi descontando: em t = 29,9 s faltavam ~25 cm. **A missão acabou
+em 30 s** (o tempo padrão de então), décimos antes da parada. Hoje o padrão é
+50 s.
+
+O mesmo log mostrou um segundo problema: pelo tamanho, o centro da placa saía
+a **−10 cm do chão** em todas as distâncias, o que é impossível. A posição pelo
+tamanho estava ~1,4× longe demais, porque o marcador real tem uns **7,5 cm** de
+lado e não os 10 configurados. O carro pararia ~0,5 m depois do ponto.
+
+**Correções:**
+- **Posição pela altura** (`aruco.marker_height_m`, `--placa-altura`, campo
+  "altura do centro (cm)" na GUI): o raio do pixel cortado na altura do centro
+  da placa, sem depender do tamanho. Para placa baixa é o mais preciso.
+- **Correção automática:** se pelo tamanho a placa ficar abaixo do chão, o
+  carro usa o chão e avisa no terminal o **lado implícito** do marcador, para
+  corrigir `marker_m` (`--placa-lado`, campo "ArUco: lado (cm)").
+
+**Teste ponta a ponta** (`tests/test_aruco.py`, `run_mission` de verdade, carro
+só rolando a 0,5 m/s²):
+
+| caso | resultado |
+|---|---|
+| cone com a placa na frente, com ou sem ultrassom | para 17 cm antes do cone |
+| placa ao lado, esquerda ou direita | a frente para 8–9 cm antes da placa |
+
+**Medir antes do próximo ensaio:** o lado do quadrado preto do ArUco e a altura
+do centro dele acima do chão. Coloquem os dois nos campos da GUI.
+
+## Análise dos 13 ensaios de 24/11 (19h36–20h42) e o que mudou
+
+### Traçado: SVM ou ajustes do estimador?
+
+`tools/avaliar_tracado.py` compara métodos nos logs, **sem gabarito**. Para cada
+quadro, o traçado que o método estimou (levado ao mundo pela odometria) tem de
+prever onde estarão os cones **perto** (< 1,6 m) vistos até 1 s depois. Mede
+também o salto do traçado entre quadros.
+
+| método | erro de previsão (mediana / p90) |
+|---|---|
+| estimador (atual) | **7,7 / 24,7 cm** |
+| SLAM + SVM no lugar | 10,9 / 45,6 cm |
+| estimador mais "solto" (`model_growth` 0,05, `kappa/dkappa_noise` 0,2/1,0) | 6,8 / 23,8 cm |
+
+O SVM piora nos dados reais, como já tinha piorado no simulador; fica só como
+reserva. O ajuste "solto" ganha ~1 cm, mas os testes mostraram que ele piora a
+resistência a objetos falsos ao lado (15 cm contra < 12), a partida com cores
+trocadas e a partida só com cones longe. **O estimador ficou como estava.** A
+detecção do traçado está perto do limite com essas detecções: o salto entre
+quadros é ~0, e a largura medida (`--largura-pista`) dá mais ~0,3 cm.
+
+### O que de fato limitava
+
+1. **IMU desligada por engano em 3 de 13 voltas.** O teste de coerência comparava
+   a guinada medida com a do esterço comandado, instante a instante. Com o
+   esterço oscilando, a guinada real atrasa e a razão vai a −0,35; o carro
+   concluía "eixo errado" e voltava ao modelo. Agora o teste e a resposta da
+   direção usam só **curva estável** (esterço parado há 0,4 s). Reproduzindo os
+   logs: as 3 voltas mantêm a IMU, e a resposta fica em 0,62–0,95. A calibração
+   também tenta 3 vezes com o carro vibrando (uma volta perdeu a IMU por 4,9°/s
+   na partida).
+2. **Esterço oscilando a ~2 Hz** (3 voltas), puxado pelo termo de **rumo** do
+   Stanley (2–4° nessa faixa, contra 1–2° do deslocamento). Agora o
+   **amortecimento pela guinada** (`stanley_yaw_damping` 0,2) vem ligado: o
+   giroscópio vê a oscilação na hora, a imagem 270 ms depois. Na pista virtual
+   (servo de 0,1 s, 220–320 ms), as pedaladas caíram de 14 para 8 a 0,7 m/s e
+   de 12 para 6 a 1,6 m/s, com menos erro e as mesmas voltas. Sem IMU válida ele
+   não age; `--amortecer-guinada 0` desliga.
+3. **Parada do ultrassom por cone da borda numa reta, a ~1 m/s.** A essa
+   velocidade a parada começa a ~1 m, e ali os cones das bordas ainda estão no
+   feixe largo do sensor. Agora, na reta, o eco é ignorado só se houver um
+   **cone real** (no quadro ou no mapa SLAM, que guarda os cones fora da imagem)
+   naquela distância e **ao lado do caminho**: o carro passa sem encostar.
+   Reproduzindo as paradas dos logs:
+   - ignoradas: 2 paradas por cone da borda;
+   - continuam parando: o cone a 20 cm do eixo (o carro bateria), o eco sem cone
+     que o explique, todas as batidas reais (4–30 cm) e os casos sem corredor
+     válido.
+4. **Visão a 6–10 quadros/s** (antes 10–12), com detecção de 58–110 ms. Nestas
+   voltas o monitor de saúde do Pi ainda não rodava. Nas próximas, a linha
+   `raspberry:` do relatório mostra se o Pi limitou o clock.
 
 ## Relatório do ensaio e versão do código
 

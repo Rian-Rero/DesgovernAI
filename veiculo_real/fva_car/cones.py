@@ -14,7 +14,7 @@ from .corridor import CorridorEstimator, CorridorSettings, sample_centerline
 from .lateral import GroundCalibration, LineObservation, fit_line_errors
 from tools.cone_classifier import load_classifier
 from tools.cone_geometry import image_homography
-from tools.cone_path import ConePathDetector, ConeSettings, render_cones
+from tools.cone_path import ConePathDetector, ConeSettings, _r, normalize_light, render_cones
 from tools.cone_tracking import transform_points
 
 
@@ -241,7 +241,7 @@ class RealConeDetector:
     """Adaptador metrico do MESMO detector utilizado pela interface HSV."""
     def __init__(self, calibration, settings=None, render_preview=False, processing_width=0, odometry=None,
                  classifier=None, corridor=None, line_fusion=False, refine_bases=True, cone_map=False,
-                 aruco_every=0, aruco_marker_m=0.):
+                 aruco_every=0, aruco_marker_m=0., aruco_marker_height_m=None):
         """classifier: caminho do modelo .onnx (com o .json ao lado) ou None.
 
         corridor: estimador do corredor (fva_car/corridor.py). None/False usa o
@@ -344,6 +344,8 @@ class RealConeDetector:
         self.marker_timestamp = None
         self.marker_scan = 0
         self.aruco_marker_m = float(aruco_marker_m or 0.)
+        # Altura do CENTRO do marcador (m); None: so pelo tamanho.
+        self.aruco_marker_height_m = None if aruco_marker_height_m is None else float(aruco_marker_height_m)
         self.camera_pose = None
         if self.aruco_every > 0:
             from .aruco import ArucoDetector
@@ -351,26 +353,95 @@ class RealConeDetector:
             self.aruco = ArucoDetector()
             self.camera_pose = camera_pose(self.full_homography, calibration.image_size)
 
-    def _detect_markers(self, frame, timestamp):
+    def _find_markers(self, frame):
+        """Busca ArUco a cada aruco_every quadros; None fora dos quadros de busca.
+        Com o processo auxiliar, roda no processo de visao, enquanto o auxiliar
+        prepara o quadro seguinte: a etapa com estado leva ~3 ms e a sem estado
+        ~6 ms, e a busca (~2,6 ms) equilibra as duas."""
+        if self.aruco is None:
+            return None
         self.aruco_frames += 1
-        if (self.aruco_frames - 1) % self.aruco_every == 0:
-            self.marker_timestamp = timestamp
-            self.marker_scan += 1
-            from dataclasses import replace as with_fields
-            from .camera_pose import marker_ground
-            try:
-                found = []
-                for marker in self.aruco.detect(frame):
-                    ground = marker_ground(self.camera_pose, self.full_homography, (marker.cx, marker.cy),
-                                           marker.side_px, self.aruco_marker_m)
-                    if ground is not None:
-                        marker = with_fields(marker, x=ground[0], y=ground[1], z=ground[2])
-                    found.append(marker.to_tuple())
-                self.markers = tuple(found)
-            except cv2.error:
-                self.markers = ()
+        if (self.aruco_frames - 1) % self.aruco_every:
+            return None
+        try:
+            return tuple(self.aruco.detect(frame))
+        except cv2.error:
+            return ()
 
-    def observe_frame(self, frame, timestamp):
+    def _detect_markers(self, found, timestamp):
+        """Etapa com estado: posicao das placas achadas neste quadro (se buscou)."""
+        if found is None:
+            return
+        self.marker_timestamp = timestamp
+        self.marker_scan += 1
+        from dataclasses import replace as with_fields
+        self.markers = tuple(with_fields(marker, **self._marker_position(marker)).to_tuple() for marker in found)
+
+    def _marker_position(self, marker):
+        """Posicao da placa no chao: pela altura do centro (se dada) ou pelo tamanho.
+
+        Pelo tamanho, uma placa "abaixo do chao" (altura < -3 cm) e impossivel: o
+        marcador e menor que marker_m (ensaio de 24/11: -10 cm em todas as
+        distancias, ~1,4x longe demais). Ai vale o raio cortado no chao (ou na
+        altura dada), e o lado implicito sai no terminal para corrigir marker_m."""
+        from .camera_pose import implied_side, marker_at_height, marker_ground
+        pixel = (marker.cx, marker.cy)
+        point, source = None, ""
+        if self.aruco_marker_height_m is not None:
+            point, source = marker_at_height(self.camera_pose, self.full_homography, pixel,
+                                             self.aruco_marker_height_m), "altura"
+        if point is None and self.aruco_marker_m > 0:
+            point, source = marker_ground(self.camera_pose, self.full_homography, pixel, marker.side_px,
+                                          self.aruco_marker_m), "tamanho"
+            if point is not None and point[2] < -.03:
+                point, source = marker_at_height(self.camera_pose, self.full_homography, pixel, 0.), "chao"
+        if point is None:
+            return {}
+        return dict(x=point[0], y=point[1], z=point[2], source=source,
+                    size_m=implied_side(self.camera_pose, pixel, marker.side_px, point))
+
+    def prepare(self, frame, markers=True):
+        """Etapa SEM estado do quadro: reducao, candidatos, classificador e refino
+        das bases longe na imagem cheia. So depende deste quadro: roda em outro
+        processo enquanto observe_frame() trata o quadro anterior
+        (fva_car/vision_process.py). ~57% do tempo de um quadro (perfil de 26/11),
+        markers=False (auxiliar): sem a busca ArUco, que fica no observe_frame()."""
+        markers = self._find_markers(frame) if markers else False
+        started = time.perf_counter()
+        small = self._small(frame)
+        found = self.detector.detect(small, self.settings)
+        refined = None
+        if self.refine:
+            scale = frame.shape[1]/small.shape[1]
+            # Mesma luz arredondada que o debug guardava (refino identico ao de antes).
+            light = None if found['light'] is None else [_r(v, 2) for v in found['light']]
+            refined = [refine_bases(frame, found[color], index, self.detector, self.settings, scale, light,
+                                    self.full_homography)
+                       for index, color in enumerate(('green', 'red'))]
+        prepared = {'found': found, 'refined': refined, 'seconds': time.perf_counter() - started}
+        if markers is not False:
+            prepared['markers'] = markers
+        return prepared
+
+    def _small(self, frame):
+        return (frame if frame.shape[1::-1] == self.processing_size
+                else cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA))
+
+    def _unslim(self, found, frame, motion):
+        """Desfaz vision_process.slim_prepared: mascaras vazias do mesmo formato
+        (o resto so usa o formato, e o envio as descarta) e a imagem reduzida
+        com a luz normalizada (as mesmas contas de candidates()) so se o fluxo
+        optico for usar (sem odometria)."""
+        empty = np.zeros(found['mask_shape'], np.uint8)
+        small = None
+        if motion is None and self.settings.tracking:
+            small = self._small(frame)
+            small, _ = normalize_light(small, self.settings, self.detector.roi_row(small.shape[:2], self.settings))
+        return dict(found, masks=(empty, empty), frame=small)
+
+    def observe_frame(self, frame, timestamp, prepared=None):
+        """prepared: resultado de prepare() deste quadro, ja calculado em paralelo;
+        None calcula aqui (mesmo resultado)."""
         metadata = dict(processing_size=self.processing_size)
         if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
             return ConeObservation(timestamp, reason='Horario de captura invalido', **metadata)
@@ -382,24 +453,28 @@ class RealConeDetector:
         metadata['source_frame'] = frame
         if frame.shape[1::-1] != self.calibration.image_size:
             return ConeObservation(timestamp, reason='Resolucao diferente da calibracao da camera', **metadata)
+        if prepared is None:
+            prepared = self.prepare(frame)
         if self.aruco is not None:
-            self._detect_markers(frame, timestamp)
+            found = prepared.get('markers', False)
+            self._detect_markers(self._find_markers(frame) if found is False else found, timestamp)
             metadata.update(markers=self.markers, marker_timestamp=self.marker_timestamp,
                             marker_scan=self.marker_scan)
         started = time.perf_counter()
-        small = frame if frame.shape[1::-1] == self.processing_size else cv2.resize(frame, self.processing_size, interpolation=cv2.INTER_AREA)
         motion = None
         if self.odometry is not None and self.last_timestamp is not None:
             motion = self.odometry.delta(self.last_timestamp, timestamp)
         self.last_timestamp = timestamp
-        result = self.detector.process(small, self.settings, timestamp=timestamp, motion=motion)
-        if self.refine:
-            scale = frame.shape[1]/small.shape[1]
-            light = (result.debug.get('detection') or {}).get('light')
+        if self.corridor is not None:  # largura aprendida (muda ao longo da pista), nao a fixa
+            self.detector.nominal_width_m = self.corridor.learned_width
+        found = prepared['found']
+        if found.get('masks') is None:
+            found = self._unslim(found, frame, motion)
+        result = self.detector.process(None, self.settings, timestamp=timestamp, motion=motion,
+                                       found=found)
+        if prepared['refined'] is not None:
             changed = 0
-            for index, name in enumerate(('green_points', 'red_points')):
-                points, count = refine_bases(frame, getattr(result, name), index, self.detector, self.settings,
-                                             scale, light, self.full_homography)
+            for name, (points, count) in zip(('green_points', 'red_points'), prepared['refined']):
                 setattr(result, name, points)
                 changed += count
             self.refined = changed
@@ -407,7 +482,7 @@ class RealConeDetector:
         self.green_left = bool(result.green_left)
         # O desenho usa o lado decidido neste quadro.
         settings = replace(self.settings, green_left=self.green_left)
-        metadata['detection_seconds'] = time.perf_counter()-started
+        metadata['detection_seconds'] = prepared['seconds'] + time.perf_counter()-started
         # O detector compartilha a homografia com correcao da resolucao reduzida.
         scale = np.asarray(self.calibration.image_size)/self.processing_size
         original = lambda pixels: tuple(map(tuple, (np.asarray(pixels)+.5)*scale-.5))
@@ -479,6 +554,11 @@ class RealConeDetector:
                                        line_points=int(self.corridor.used_center)), legacy_errors=legacy)
             if self.map is not None:
                 debug['mapa'] = dict(self.map.last)
+                # Cones do mapa perto do carro (inclusive fora da imagem): o filtro
+                # do ultrassom (obstacle.py) confere se o eco e um deles.
+                near = [p for points in self.map.slam.landmarks().values() for p in points
+                        if -.2 < p[0] < 2.5 and abs(p[1]) < 1.5]
+                debug['map_cones'] = [[round(float(x), 3), round(float(y), 3)] for x, y in near]
         debug.update(status=reason, valid=bool(valid), estimated=bool(result.estimated),
                      recovery=bool(valid and recovery),
                      confidence=round(float(result.confidence), 3), branch=bool(result.branch),

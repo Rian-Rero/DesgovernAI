@@ -11,6 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 from unittest.mock import Mock
 
 import numpy as np
@@ -326,3 +327,53 @@ class VirtualTrackTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SteadyTurnTests(unittest.TestCase):
+    """24/11: com o esterco oscilando, a razao instantanea desligava uma IMU boa."""
+    def test_oscillating_steering_does_not_disable_a_good_gyro(self):
+        sensor = FakeSensor()
+        gyro = calibrated(sensor)
+        lag = []
+        with redirect_stdout(io.StringIO()):
+            for k in range(1500):          # 30 s pedalando a 2 Hz
+                command = .6*math.sin(2*math.pi*2.*k*.02)
+                lag.append(command)
+                sensor.yaw_rate = .85*lag[max(0, len(lag) - 13)]   # guinada real 0,25 s atrasada
+                gyro.read(1., command, .02)
+        self.assertTrue(gyro.enabled, gyro.reason)
+
+    def test_response_is_measured_in_steady_turns(self):
+        sensor = FakeSensor()
+        gyro = calibrated(sensor)
+        for command in (.6, -.6):
+            sensor.yaw_rate = .8*command
+            for _ in range(200):
+                gyro.read(1., command, .02)
+        response = gyro.response()
+        self.assertAlmostEqual(response['esquerda'], .8, delta=.03)
+        self.assertAlmostEqual(response['direita'], .8, delta=.03)
+
+    def test_dead_axis_still_disabled_in_a_steady_turn(self):
+        sensor = FakeSensor()
+        gyro = calibrated(sensor)
+        sensor.yaw_rate = 0.
+        with redirect_stdout(io.StringIO()):
+            for _ in range(300):
+                gyro.read(1., .6, .02)
+        self.assertFalse(gyro.enabled)
+
+    def test_vibration_at_start_is_retried(self):
+        sensor = FakeSensor(noise=4.)       # 4 graus/s parado: falha as 2 primeiras, passa na 3a (ate 6)
+        sensor.close = Mock()
+        logs = []
+        from fva_car import yaw_rate
+        original = yaw_rate.GyroYaw.calibrate
+        yaw_rate.GyroYaw.calibrate = lambda self, **kw: original(self, sleep=lambda _: None, **kw)
+        try:
+            with unittest.mock.patch.object(yaw_rate.time, 'sleep'):
+                result = start_gyro({}, Mock(return_value=sensor), logs.append)
+        finally:
+            yaw_rate.GyroYaw.calibrate = original
+        self.assertIsNotNone(result[1])
+        self.assertEqual(sum('tentando de novo' in text for text in logs), 2)

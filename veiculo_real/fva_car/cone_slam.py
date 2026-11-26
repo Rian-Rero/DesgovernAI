@@ -104,7 +104,7 @@ class ConeSLAM:
         x, y, th = self.mu[:3]
         c, s = math.cos(th), math.sin(th)
         d = self.mu[3:].reshape(-1, 2) - (x, y)
-        return np.c_[c*d[:, 0] + s*d[:, 1], -s*d[:, 0] + c*d[:, 1]]
+        return np.column_stack((c*d[:, 0] + s*d[:, 1], -s*d[:, 0] + c*d[:, 1]))  # np.c_ e lento
 
     def _gate(self, candidates, point, R):
         """Distancia de Mahalanobis da medida a cada marco candidato, vetorizada.
@@ -115,8 +115,9 @@ class ConeSLAM:
         c, s = math.cos(th), math.sin(th)
         idx = np.asarray(candidates)
         cols = 3 + 2*idx
-        d = self.mu[np.c_[cols, cols + 1]] - (x, y)                 # (m, 2)
-        z = np.c_[c*d[:, 0] + s*d[:, 1], -s*d[:, 0] + c*d[:, 1]]
+        rows = np.column_stack((cols, cols + 1))                       # (m, 2)
+        d = self.mu[rows] - (x, y)                                     # (m, 2)
+        z = np.column_stack((c*d[:, 0] + s*d[:, 1], -s*d[:, 0] + c*d[:, 1]))
         m = len(idx)
         Hp = np.zeros((m, 2, 3))
         Hp[:, 0, 0], Hp[:, 0, 1], Hp[:, 1, 0], Hp[:, 1, 1] = -c, -s, s, -c
@@ -125,7 +126,6 @@ class ConeSLAM:
         Hl = np.array([[c, s], [-s, c]])
         P = self.P
         Ppp = P[:3, :3]
-        rows = np.c_[cols, cols + 1]                                   # (m, 2)
         Ppl = P[:3][:, rows].transpose(1, 0, 2)                        # (m, 3, 2)
         Pll = P[rows[:, :, None], rows[:, None, :]]                    # (m, 2, 2)
         cross = Hp @ Ppl @ Hl.T                                        # (m, 2, 2)

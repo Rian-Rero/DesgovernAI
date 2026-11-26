@@ -38,11 +38,13 @@ class Marker:
     x: float = math.nan   # posicao no chao (m, eixo dianteiro, x frente, y esquerda)
     y: float = math.nan
     z: float = math.nan   # altura do centro estimada: confere o tamanho configurado
+    size_m: float = math.nan  # lado real implicito pela posicao (confere marker_m)
+    source: str = ""      # "altura", "tamanho" ou "chao" (tamanho dava a placa abaixo do chao)
 
     def to_tuple(self):
         r = lambda value, digits: round(value, digits) if math.isfinite(value) else math.nan
         return (self.marker_id, round(self.cx, 1), round(self.cy, 1), round(self.side_px, 1),
-                r(self.x, 3), r(self.y, 3), r(self.z, 3))
+                r(self.x, 3), r(self.y, 3), r(self.z, 3), r(self.size_m, 3), self.source)
 
 
 class ArucoDetector:
@@ -134,7 +136,7 @@ class SignController:
             self.sign_world, self.sign_weight = world, weight
         else:
             self.sign_world = (self.sign_weight*self.sign_world + weight*world)/(self.sign_weight + weight)
-            self.sign_weight = weight
+            self.sign_weight += weight
 
     def _remaining(self, pose):
         """Distancia ate o ponto de parada e se o cone intercepta a frente."""
@@ -186,7 +188,12 @@ class SignController:
                             self.sign_world, self.sign_weight = None, 0.
                             where = (f" a {marker.x:.2f} m, {'esquerda' if marker.y > 0 else 'direita'}"
                                      f" {abs(marker.y):.2f} m, centro a {100*marker.z:.0f} cm do chao"
+                                     f" (posicao pela {marker.source or 'tamanho'}; lado implicito"
+                                     f" {100*marker.size_m:.1f} cm)"
                                      if math.isfinite(marker.x) else " (sem posicao)")
+                            if marker.source == "chao":
+                                where += (". ATENCAO: pelo tamanho configurado a placa ficaria abaixo do chao:"
+                                          " o marcador e menor que marker_m (meca o quadrado preto)")
                             message = f"PARE confirmado (ArUco {marker.marker_id}, lado {marker.side_px:.0f} px){where}"
                         if self.state == "APROXIMANDO" and marker.marker_id == self.marker_id:
                             self._remember(marker, capture_pose)

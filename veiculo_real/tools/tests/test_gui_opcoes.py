@@ -115,9 +115,9 @@ class MissionOptionsTests(unittest.TestCase):
                                                   "track_width": "1,3"}))
         self.assertEqual((settings["steering_left_scale"], settings["steering_right_scale"], settings["racing_line_m"]),
                          (.9, 1.05, .2))
-        self.assertEqual(settings["track_width_m"], 1.3)
-        self.assertEqual(settings["cone_settings"]["track_width_cm"], 130)
-        self.assertNotIn("--largura-pista", gui.build_main_command({"track_width": ""}))
+        # Largura nao e mais campo da GUI: o carro mede e acompanha (muda na pista).
+        self.assertNotIn("track_width_m", settings)
+        self.assertNotIn("--largura-pista", gui.build_main_command({"track_width": "1,3"}))
         self.assertNotIn("--esterco-esquerda", gui.build_main_command({"steer_left": "abc"}))
 
     def test_only_main_lines_are_rewritten(self):
@@ -468,6 +468,12 @@ class MissionControlTests(unittest.TestCase):
         self.assertIn("nenhum main.py rodando", result.stdout)
         self.assertEqual(self.run_remote(gui.mission_signal_command("liberar", str(self.folder/"nada.pid"))).returncode,
                          gui.MISSION_NONE)
+
+    def test_aruco_size_and_height_reach_main(self):
+        settings = parsed(gui.build_main_command({"marker_side_cm": "7,5", "marker_height_cm": "4"}))
+        self.assertAlmostEqual(settings["aruco"]["marker_m"], .075)
+        self.assertAlmostEqual(settings["aruco"]["marker_height_m"], .04)
+        self.assertNotIn("--placa", gui.build_main_command({}))
 
     def test_mission_time_reaches_main(self):
         self.assertEqual(parsed(gui.build_main_command({}))["ts"], 50.)

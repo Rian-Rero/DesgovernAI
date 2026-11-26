@@ -82,8 +82,9 @@ MISSION_DEFAULTS = {
     "path_memory": True,          # False: --memoria-tracado 0 (sem a memoria contra o esterco "pedalando")
     "stanley_gain": "2.5",        # --stanley-gain (ganho k do Stanley; 2.5 e o padrao do main.py)
     "racing_line": "0.15",        # --abrir-curva (m para fora antes da curva; 0.15 e o padrao do main.py)
-    "track_width": "",            # --largura-pista (m, medida na trena; vazio: o carro estima)
     "mission_time": "50",         # --tempo (s): a missao acaba sozinha depois disto
+    "marker_side_cm": "",         # --placa-lado (cm na GUI): lado do quadrado preto do ArUco
+    "marker_height_cm": "",       # --placa-altura (cm na GUI): altura do centro do ArUco
     "steer_left": "100",          # --esterco-esquerda (% do comando do servo nas curvas a esquerda)
     "steer_right": "100",         # --esterco-direita
     "throttle_offset": "auto",    # auto: aprendido no carro; numero: --throttle-offset fixo (comparar)
@@ -93,7 +94,6 @@ STEERING_FILTERS = ("1", "3", "5")
 RECORD_RATES = ("1", "3", "5")
 STANLEY_GAINS = ("1.5", "2.0", "2.5", "3.0", "3.5")
 RACING_LINES = ("0", "0.05", "0.10", "0.15", "0.20", "0.25")
-TRACK_WIDTHS = ("", "1.0", "1.2", "1.3", "1.5", "1.7", "1.9")
 MISSION_TIMES = ("30", "50", "60", "120", "180", "300", "600")
 STEER_SCALES = ("80", "85", "90", "95", "100", "105", "110")
 THROTTLE_OFFSETS = ("auto", "0.24", "0.28", "0.30", "0.32", "0.34", "0.36", "0.40")
@@ -170,12 +170,14 @@ def build_main_command(options: dict) -> str:
             racing = None
         if racing is not None and 0 <= racing <= .5 and abs(racing - float(MISSION_DEFAULTS["racing_line"])) > 1e-9:
             parts.append(f"--abrir-curva {racing:g}")
-        try:
-            width = float(str(o.get("track_width", "")).replace(",", "."))
-        except ValueError:
-            width = None
-        if width is not None and .5 <= width <= 3.:
-            parts.append(f"--largura-pista {width:g}")
+        for key, flag, low, high in (("marker_side_cm", "--placa-lado", 2., 50.),
+                                     ("marker_height_cm", "--placa-altura", 0., 20.)):
+            try:
+                value = float(str(o.get(key, "")).replace(",", "."))
+            except ValueError:
+                continue
+            if low <= value <= high:
+                parts.append(f"{flag} {value/100:g}")
     for key, flag in (("steer_left", "--esterco-esquerda"), ("steer_right", "--esterco-direita")):
         try:
             value = float(str(o[key]).replace(",", "."))
@@ -1469,9 +1471,6 @@ class RsyncGUI(tk.Tk):
         ttk.Label(throttle, text="Tempo da missão (s):").pack(side="left", padx=(8, 0))
         ttk.Combobox(throttle, textvariable=self.mission_vars["mission_time"], values=MISSION_TIMES,
                      width=5).pack(side="left", padx=(4, 8))
-        ttk.Label(throttle, text="Largura da pista (m):").pack(side="left", padx=(8, 0))
-        ttk.Combobox(throttle, textvariable=self.mission_vars["track_width"], values=TRACK_WIDTHS,
-                     width=5).pack(side="left", padx=(4, 8))
         steering = ttk.Frame(box)
         steering.pack(fill="x", padx=6, pady=(0, 4))
         ttk.Label(steering, text="Esterço à esquerda (%):").pack(side="left")
@@ -1480,6 +1479,10 @@ class RsyncGUI(tk.Tk):
         ttk.Label(steering, text="à direita (%):").pack(side="left")
         ttk.Combobox(steering, textvariable=self.mission_vars["steer_right"], values=STEER_SCALES,
                      width=4).pack(side="left", padx=(4, 8))
+        ttk.Label(steering, text="ArUco: lado (cm):").pack(side="left", padx=(12, 0))
+        ttk.Entry(steering, textvariable=self.mission_vars["marker_side_cm"], width=5).pack(side="left", padx=(4, 8))
+        ttk.Label(steering, text="altura do centro (cm):").pack(side="left")
+        ttk.Entry(steering, textvariable=self.mission_vars["marker_height_cm"], width=5).pack(side="left", padx=(4, 8))
         ttk.Label(steering, foreground="#555",
                   text="curva fecha demais para um lado: baixe esse lado (comando do servo)").pack(side="left")
         ttk.Label(throttle, foreground="#555",

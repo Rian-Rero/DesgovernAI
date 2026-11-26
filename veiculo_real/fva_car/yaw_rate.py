@@ -36,7 +36,13 @@ DEG = math.pi / 180.0
 class GyroYaw:
     def __init__(self, sensor, full_scale_dps=500.0, max_failures=10, stuck_reads=50, still_speed=0.03,
                  still_s=0.5, bias_tau_s=3.0, min_turn_rate=0.25, min_turn_speed=0.3, check_samples=150,
-                 min_ratio=0.3):
+                 min_ratio=0.3, steady_s=0.4, steady_curvature=0.1):
+        """steady_s, steady_curvature: a coerencia e a resposta da direcao so usam
+        CURVA ESTAVEL (a curvatura comandada variou menos que steady_curvature 1/m,
+        ~2 graus de esterco, nos ultimos steady_s). Com o esterco oscilando, a
+        guinada real atrasa ~0,1-0,2 s e a razao instantanea despenca: nos
+        ensaios de 24/11 a IMU foi desligada em 3 de 13 voltas (razao -0,13 a
+        0,28) sem defeito nenhum; em curva estavel a resposta deu 0,83/0,94."""
         """sensor: objeto com read_motion() -> ((ax, ay, az) em g, (gx, gy, gz) em graus/s)."""
         self.sensor = sensor
         self.full_scale_dps = float(full_scale_dps)
@@ -59,11 +65,15 @@ class GyroYaw:
         self._same = 0
         self._still_for = 0.0
         self._turns = {1: [0.0, 0.0, 0], -1: [0.0, 0.0, 0]}  # lado: [soma w*m, soma m*m, n]
+        self.steady_s = float(steady_s)
+        self.steady_curvature = float(steady_curvature)
+        self._curvatures = []   # (tempo acumulado, curvatura comandada) recentes
+        self._clock = 0.0
         self.max_rate = 0.0
         self.last = math.nan
 
     # ------------------------------------------------------------------ partida
-    def calibrate(self, samples=100, delay=0.01, sleep=time.sleep):
+    def calibrate(self, samples=100, delay=0.01, sleep=time.sleep, max_noise=2.0):
         """Carro parado: eixo vertical pela gravidade e vies do giroscopio.
 
         Levanta RuntimeError explicando o problema; o Car entao segue sem IMU."""
@@ -83,7 +93,7 @@ class GyroYaw:
         if not 0.8 <= norm <= 1.2:
             raise RuntimeError(f"acelerometro mede {norm:.2f} g parado (esperado ~1 g): sensor com defeito")
         noise = float(np.max(gyro.std(axis=0)))
-        if noise > 2.0:
+        if noise > max_noise:
             raise RuntimeError(f"giroscopio oscila {noise:.1f} graus/s parado: carro mexendo ou sensor ruim")
         bias = gyro.mean(axis=0)
         if float(np.max(np.abs(bias))) > 20.0:
@@ -138,7 +148,7 @@ class GyroYaw:
         self.used += 1
         self.max_rate = max(self.max_rate, abs(rate))
         self.last = rate
-        if abs(speed) >= self.min_turn_speed and math.isfinite(model_rate) and abs(model_rate) >= self.min_turn_rate:
+        if self._steady(speed, model_rate, dt) and abs(model_rate) >= self.min_turn_rate:
             side = self._turns[1 if model_rate > 0 else -1]
             side[0] += rate * model_rate
             side[1] += model_rate * model_rate
@@ -148,6 +158,20 @@ class GyroYaw:
                 self.disable(f"nao acompanha as curvas (resposta {ratio:.2f}): eixo errado ou sensor ruim")
                 return math.nan
         return rate
+
+    def _steady(self, speed, model_rate, dt):
+        """Curva estavel: andando e com a curvatura comandada parada ha steady_s."""
+        self._clock += dt
+        if abs(speed) < self.min_turn_speed or not math.isfinite(model_rate):
+            self._curvatures.clear()
+            return False
+        curvature = model_rate/speed
+        self._curvatures.append((self._clock, curvature))
+        while self._curvatures and self._clock - self._curvatures[0][0] > self.steady_s:
+            self._curvatures.pop(0)
+        values = [c for _, c in self._curvatures]
+        covered = self._clock - self._curvatures[0][0] if self._curvatures else 0.0
+        return covered >= .9*self.steady_s and max(values) - min(values) <= self.steady_curvature
 
     # ------------------------------------------------------------------ saida
     def response_ratio(self, side=None, min_samples=None):
@@ -195,7 +219,20 @@ def start_gyro(parameters, imu_factory=None, log=print):
         full_scale = float(parameters.get("imu_gyro_range_dps", 500))
         sensor = imu_factory(bus_id=int(parameters.get("imu_bus", 4)), auto_calibrate=False,
                              gyro_range_dps=int(full_scale))
-        gyro = GyroYaw(sensor, full_scale_dps=full_scale).calibrate()
+        gyro = GyroYaw(sensor, full_scale_dps=full_scale)
+        # Vibracao na partida (ESC, alguem segurando o carro): tenta de novo; na
+        # ultima aceita ate 6 graus/s de ruido (o vies medio de 100 leituras erra
+        # ~0,5 grau/s e e reaprendido com o carro parado). Em 24/11 uma volta
+        # perdeu a IMU por 4,9 graus/s na partida.
+        for attempt, limit in enumerate((2.0, 2.0, 6.0)):
+            try:
+                gyro.calibrate(max_noise=limit)
+                break
+            except RuntimeError as error:
+                if "oscila" not in str(error) or attempt == 2:
+                    raise
+                log(f"IMU: {error}; tentando de novo ({attempt + 2}/3)")
+                time.sleep(0.5)
         status = (f"{getattr(sensor, 'chip', 'ok')} | eixo vertical {np.round(gyro.up, 2).tolist()}"
                   f" | vies {gyro.bias_start:+.2f} graus/s")
         log(f"\033[32mIMU: {status}\033[0m")

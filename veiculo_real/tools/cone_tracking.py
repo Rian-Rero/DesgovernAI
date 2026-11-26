@@ -8,7 +8,8 @@ import numpy as np
 
 def transform_points(points, matrix):
     points = np.asarray(points, float).reshape(-1, 2)
-    homogeneous = np.c_[points, np.ones(len(points))] @ np.asarray(matrix).T
+    # column_stack em vez de np.c_ (mesmo resultado; np.c_ custa ~10 us por chamada).
+    homogeneous = np.column_stack((points, np.ones(len(points)))) @ np.asarray(matrix).T
     valid = np.all(np.isfinite(homogeneous), axis=1) & (abs(homogeneous[:, 2]) > 1e-8)
     output = np.full_like(points, np.nan)
     output[valid] = homogeneous[valid, :2]/homogeneous[valid, 2, None]
