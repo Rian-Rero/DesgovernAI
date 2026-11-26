@@ -48,7 +48,7 @@ DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
 # m/s; nos cones e a velocidade MAXIMA NAS RETAS (o carro reduz sozinho antes
 # das curvas e pelo limite de visibilidade, ~1,6 m/s com curva de R = 1,5 m).
-SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "3.5" "4.0", "4.5", "5.0")
+SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "3.5", "4.0", "4.5", "5.0")
 CURVE_RADII = (
     "1.2",
     "1.5",
