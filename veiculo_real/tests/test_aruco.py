@@ -115,6 +115,45 @@ class StopSignTests(unittest.TestCase):
         self.assertEqual(signs.update(sample(3.1, 3), 3.1).state, 'LIVRE')
         self.assertTrue(signs.update(sample(3.3, 4), 3.3).stop)
 
+    def test_confirms_with_misses_in_between(self):
+        # 26/11: com a placa a vista so 22-65% das buscas a achavam; exigir 2
+        # SEGUIDAS quase nunca confirmava em velocidade. 2 nas ultimas 4 bastam.
+        sign = Marker(1, 320, 200, 40)
+        signs = SignController({1: 'pare'}, confirm_frames=2, confirm_window=4)
+        states = [signs.update(seen(t, *markers), t).state
+                  for t, markers in ((1., (sign,)), (1.05, ()), (1.1, ()), (1.15, (sign,)))]
+        self.assertEqual(states[-1], 'PARADO')   # sem posicao: para na hora
+        old = SignController({1: 'pare'}, confirm_frames=2)  # janela = 2: seguidas, como antes
+        states = [old.update(seen(t, *markers), t).state
+                  for t, markers in ((1., (sign,)), (1.05, ()), (1.1, (sign,)))]
+        self.assertEqual(states[-1], 'LIVRE')
+        far = SignController({1: 'pare'}, confirm_frames=2, confirm_window=4)
+        states = [far.update(seen(t, *markers), t).state   # 2 acertos a 4 buscas de distancia: nao
+                  for t, markers in ((1., (sign,)), (1.05, ()), (1.1, ()), (1.15, ()), (1.2, (sign,)))]
+        self.assertEqual(states[-1], 'LIVRE')
+
+    def test_approach_slows_down_smoothly_to_the_stop(self):
+        # 26/11: a vref caia em degrau para 0,3 m/s (aproximacao aos trancos).
+        signs = SignController({1: 'pare'}, approach_speed=.3, approach_deceleration=.4,
+                               deceleration=.5, reaction_s=.3)
+        sign = Marker(1, 320, 200, 40, 3., .8, .1)   # placa ao lado, 3 m a frente
+        pose = (0., 0., 0.)
+        signs.update(seen(1., sign), 1.)
+        command = signs.update(seen(1.05, sign), 1.05, pose, lambda _: pose, 1.2)
+        self.assertEqual(command.state, 'APROXIMANDO')
+        self.assertGreater(command.speed_limit, 1.)   # nada de degrau para 0,3
+        limits, x = [], 0.
+        while command.state == 'APROXIMANDO' and x < 3.:
+            limits.append(command.speed_limit)
+            x += .02
+            command = signs.update(seen(1.05), 1.05 + x, (x, 0., 0.), speed=min(limits[-1], 1.2))
+        steps = -np.diff(limits)
+        self.assertTrue(np.all(steps >= -1e-9))          # so desce
+        self.assertLess(np.max(steps), .03)              # sem degrau: a/v por 2 cm (antes ~0,9 de uma vez)
+        self.assertAlmostEqual(limits[-1], .3, places=6)  # termina em approach_speed
+        self.assertEqual(command.state, 'PARADO')
+        self.assertAlmostEqual(signs.approach_limit(math.nan), .3)
+
     def test_other_ids_and_bad_actions(self):
         signs = SignController({1: 'pare', 7: 'ignorar'})
         for t in (0., .1):
@@ -168,7 +207,7 @@ class MissionTests(unittest.TestCase):
     """O laco de controle para perto do cone da placa e libera pelo botao."""
     def test_mission_uses_coasting_deceleration_and_marker_size(self):
         import main
-        self.assertEqual(main.aruco_every(main.parameters), 2)
+        self.assertEqual(main.aruco_every(main.parameters), 1)  # todo quadro (26/11)
         self.assertEqual(main.aruco_every({'aruco': False}), 0)
         signs = main.sign_controller(main.parameters, 'cones')
         self.assertEqual(signs.actions, {1: 'pare'})
@@ -353,6 +392,29 @@ class EndToEndStopTests(unittest.TestCase):
         self.assertIsNotNone(created[0].odometry)
         self.assertTrue(hasattr(created[0].odometry, 'delta'))
         self.assertGreater(created[0].steer_delay, 0.)
+
+    def test_fast_car_with_unreliable_detection_still_stops_at_the_sign(self):
+        # 26/11: a 1,5 m/s a placa nao parava o carro. Busca que acha a placa so
+        # 40% das vezes (como nos ensaios), 1,5 m/s: confirma (2 nas ultimas 4) e
+        # desce no perfil ate parar na altura da placa.
+        import unittest.mock as um
+        import main
+        from fva_car.cones import ConeObservation
+        for seed in range(3):
+            rng = np.random.default_rng(seed)
+
+            def flaky(*args, **kwargs):
+                if kwargs.get('markers') and rng.random() > .4:
+                    kwargs['markers'] = ()
+                return ConeObservation(*args, **kwargs)
+            with self.subTest(seed=seed), um.patch.object(sys.modules['fva_car.cones'], 'ConeObservation',
+                                                          side_effect=flaky):
+                self.run_to_stop(6., .9, 0., settings={'velocity_reference': 1.5},
+                                 finish=lambda car: car.t > 14 or (car.v == 0 and car.t > 3))
+                self.assertEqual(self.car.v, 0.)
+                self.assertGreater(max(v for _, v, _ in self.history), 1.2)   # andou rapido antes
+                gap = 6. - (self.car.p[0] + .36 + .07)
+                self.assertTrue(-.05 < gap < .2, gap)
 
     def test_sign_beside_the_track_on_both_sides(self):
         for side in (.9, -.8):

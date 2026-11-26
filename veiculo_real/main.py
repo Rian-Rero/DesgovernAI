@@ -104,6 +104,13 @@ parameters = {
     # (fva_car/throttle.py, logs/acelerador.json): o offset acima vira so o valor
     # inicial. --throttle-offset fixa o valor e desliga o aprendizado.
     "throttle_learning": True,
+    # PI de velocidade (fva_car/car.py): com 1 e 0,8 o acelerador batia 0 <-> 0,5
+    # a ~3 Hz em baixa velocidade e em curva fechada (engasgo de 26/11). Piso:
+    # andando com referencia, o acelerador nao cai abaixo desta fracao do
+    # feedforward (solto em curva o carro parava em ~0,15 s e grudava).
+    "speed_kp": 0.6,
+    "speed_ki": 0.6,
+    "throttle_floor": 0.6,
     # Partida como antes de 17/11 (comparacao A/B): velocidade de recuperacao
     # pelo sigma no eixo > 0,1 m, alvo do pure pursuit sem minimo e acelerador
     # 0,17*vref sem offset. Tambem --old-start.
@@ -302,7 +309,14 @@ parameters = {
     # so pelo botao. Bipe proprio (um bipe LONGO, STOP_BEEPS), diferente do
     # ultrassom (dois curtos).
     # "ignorar": so registra. every: busca a cada N quadros. False desliga.
-    "aruco": {"every": 2, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
+    # every 1: busca em todo quadro (~5 ms no Pi). Em 26/11, com a placa a vista,
+    # so 22-65% das buscas a achavam (placa de ~6 cm, a 1-3 m): com a busca a
+    # cada 2 quadros e 2 acertos SEGUIDOS para confirmar, a 1,5 m/s quase nunca
+    # confirmaria. Agora confirma com confirm_frames acertos nas ultimas
+    # confirm_window buscas. approach_deceleration: a vref desce num perfil
+    # (v^2 = approach_speed^2 + 2*a*distancia) em vez do degrau para approach_speed.
+    "aruco": {"every": 1, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
+              "confirm_frames": 2, "confirm_window": 4, "approach_deceleration": 0.4,
               # marker_height_m: altura do CENTRO do marcador (m). Com ela, a posicao
               # nao depende do tamanho (melhor para placa baixa). None: pelo tamanho.
               "marker_m": 0.10, "marker_height_m": None, "stop_at_m": 0.0, "front_half_width_m": 0.25,
@@ -629,6 +643,9 @@ def sign_controller(config, mode):
     return SignController(
         actions={int(k): v for k, v in (value.get("actions") or {"1": "pare"}).items()},
         approach_speed=float(value.get("approach_speed", 0.3)),
+        confirm_frames=int(value.get("confirm_frames", 2)),
+        confirm_window=int(value.get("confirm_window", 4)),
+        approach_deceleration=float(value.get("approach_deceleration", 0.4)),
         stop_gap_m=float(value.get("stop_gap_m", 0.08)),
         front_overhang_m=FRONT_OVERHANG_M,
         reaction_s=STOP_REACTION_TIME + float(config.get("obstacle_confirm_s", 0.0) or 0.0),

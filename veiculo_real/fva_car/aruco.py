@@ -16,9 +16,12 @@ por match/case:
                None: so o botao). Depois ignora a placa por ignore_s.
     "ignorar"  so registra.
 
-A placa so vale vista em confirm_frames buscas seguidas. Confirmada sem
-posicao utilizavel, pede parada imediatamente.
+A placa vale vista em confirm_frames das ultimas confirm_window buscas (antes:
+seguidas; em 26/11 so 22-65% das buscas achavam a placa a vista). Confirmada
+sem posicao utilizavel, pede parada imediatamente. Na aproximacao, a vref desce
+num perfil suave ate a parada (approach_limit), nao em degrau.
 """
+from collections import deque
 from dataclasses import dataclass
 import math
 
@@ -28,6 +31,7 @@ import numpy as np
 ACTIONS = ("pare", "ignorar")
 STILL_SPEED = .05      # m/s: abaixo disto o carro esta parado (conta hold_s)
 STILL_TIMEOUT_S = 3.   # s: sem chegar a STILL_SPEED, conta hold_s depois disto
+APPROACH_CRAWL_S = .6  # s em approach_speed no fim do perfil de aproximacao
 STATES = ("LIVRE", "APROXIMANDO", "PARADO", "SAINDO")
 
 
@@ -92,7 +96,8 @@ class SignCommand:
 class SignController:
     def __init__(self, actions=None, confirm_frames=2, approach_speed=.3, stop_gap_m=.08,
                  front_overhang_m=.07, reaction_s=.3, deceleration=1.75, hold_s=None, ignore_s=4.,
-                 stop_at_m=0., wheelbase=.36, front_half_width_m=.25, max_frame_age=1.):
+                 stop_at_m=0., wheelbase=.36, front_half_width_m=.25, max_frame_age=1.,
+                 confirm_window=None, approach_deceleration=0.):
         """stop_at_m: onde a FRENTE do carro para em relacao a placa (0: na altura
         dela; negativo: antes)."""
         self.actions = {}
@@ -101,6 +106,11 @@ class SignController:
                 raise ValueError(f"Acao ArUco desconhecida: {action} (use {', '.join(ACTIONS)})")
             self.actions[int(key)] = action
         self.confirm_frames = int(confirm_frames)
+        # Janela de buscas (ids vistos em cada): confirma com confirm_frames nela.
+        self.confirm_window = max(self.confirm_frames, int(confirm_window or self.confirm_frames))
+        self.recent = deque(maxlen=self.confirm_window)
+        # Desaceleracao do perfil de aproximacao (m/s2); 0: degrau para approach_speed.
+        self.approach_deceleration = float(approach_deceleration)
         self.approach_speed = float(approach_speed)
         self.stop_gap_m = float(stop_gap_m)
         self.front_overhang_m = float(front_overhang_m)
@@ -158,9 +168,21 @@ class SignController:
         speed = abs(float(speed)) if math.isfinite(speed) else self.approach_speed
         return speed*self.reaction_s + speed*speed/(2.*self.deceleration)
 
+    def approach_limit(self, remaining):
+        """Teto da vref na aproximacao: perfil v^2 = vf^2 + 2*a*(espaco ate a
+        distancia de parada a vf), suave em vez do degrau para approach_speed."""
+        if self.approach_deceleration <= 0 or not math.isfinite(remaining):
+            return self.approach_speed
+        # Termina APPROACH_CRAWL_S antes da distancia de parada: o carro so rola
+        # para desacelerar, chega la ja em approach_speed e para no ponto certo.
+        room = max(0., remaining - self.braking_distance(self.approach_speed)
+                   - APPROACH_CRAWL_S*self.approach_speed)
+        return math.sqrt(self.approach_speed**2 + 2.*self.approach_deceleration*room)
+
     def _new_frame(self, markers, now):
         ids = {m.marker_id for m in markers}
-        self.seen = {i: self.seen.get(i, 0) + 1 for i in ids}
+        self.recent.append(ids)
+        self.seen = {i: sum(i in scan for scan in self.recent) for i in ids}
         confirmed = []
         for marker in markers:
             if self.seen[marker.marker_id] >= self.confirm_frames and now >= self.ignore_until.get(marker.marker_id, -1):
@@ -178,6 +200,7 @@ class SignController:
             if self.last_frame is not None and (stamp - self.last_frame > self.max_frame_age
                     or (scan is not None and self.last_scan is not None and scan != self.last_scan + 1)):
                 self.seen.clear()
+                self.recent.clear()
             self.last_frame = stamp
             self.last_scan = scan
             markers = tuple(Marker(*m) for m in (getattr(observation, "markers", ()) or ()))
@@ -212,7 +235,7 @@ class SignController:
             if not math.isfinite(remaining) or remaining <= self.braking_distance(speed):
                 self.stopped(now)
                 return SignCommand(self.state, 0., self.marker_id, message, True, remaining, in_path)
-            return SignCommand(self.state, self.approach_speed, self.marker_id, message,
+            return SignCommand(self.state, self.approach_limit(remaining), self.marker_id, message,
                                remaining_m=remaining, in_path=in_path)
         if self.state == "PARADO" and self.hold_s is not None:
             # O tempo conta com o carro parado: PARADO comeca ainda freando. Sem
@@ -246,4 +269,5 @@ class SignController:
             return ""
         self.ignore_until[self.marker_id] = now + self.ignore_s
         self.state, self.seen = "SAINDO", {}
+        self.recent.clear()
         return f"PARE (ArUco {self.marker_id}) liberado: ignorando esta placa por {self.ignore_s:.0f} s"

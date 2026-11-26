@@ -1637,3 +1637,53 @@ No ensaio de 19:16 a placa foi confirmada e o carro parou. A posição veio pelo
 modo "chão", com **lado implícito de 5,7–6,1 cm** contra os 10 cm
 configurados: o quadrado preto impresso deve ter ~6 cm. Meçam e ponham o valor
 em "ArUco: lado (cm)" na GUI (ou `--placa-lado 0.06`).
+
+## Ensaios de 26/11 à noite (`archive_2611b`): engasgos e placa em velocidade
+
+### Engasgo
+O acelerador batia entre 0 e 0,5 a ~3 Hz e a velocidade pulava entre 0 e
+0,7 m/s. Aconteceu em 55% dos segundos com referência ≤ 0,35 m/s, em 10% entre
+0,5 e 0,7, e em 31–67% acima de 0,7. Medido nos logs:
+- Andando, o carro precisa de pouco acelerador: ~0,15–0,18 a 0,2–0,8 m/s.
+- Para sair do lugar precisa de ~0,45: o atrito estático é ~3× o de regime.
+- Solto, em curva (esterço ≥ 12°), o carro desacelera 2–4 m/s² (pneu
+  arrastando), contra ~1 m/s² em reta.
+
+O ciclo era:
+1. O PI (ganho 1) passava da referência e zerava o acelerador.
+2. Em curva, o carro parava em ~0,15 s.
+3. O integrador acumulava até o carro desgrudar, e ele disparava.
+
+Correções (`fva_car/car.py`, todas configuráveis no `main.py`):
+- **PI mais suave:** `speed_kp`/`speed_ki` 0,6/0,6 (antes 1/0,8).
+- **Piso enquanto anda** (`throttle_floor` 0,6): com referência > 0,15 m/s e o
+  carro andando, o acelerador não cai abaixo de 60% do feedforward. Ele rola
+  em vez de parar e grudar.
+- **Ao desgrudar:** o integrador acumulado com o carro parado é descartado,
+  para não virar tranco.
+- **Perda de quadro:** a rampa de velocidade da "perda" só começa depois de
+  mais de 1 quadro perdido e 0,15 s (`loss_ramp_grace_s`). Um quadro
+  descartado derrubava a referência por ~0,16 s, 10 vezes nos 7 ensaios.
+
+Testado e **não** adotado:
+- Atrasar 0,3 s os tetos de "uma borda"/"recuperação" (`speed_limit_debounce_s`,
+  padrão 0): na pista virtual caiu para 96% das voltas (92% com 0,15 s).
+- Subir a velocidade de recuperação para 0,45 m/s: piorou a pista virtual.
+
+### Placa (ArUco ID 1) em velocidade
+- **Nas voltas rápidas a busca estava desligada.** As voltas a 2 e 3 m/s
+  (19:50 e 19:51) tiveram **zero buscas**: só `--sem-aruco` faz isso, ou seja, a
+  caixa "Placas ArUco" estava desmarcada na GUI.
+- **Taxa de acerto baixa.** Nas outras voltas, com a placa à vista, só 22–65%
+  das buscas a achavam (a 0,64 m/s, 2 de 9). O quadrado impresso tem ~6 cm.
+  Exigir 2 acertos **seguidos** quase nunca confirmaria a 1,5 m/s.
+  - Agora busca em **todo** quadro (`every` 1; custo medido no Pi ~5 ms).
+  - Confirma com **2 acertos nas últimas 4 buscas**.
+  - No teste de ponta a ponta, a 1,5 m/s com 40% de acerto: para em todas as
+    corridas, com a frente a 8 cm da placa.
+- **Aproximação suave.** A referência caía em degrau para 0,3 m/s. Agora desce
+  num perfil v² = 0,3² + 2·0,4·d (`approach_deceleration`) e chega a 0,3 m/s
+  ~0,6 s antes do ponto de parada.
+- **Próximo passo:** para afinar os parâmetros do detector, gravar uma volta
+  com a placa à vista em resolução cheia (`--record-frames 10`). Os quadros
+  de evento são 320×240 e não servem para isso.

@@ -41,9 +41,19 @@ CAR = {
     "PERIOD": 50.0,  # periodo de amostragem dos sensores
 }
 
-# controlador PI de velocidade para comando direto de throttle
-KP_VEL = 1
-KI_VEL = 0.8
+# controlador PI de velocidade para comando direto de throttle. Ensaio de
+# 26/11: com 1 e 0,8 o acelerador batia 0 <-> 0,5 a ~3 Hz em baixa velocidade
+# e em curva fechada (o "engasgo"): passando da referencia, o P zerava o
+# acelerador; em curva (pneu arrastando, -2 a -4 m/s2 solto) o carro parava em
+# ~0,15 s; para sair do lugar pedia ~0,45 (3x o de regime, ~0,17) e disparava.
+# Agora 0,6/0,6, com piso enquanto anda e o integrador zerado ao desgrudar
+# (Car.set_vel). main.py speed_kp/speed_ki mudam.
+KP_VEL = 0.6
+KI_VEL = 0.6
+# Enquanto anda com referencia, o acelerador nao cai abaixo desta fracao do
+# feedforward: o carro rola em vez de parar e grudar. 0 desliga.
+THROTTLE_FLOOR = 0.6
+MOVING_SPEED = 0.05     # m/s: abaixo disto o carro esta parado (atrito estatico)
 # Feedforward = throttle de regime: THROTTLE_FF_OFFSET + THROTTLE_FF_GAIN*vref.
 # Nos 11 ensaios de 10/11 (trechos em regime) o throttle foi ~0,42 a 0,3 m/s,
 # 0,39 a 0,55, 0,45 a 0,65 e 0,59 a 0,9 m/s: o ESC so move o carro acima de ~0,35
@@ -80,6 +90,10 @@ class Car:
         # sem editar o codigo (main.py --throttle-offset / campo da GUI).
         self.ff_offset = float(parameters.get("throttle_ff_offset", THROTTLE_FF_OFFSET))
         self.ff_gain = float(parameters.get("throttle_ff_gain", THROTTLE_FF_GAIN))
+        self.kp_vel = float(parameters.get("speed_kp", KP_VEL))
+        self.ki_vel = float(parameters.get("speed_ki", KI_VEL))
+        self.throttle_floor = float(parameters.get("throttle_floor", THROTTLE_FLOOR))
+        self.was_stopped = True  # ao desgrudar, o integrador acumulado parado vira tranco
         # Escala do comando do SERVO por lado (direcao mais forte para um lado):
         # o servo recebe esterco*escala; self.st (odometria) continua o esterco
         # desejado, que e o que a roda faz com a escala certa. 1 = sem correcao.
@@ -513,14 +527,27 @@ class Car:
             feedforward = throttle_map.feedforward(vref_abs)
         else:
             feedforward = offset + gain * vref_abs if vref_abs > 0.05 else 0.0
-        u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
+        kp = getattr(self, "kp_vel", KP_VEL)
+        ki = getattr(self, "ki_vel", KI_VEL)
+        moving = v_abs > MOVING_SPEED
+        if moving and getattr(self, "was_stopped", False) and self.vel_error_integral > 0.0:
+            # Acabou de vencer o atrito estatico: o que o integrador juntou parado
+            # (para desgrudar) faria o carro disparar e o P zerar o acelerador.
+            self.vel_error_integral = 0.0
+        self.was_stopped = not moving
+        u = feedforward + kp * error + ki * self.vel_error_integral
         u_sat = np.clip(u, 0.0, self._u_max())
 
         # anti-windup: integra apenas fora da saturacao ou para sair dela
         if (u == u_sat) or (u > u_sat and error < 0.0) or (u < u_sat and error > 0.0):
             dt_control = min(self.dt, 2.0 * self.sample_rate)
             self.vel_error_integral += error * dt_control
-            u = feedforward + KP_VEL * error + KI_VEL * self.vel_error_integral
+            u = feedforward + kp * error + ki * self.vel_error_integral
+
+        floor = getattr(self, "throttle_floor", 0.0)
+        if floor > 0.0 and vref_abs > 0.15 and moving:
+            # Rola em vez de parar: solto, em curva, o carro para em ~0,15 s.
+            u = max(u, floor * feedforward)
 
         self.set_u(u)
         # Em regime (na referencia, sem saturar, sem acelerar): o throttle aplicado

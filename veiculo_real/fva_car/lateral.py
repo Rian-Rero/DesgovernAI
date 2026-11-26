@@ -723,6 +723,17 @@ class RealStanleyFollower:
         # Durante a tolerancia, reduz o alvo de velocidade ate curve_min_speed
         # em vez de manter a vref cheia as cegas. Esgotada, neutraliza como antes.
         self.loss_speed_ramp = self.settings.get('loss_speed_ramp', False)
+        # A rampa so comeca depois disto (s) e de mais de 1 quadro perdido: um
+        # quadro descartado derrubava a vref por ~0,16 s, 10 vezes nos 7 ensaios
+        # de 26/11 (o carro "engasgava" a cada salto descartado).
+        self.loss_ramp_grace = nonnegative('loss_ramp_grace_s', .15)
+        # Teto de velocidade da visao (uma borda 0,9; recuperacao 0,35) so vale
+        # se durar isto (s): o maior teto da janela. Em 26/11 esses tetos
+        # piscavam por 0,2-0,5 s e a vref despencava e voltava em rampa; mas na
+        # pista virtual (5 pistas x 5 sementes, atraso real da direcao) 0,3 s
+        # deu 96% das voltas e 0,15 s 92%, contra 100% sem: desligado (0).
+        self.limit_debounce = nonnegative('speed_limit_debounce_s', 0.)
+        self.limit_history = deque(maxlen=64)  # (horario da foto, teto)
         if not isinstance(self.loss_speed_ramp, (bool, np.bool_)):
             raise ValueError('loss_speed_ramp deve ser True ou False.')
         # Saltos maiores que estes, entre quadros proximos, sao descartados.
@@ -973,6 +984,24 @@ class RealStanleyFollower:
         """Centro da direcao em uso (rad, geometrico): fixo + aprendido."""
         return self.trim_base + self.centering
 
+    def _debounced_limit(self, limit, stamp):
+        """Maior teto das fotos dos ultimos limit_debounce s: um teto mais baixo
+        so vale depois de se manter esse tempo (o mais alto vale na hora)."""
+        try:
+            limit = float(limit)
+        except (TypeError, ValueError):
+            limit = math.inf
+        if self.limit_debounce <= 0 or not isinstance(stamp, (int, float, np.number)) or not math.isfinite(stamp):
+            return limit
+        stamp = float(stamp)
+        if self.limit_history and stamp < self.limit_history[-1][0]:
+            self.limit_history.clear()  # relogio voltou (nova missao, testes)
+        if not self.limit_history or stamp > self.limit_history[-1][0]:
+            self.limit_history.append((stamp, limit))
+        while len(self.limit_history) > 1 and self.limit_history[1][0] <= stamp - self.limit_debounce:
+            self.limit_history.popleft()
+        return max(value for _, value in self.limit_history)
+
     def _record_command(self, now, steer):
         """Esterco (convencao geometrica) enviado em `now`, para _preview_actuator."""
         if isinstance(now, (int, float, np.number)) and math.isfinite(now) and math.isfinite(steer):
@@ -1197,7 +1226,8 @@ class RealStanleyFollower:
         reverse_requested = (getattr(car, 'sel_tracao', 1) == 0
                              and getattr(car, 'rc_acelerador', 0.) < 0)
         line_seen = errors is not None
-        speed_limit = getattr(observation, 'speed_limit', math.inf)
+        speed_limit = self._debounced_limit(getattr(observation, 'speed_limit', math.inf),
+                                            getattr(observation, 'timestamp', None))
         holding = False
         lost_for = float('nan')
         compensated = 0.
@@ -1320,8 +1350,9 @@ class RealStanleyFollower:
             self.hold_speed_factor = 1.
             if holding and self.loss_speed_ramp:
                 # Fracao consumida da tolerancia (quadros ou tempo, o que vier antes).
-                progress = max(lost_frames/max(self.loss_frames, 1),
-                               lost_for/self.loss_tolerance if self.loss_tolerance > 0 else 1.)
+                grace = min(self.loss_ramp_grace, .9*self.loss_tolerance)
+                progress = max((lost_frames - 1)/max(self.loss_frames - 1, 1),
+                               (lost_for - grace)/(self.loss_tolerance - grace) if self.loss_tolerance > 0 else 1.)
                 progress = float(np.clip(progress, 0., 1.))
                 ramped = max(min(self.min_speed, speed_raw), (1.-progress)*speed_raw + progress*self.min_speed)
                 self.hold_speed_factor = ramped/speed_raw if speed_raw > 0 else 1.

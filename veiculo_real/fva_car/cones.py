@@ -18,7 +18,10 @@ from tools.cone_path import ConePathDetector, ConeSettings, _r, normalize_light,
 from tools.cone_tracking import transform_points
 
 
-CONE_RECOVERY_SPEED = .35  # m/s
+# m/s. Em 26/11, 55% dos segundos com vref <= 0,35 "engasgavam" (atrito
+# estatico); 0,45 piorou a pista virtual (largura nao aprendida, volta mais
+# lenta). Fica 0,35; o engasgo foi tratado no PI de velocidade (car.py).
+CONE_RECOVERY_SPEED = .35
 # Com o FOV atual, um cone a ~0,9 m de lado so entra na imagem a x >~ 1,6 m:
 # no ensaio parado (logs 20261023_080354) o primeiro portao ficava a 1,9-2,3 m
 # e o carro nunca partia. Trecho distante so e extrapolado ate o eixo em reta;

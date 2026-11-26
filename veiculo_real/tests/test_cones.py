@@ -243,7 +243,10 @@ class ConeTests(unittest.TestCase):
             self.assertTrue(follower.apply(car, LineObservation(timestamp=now, reason='sem cones'), now))
             self.assertTrue(follower.last_state['hold'])
             speeds.append(car.vref)
-        self.assertTrue(all(a > b for a, b in zip([cruise]+speeds, speeds)), speeds)
+        # 1 quadro perdido nao derruba a vref (loss_ramp_grace_s, 26/11: o
+        # carro engasgava a cada quadro descartado); depois desce ate o minimo.
+        self.assertAlmostEqual(speeds[0], cruise, delta=.01)
+        self.assertTrue(all(a > b for a, b in zip(speeds, speeds[1:])), speeds)
         self.assertAlmostEqual(speeds[-1], .15, delta=1e-6)
         self.assertIn('vref x', follower.status)
         self.assertEqual(car.st, follower.last_state['steer_rad'])

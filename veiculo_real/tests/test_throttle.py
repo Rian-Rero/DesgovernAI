@@ -101,6 +101,34 @@ class CarControllerTests(unittest.TestCase):
         car.set_vel(.6)
         self.assertEqual(car.throttle_map.learned_s, before)
 
+    def test_rolls_instead_of_cutting_the_throttle_when_above_the_reference(self):
+        # 26/11: passando da referencia o P zerava o acelerador; em curva o carro
+        # parava em ~0,15 s e para desgrudar disparava de novo (engasgo).
+        car = self.car()
+        car.throttle_floor = .6
+        car.v = .7
+        car.set_vel(.3)
+        feedforward = car.throttle_map.feedforward(.3)
+        self.assertAlmostEqual(car.u, .6*feedforward, places=6)
+        car.v = 0.   # parado: sem piso (nao empurra um carro que deve ficar)
+        car.set_vel(.3)
+        car.v = .7
+        car.set_vel(0.)
+        self.assertEqual(car.u, 0.)  # referencia zero: sem piso
+
+    def test_integrator_from_a_standstill_is_dropped_when_it_breaks_away(self):
+        car = self.car()
+        car.throttle_map = ThrottleMap(.1, .2)
+        car.v = 0.
+        for _ in range(50):          # 1 s preso no atrito estatico
+            car.set_vel(.3)
+        self.assertGreater(car.vel_error_integral, .2)
+        stuck_u = car.u
+        car.v = .1                   # desgrudou
+        car.set_vel(.3)
+        self.assertAlmostEqual(car.vel_error_integral, .2*.02, places=6)
+        self.assertLess(car.u, stuck_u - .1)
+
     def test_radio_mode_does_not_learn(self):
         car = self.car(auto=False)
         car.rc_acelerador, car.v = .3, .6
