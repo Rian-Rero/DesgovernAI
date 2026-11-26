@@ -50,6 +50,7 @@ DEFAULT_DEST = "/home/alunos/Desktop/fva"
 # das curvas e pelo limite de visibilidade, ~1,6 m/s com curva de R = 1,5 m).
 SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "4.0")
 CURVE_RADII = ("1.2", "1.5", "2.0", "3.0")  # m: curva mais fechada da pista (--min-radius)
+CURVE_ACCELS = ("0.35", "0.40", "0.45", "0.50", "0.55", "0.60")  # m/s²
 STREAM_PORT = 8080  # main.py --stream
 
 
@@ -69,6 +70,7 @@ MISSION_DEFAULTS = {
     "vision_width": "320",
     "steering_filter": "3",
     "min_radius": "1.2",          # --min-radius (so cones; 1.2 e o padrao do main.py)
+    "curve_lateral_accel": "0.45", # --curve-lateral-accel
     "curve_echo": True,           # False: --strict-ultrasonic (para em qualquer eco)
     "trim_learning": True,        # False: --no-trim-learning (trim da direcao fixo)
     "line_highcam": True,         # linha amarela com a camera alta; False: --line-classic
@@ -112,6 +114,12 @@ def build_main_command(options: dict) -> str:
     parts = ["python3 -u main.py", f"--navigation {o['navigation']}",
              f"--vision-width {o['vision_width']}", f"--steering-filter {o['steering_filter']}",
              f"--speed {o['speed']}"]
+    try:
+        curve_accel = float(str(o["curve_lateral_accel"]).replace(",", "."))
+    except ValueError:
+        curve_accel = 0.
+    if 0 < curve_accel < float("inf") and curve_accel != float(MISSION_DEFAULTS["curve_lateral_accel"]):
+        parts.append(f"--curve-lateral-accel {curve_accel:g}")
     try:
         seconds = float(str(o.get("mission_time", "")).replace(",", "."))
     except ValueError:
@@ -1404,11 +1412,13 @@ class RsyncGUI(tk.Tk):
         for index, (label, key, values, width) in enumerate((
                 ("Vel. máx. retas [m/s]:", "speed", SPEED_PRESETS, 6),
                 ("Curva mais fechada R [m]:", "min_radius", CURVE_RADII, 5),
+                ("Acel. lateral em curva [m/s²]:", "curve_lateral_accel", CURVE_ACCELS, 5),
                 ("Largura da visão:", "vision_width", VISION_WIDTHS, 5),
                 ("Filtro direção:", "steering_filter", STEERING_FILTERS, 4))):
             parent_row = row if index < 2 else row2
             ttk.Label(parent_row, text=label).pack(side="left", padx=(12 if index != 2 else 0, 4))
-            combo = ttk.Combobox(parent_row, textvariable=self.mission_vars[key], state="readonly",
+            state = "normal" if key == "curve_lateral_accel" else "readonly"
+            combo = ttk.Combobox(parent_row, textvariable=self.mission_vars[key], state=state,
                                  values=values, width=width)
             combo.pack(side="left")
             self.mission_combos = {**getattr(self, "mission_combos", {}), key: combo}

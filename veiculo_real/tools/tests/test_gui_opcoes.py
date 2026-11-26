@@ -82,6 +82,16 @@ class MissionOptionsTests(unittest.TestCase):
         self.assertNotIn("--line-classic", gui.build_main_command({"line_highcam": False}))  # so na linha
         self.assertFalse({"steering_law", "record_frames_hz", "cone_classifier", "cone_estimator"} & set(settings))
 
+    def test_curve_lateral_acceleration_reaches_the_follower(self):
+        self.assertEqual(float(gui.MISSION_DEFAULTS["curve_lateral_accel"]), mission.parameters["curve_lateral_accel"])
+        for navigation in ("cones", "line"):
+            opts = {"navigation": navigation, "curve_lateral_accel": "0,52"}
+            settings = {**mission.parameters, **parsed(gui.build_main_command(opts))}
+            follower = mission.RealStanleyFollower(mission.follower_config(settings, navigation, {}))
+            self.assertEqual(follower.lateral_accel, .52)
+        for value in ("", "abc", "0", "-1", "nan", "inf"):
+            self.assertNotIn("--curve-lateral-accel", gui.build_main_command({"curve_lateral_accel": value}))
+
     def test_comparison_switches_and_throttle_reach_main(self):
         """Rodada de testes: refino e partida nova liga/desliga, acelerador minimo."""
         self.assertNotIn("cone_refine_bases", parsed(gui.build_main_command({})))

@@ -123,7 +123,7 @@ class SignController:
     def __init__(self, actions=None, confirm_frames=2, approach_speed=.3, stop_gap_m=.08,
                  front_overhang_m=.07, reaction_s=.3, deceleration=1.75, hold_s=None, ignore_s=4.,
                  stop_at_m=0., wheelbase=.36, front_half_width_m=.25, max_frame_age=1.,
-                 confirm_window=None, approach_deceleration=0.):
+                 confirm_window=None, approach_deceleration=0., immediate_stop_m=0.):
         """stop_at_m: onde a FRENTE do carro para em relacao a placa (0: na altura
         dela; negativo: antes)."""
         self.actions = {}
@@ -139,6 +139,7 @@ class SignController:
         self.approach_deceleration = float(approach_deceleration)
         self.approach_speed = float(approach_speed)
         self.stop_gap_m = float(stop_gap_m)
+        self.immediate_stop_m = float(immediate_stop_m)
         self.front_overhang_m = float(front_overhang_m)
         self.reaction_s = float(reaction_s)
         self.deceleration = float(deceleration)
@@ -223,8 +224,8 @@ class SignController:
             return self.approach_speed
         # Termina APPROACH_CRAWL_S antes da distancia de parada: o carro so rola
         # para desacelerar, chega la ja em approach_speed e para no ponto certo.
-        room = max(0., remaining - self.braking_distance(self.approach_speed)
-                   - APPROACH_CRAWL_S*self.approach_speed)
+        final_distance = max(self.immediate_stop_m, self.braking_distance(self.approach_speed))
+        room = max(0., remaining - final_distance - APPROACH_CRAWL_S*self.approach_speed)
         return math.sqrt(self.approach_speed**2 + 2.*self.approach_deceleration*room)
 
     def _new_frame(self, markers, now):
@@ -298,7 +299,8 @@ class SignController:
         position = self._relative_position(pose) if self.state != "LIVRE" else None
         remaining, in_path = self._remaining(position, observation, pose, pose_at, now)
         if self.state == "APROXIMANDO":
-            if not math.isfinite(remaining) or remaining <= self.braking_distance(speed):
+            stop_distance = max(self.immediate_stop_m, self.braking_distance(speed))
+            if not math.isfinite(remaining) or remaining <= stop_distance:
                 self.stopped(now)
                 return SignCommand(self.state, 0., self.marker_id, message, True, remaining, in_path, position)
             return SignCommand(self.state, self.approach_limit(remaining), self.marker_id, message,

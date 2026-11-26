@@ -265,15 +265,31 @@ class SideSignTests(unittest.TestCase):
 
 class MissionTests(unittest.TestCase):
     """O laco de controle para perto do cone da placa e libera pelo botao."""
-    def test_mission_uses_coasting_deceleration_and_marker_size(self):
+    def test_mission_uses_aruco_stop_calibration_and_marker_size(self):
         import main
         self.assertEqual(main.aruco_every(main.parameters), 1)  # todo quadro (26/11)
         self.assertEqual(main.aruco_every({'aruco': False}), 0)
         signs = main.sign_controller(main.parameters, 'cones')
         self.assertEqual(signs.actions, {1: 'pare'})
         self.assertIsNone(main.sign_controller(main.parameters, 'line'))
-        self.assertEqual(signs.deceleration, main.parameters['coast_deceleration'])
+        self.assertEqual(signs.deceleration, main.parameters['aruco']['stop_deceleration'])
+        self.assertLess(signs.braking_distance(1.), .8)
         self.assertEqual(main.aruco_marker_m({'aruco': True}), .1)
+
+    def test_first_reading_far_away_keeps_going_but_close_stops_immediately(self):
+        import main
+        pose = (0., 0., 0.)
+        for x, expected in ((2.8, 'APROXIMANDO'), (.17, 'PARADO')):
+            with self.subTest(x=x):
+                marker = Marker(1, 320, 350, 20, x, .65)
+                signs = main.sign_controller(main.parameters, 'cones')
+                command = signs.update(seen(1., marker), 1., pose, lambda _: pose, .2)
+                self.assertEqual(command.state, expected)
+                if expected == 'APROXIMANDO':
+                    self.assertGreater(command.speed_limit, 1.)
+                else:
+                    self.assertTrue(command.stop)
+                    self.assertEqual(command.speed_limit, 0.)
 
     def test_steering_delay_command_line(self):
         import main
@@ -357,7 +373,7 @@ class EndToEndStopTests(unittest.TestCase):
         def step():
             car.t += .02
             target = max(0., car.vref)
-            car.v = target if target >= car.v else max(target, car.v - .5*.02)
+            car.v = target if target >= car.v else max(target, car.v - .9*.02)
             car.p = car.p + [car.v*.02, 0.]
             if 'data' in shared:
                 x_rel = cone_x - (car.p[0] + L) + .05
@@ -454,9 +470,8 @@ class EndToEndStopTests(unittest.TestCase):
         self.assertGreater(created[0].steer_delay, 0.)
 
     def test_fast_car_with_unreliable_detection_still_stops_at_the_sign(self):
-        # 26/11: a 1,5 m/s a placa nao parava o carro. Busca que acha a placa so
-        # 40% das vezes (como nos ensaios), 1,5 m/s: confirma (2 nas ultimas 4) e
-        # desce no perfil ate parar na altura da placa.
+        # A 1,5 m/s, com leitura intermitente, a placa vista de longe deve
+        # orientar a aproximacao e a frente do carro deve parar junto dela.
         import unittest.mock as um
         import main
         from fva_car.cones import ConeObservation
@@ -474,10 +489,10 @@ class EndToEndStopTests(unittest.TestCase):
                 self.assertEqual(self.car.v, 0.)
                 self.assertGreater(max(v for _, v, _ in self.history), 1.2)   # andou rapido antes
                 gap = 6. - (self.car.p[0] + .36 + .07)
-                self.assertTrue(-.05 < gap < .2, gap)
+                self.assertAlmostEqual(gap, 0., delta=.12)
 
     def test_sign_beside_the_track_on_both_sides(self):
         for side in (.9, -.8):
             gap, speed = self.run_to_stop(2.5, side, 0.)
             self.assertEqual(speed, 0.)
-            self.assertTrue(-.05 < gap < .2, gap)
+            self.assertAlmostEqual(gap, 0., delta=.12)

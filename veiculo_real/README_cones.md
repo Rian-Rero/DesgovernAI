@@ -485,7 +485,8 @@ Nos cones, `velocity_reference` (a velocidade da GUI) é a **velocidade máxima
 nas retas**. Quem decide quanto o carro corre em cada trecho:
 
 - **Curva vista** (prévia de 2,5 m): reduz antes dela, para fazer a curva com
-  `curve_lateral_accel` (0,4 m/s²).
+  `curve_lateral_accel` (0,45 m/s²). Ajuste em **Comandos → Opções da missão →
+  Acel. lateral em curva [m/s²]** ou use `--curve-lateral-accel 0.50`.
 - **Limite de visibilidade** (`min_curve_radius_m`, padrão 1,2 m, a pista de 10/11; `--min-radius`;
   na GUI, "Curva mais fechada"). A câmera vê ~2,5 m e o carro só rola para reduzir
   (~0,5 m/s²). Então ele supõe que, logo depois do trecho visto, pode vir a curva
@@ -520,7 +521,7 @@ passava de ~1,5 m/s (logs de 19/11: máximo 1,56 m/s; saturado, 1,0–1,2 m/s).
 | limite | valor hoje | de onde vem |
 |---|---|---|
 | teto pedido (GUI / `--speed`) | até 4,0 m/s | nas retas |
-| curva (`curve_lateral_accel` 0,4 m/s²) | √(0,4·R): R = 2 m → 0,9 m/s | prévia de 2,5 m |
+| curva (`curve_lateral_accel` 0,45 m/s²) | √(0,45·R): R = 2 m → 0,95 m/s | prévia de 2,5 m |
 | atraso da visão (0,5 m ÷ idade) | 220 ms → ~2,3 m/s | `latency_speed_budget_m` |
 | parada no alcance do ultrassom | **~2,8 m/s** | `ultrasonic_speed_cap` |
 
@@ -1278,8 +1279,11 @@ concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracad
    carro chegar. A posição dela fica guardada no referencial da odometria, com
    peso maior para as leituras de perto. Com uma curva válida, a distância até
    o ponto de parada é medida ao longo do traçado.
-4. **Parada:** o corte de tração é antecipado pela distância de desaceleração
-   em neutro. Com a placa lateral, o alvo é a **frente do carro na altura da
+4. **Parada:** o corte de tração leva em conta a velocidade medida e a
+   desaceleração em neutro (`aruco.stop_deceleration` de 0,85 m/s² e
+   `aruco.stop_reaction_s` de 0,10 s, ajustados pelos oito PARE do Archive (5)).
+   Dentro dos últimos 12 cm até o alvo (`aruco.immediate_stop_m`), corta a
+   tração imediatamente. Com a placa lateral, o alvo é a **frente do carro na altura da
    placa** (`stop_at_m` igual a 0). Com o cone à frente, o alvo visual fica
    8 cm antes do cone (`stop_gap_m`). O ultrassom mantém seu limiar normal.
 5. Mantém a direção seguindo o traçado com a tração em neutro, por 5 s a partir

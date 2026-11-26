@@ -211,7 +211,7 @@ parameters = {
     "steering_sign": 1.0,  # convencao do Car real: positivo para esquerda
     "steering_filter_size": 3,  # Stanley ja limita a taxa; reduz atraso extra do servo
     "curve_min_speed": 0.15,
-    "curve_lateral_accel": 0.4,
+    "curve_lateral_accel": 0.45,
     "vision_timeout": 1.0,  # segundos desde o inicio da captura
     # Perdendo a faixa, segue a ultima trajetoria vista (odometria) por ate
     # este numero de quadros seguidos sem deteccao (~16-20 quadros/s) antes de
@@ -317,7 +317,10 @@ parameters = {
     # approach_deceleration: a vref desce num perfil
     # (v^2 = approach_speed^2 + 2*a*distancia) em vez do degrau para approach_speed.
     "aruco": {"every": 1, "actions": {"1": "pare"}, "approach_speed": 0.3, "stop_gap_m": 0.08,
-              "confirm_frames": 1, "confirm_window": 4, "approach_deceleration": 0.4,
+              "confirm_frames": 1, "confirm_window": 4, "approach_deceleration": 0.55,
+              # Nos oito PARE do Archive (5), em neutro: 0,87-0,98 m/s^2.
+              # A posicao ja foi compensada pela odometria ate o ciclo atual.
+              "stop_deceleration": 0.85, "stop_reaction_s": 0.10, "immediate_stop_m": 0.12,
               # marker_height_m: altura do CENTRO do marcador (m). Com ela, a posicao
               # nao depende do tamanho (melhor para placa baixa). None: pelo tamanho.
               "marker_m": 0.10, "marker_height_m": None, "stop_at_m": 0.0, "front_half_width_m": 0.25,
@@ -646,11 +649,12 @@ def sign_controller(config, mode):
         approach_speed=float(value.get("approach_speed", 0.3)),
         confirm_frames=int(value.get("confirm_frames", 1)),
         confirm_window=int(value.get("confirm_window", 4)),
-        approach_deceleration=float(value.get("approach_deceleration", 0.4)),
+        approach_deceleration=float(value.get("approach_deceleration", 0.55)),
         stop_gap_m=float(value.get("stop_gap_m", 0.08)),
+        immediate_stop_m=float(value.get("immediate_stop_m", 0.12)),
         front_overhang_m=FRONT_OVERHANG_M,
-        reaction_s=STOP_REACTION_TIME + float(config.get("obstacle_confirm_s", 0.0) or 0.0),
-        deceleration=float(config.get("coast_deceleration", 0.5)),
+        reaction_s=float(value.get("stop_reaction_s", 0.10)),
+        deceleration=float(value.get("stop_deceleration", 0.85)),
         hold_s=value.get("hold_s"),
         ignore_s=float(value.get("ignore_s", 4.0)),
         stop_at_m=float(value.get("stop_at_m", 0.0)),
@@ -1538,6 +1542,9 @@ def main():
     parser.add_argument("--min-radius", type=float, metavar="R",
                         help="Cones: raio (m) da curva mais fechada da pista; limita a velocidade nas retas"
                              " (padrao 1.2; 0 desliga)")
+    parser.add_argument("--curve-lateral-accel", type=float, metavar="A",
+                        help="Aceleracao lateral de referencia nas curvas (m/s²)."
+                             f" Valores maiores permitem mais velocidade (padrao {parameters['curve_lateral_accel']:g})")
     parser.add_argument("--throttle-offset", type=float, metavar="U",
                         help="Acelerador minimo fixo com o carro andando (zona morta do ESC). Sem esta"
                              " opcao, o throttle e aprendido e salvo entre corridas (logs/acelerador.json)."
@@ -1640,6 +1647,10 @@ def main():
         if args.min_radius < 0:
             parser.error("--min-radius deve ser >= 0")
         settings["min_curve_radius_m"] = args.min_radius
+    if args.curve_lateral_accel is not None:
+        if not math.isfinite(args.curve_lateral_accel) or args.curve_lateral_accel <= 0:
+            parser.error("--curve-lateral-accel deve ser finito e maior que zero")
+        settings["curve_lateral_accel"] = args.curve_lateral_accel
     if args.throttle_offset is not None:
         if not 0. <= args.throttle_offset <= .6:
             parser.error("--throttle-offset deve estar entre 0 e 0.6")
