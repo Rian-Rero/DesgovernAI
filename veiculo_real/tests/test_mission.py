@@ -106,11 +106,11 @@ class MissionTests(unittest.TestCase):
         factory.assert_called_once()
         self.assertIsNone(factory.call_args.kwargs['corridor'])
         line_factory.assert_not_called()
-        # Cones: tolerancia propria com vref em rampa, sem esterco de busca.
+        # Cones: tolerancia propria para continuar a trajetoria prevista.
         self.assertEqual(captured['line_loss_frames'], mission.parameters['cone_loss_frames'])
         self.assertEqual(captured['line_loss_tolerance'], mission.parameters['cone_loss_tolerance'])
         self.assertGreater(captured['line_loss_frames'], 0)
-        self.assertTrue(captured['loss_speed_ramp'])
+        self.assertFalse(captured['loss_speed_ramp'])
         self.assertEqual(captured['line_search_rate_deg_s'], 0.)
         self.assertEqual(captured['max_lateral_jump_m'], mission.parameters['cone_max_lateral_jump_m'])
         self.car.close.assert_called_once()

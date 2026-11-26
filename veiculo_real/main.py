@@ -222,8 +222,8 @@ parameters = {
     # taxa, ate o batente: ~18 graus apos 8 quadros. 0 so segue a trajetoria.
     "line_search_rate_deg_s": 40.0,
     # Cones: perdendo o corredor, segue a trajetoria prevista por odometria por
-    # ate cone_loss_frames quadros (e cone_loss_tolerance s), reduzindo a vref
-    # em rampa ate curve_min_speed; depois neutraliza. 0 para no 1o quadro.
+    # ate cone_loss_frames quadros (e cone_loss_tolerance s); depois neutraliza.
+    # 0 para no 1o quadro sem referencia valida.
     "cone_loss_frames": 6,
     "cone_loss_tolerance": 0.6,
     # 0,12 m ficava abaixo do ruido metrico dos cones a 2-3 m: 31 "saltos"
@@ -835,7 +835,7 @@ def follower_config(config, mode, corridor):
         config["line_loss_tolerance"] = min(config.get("line_loss_tolerance", 1.0), 0.3)
         return config
     # Sem chaveamento para linha nem esterco de busca: durante a tolerancia
-    # apenas continua a trajetoria ja identificada, com a vref em rampa.
+    # continua a trajetoria ja identificada com a vref calculada pela curva.
     config["line_loss_frames"] = config.get("cone_loss_frames", 6)
     config["line_loss_tolerance"] = config.get("cone_loss_tolerance", 0.6)
     if corridor is not None:
@@ -853,7 +853,7 @@ def follower_config(config, mode, corridor):
     config["speed_sight_curvature"] = 1.0 / radius if radius > 0 and corridor is not None else 0.0
     config["line_search_rate_deg_s"] = 0.
     config["steering_start_distance_m"] = config.get("cone_steering_start_distance_m", 0.)
-    config["loss_speed_ramp"] = True
+    config.setdefault("loss_speed_ramp", False)
     config["max_lateral_jump_m"] = config.get("cone_max_lateral_jump_m", 0.12)
     config["max_heading_jump_rad"] = config.get("cone_max_heading_jump_rad", 0.35)
     return config

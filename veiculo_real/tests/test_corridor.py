@@ -160,6 +160,10 @@ class EstimatorTests(unittest.TestCase):
     def test_memory_then_lost(self):
         est = estimator(memory_m=.5)
         self.drive(est, [0., 0., 0., 0., WIDTH], frames=10)
+        left, right = cones(est.x)
+        observed = est.step(.95, left, right[:0], (0., 0., 0.), pose_frame=False)
+        self.assertEqual(observed.state, 'UMA_BORDA_RETA')
+        self.assertTrue(observed.valid)
         t = 1.
         travelled = 0.
         estimate = None
@@ -169,7 +173,9 @@ class EstimatorTests(unittest.TestCase):
             estimate = est.step(t, [], [], (.05, 0., 0.), pose_frame=False)
             self.assertEqual(estimate.state, 'MEMORIA')
             self.assertTrue(estimate.valid)
-            self.assertTrue(estimate.slow)
+            self.assertEqual(estimate.reference_state, observed.state)
+            self.assertEqual(estimate.speed_factor, observed.speed_factor)
+            self.assertEqual(estimate.slow, observed.slow)
         estimate = est.step(t + .05, [], [], (.1, 0., 0.), pose_frame=False)
         self.assertEqual(estimate.state, 'PERDIDO')
         self.assertFalse(estimate.valid)

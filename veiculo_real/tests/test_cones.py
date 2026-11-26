@@ -48,7 +48,10 @@ class ConeTests(unittest.TestCase):
 
     def test_corridor_estimator_drives_stanley_errors(self):
         calibration, frame = scene(offset=.08)
-        detector = RealConeDetector(calibration, settings={'track_width_cm': 100}, corridor=True)
+        odometry = Mock()
+        odometry.delta.return_value = (0., 0., 0.)
+        detector = RealConeDetector(calibration, settings={'track_width_cm': 100, 'tracking': False},
+                                    corridor=True, odometry=odometry)
         for k in range(4):
             observation = detector.observe_frame(frame, 10. + .1*k)
         self.assertTrue(observation.valid, observation.reason)
@@ -60,13 +63,15 @@ class ConeTests(unittest.TestCase):
         self.assertEqual(observation.speed_factor, 1.)
         self.assertAlmostEqual(observation.corridor_width_m, 1., delta=.08)
         self.assertEqual(detector.with_preview(observation).frame.shape, frame.shape)
-        # Sem cones: segue a memoria (sem odometria, parado) e reduz a velocidade.
+        # A trajetoria valida mantem os limites de velocidade em quadros vazios.
         empty = np.full_like(frame, 35)
-        observation = detector.observe_frame(empty, 10.5)
-        self.assertTrue(observation.valid, observation.reason)
-        self.assertEqual(observation.debug['corridor']['state'], 'MEMORIA')
-        self.assertLess(observation.speed_factor, 1.)
-        self.assertEqual(observation.speed_limit, CONE_RECOVERY_SPEED)
+        odometry.delta.return_value = (.02, 0., 0.)
+        for k in range(5):
+            remembered = detector.observe_frame(empty, 10.5 + .1*k)
+            self.assertTrue(remembered.valid, remembered.reason)
+            self.assertEqual(remembered.debug['corridor']['state'], 'MEMORIA')
+            self.assertEqual(remembered.speed_factor, observation.speed_factor)
+            self.assertEqual(remembered.speed_limit, observation.speed_limit)
 
     def test_corridor_estimator_rejects_unknown_settings(self):
         calibration, _ = scene()
@@ -254,6 +259,27 @@ class ConeTests(unittest.TestCase):
         self.assertFalse(follower.apply(car, LineObservation(timestamp=10.4, reason='sem cones'), 10.4))
         self.assertEqual(car.vref, 0.)
         self.assertFalse(follower.last_state['active'])
+
+    def test_cone_mode_keeps_curve_speed_during_hold(self):
+        settings = mission.follower_config({'velocity_reference': 1.5, 'speed_filter_s': 0}, 'cones', None)
+        follower = RealStanleyFollower(settings)
+        car = fake_car()
+        curvature = .8
+        car.v = 0.
+        self.assertTrue(follower.apply(car, LineObservation(10., errors=(0., 0., curvature)), 10.))
+        curve_speed = math.sqrt(follower.lateral_accel / curvature)
+        self.assertAlmostEqual(car.vref, curve_speed)
+        for frame in range(1, follower.loss_frames + 1):
+            now = 10. + .05*frame
+            self.assertTrue(follower.apply(car, LineObservation(now), now))
+            self.assertTrue(follower.last_state['hold'])
+            self.assertEqual(follower.last_state['hold_speed_factor'], 1.)
+            self.assertAlmostEqual(car.vref, curve_speed)
+        follower.external_speed_limit = .25
+        self.assertTrue(follower.apply(car, LineObservation(now), now + .01))
+        self.assertAlmostEqual(car.vref, .25)
+        self.assertFalse(follower.apply(car, LineObservation(now + .05), now + .05))
+        self.assertEqual(car.vref, 0.)
 
     def test_line_mode_keeps_full_speed_during_hold(self):
         car = fake_car()

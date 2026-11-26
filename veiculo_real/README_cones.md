@@ -2,10 +2,12 @@
 
 O modo padrão `--navigation cones` usa somente cones. Não há alternância
 para linha amarela. Se o detector perder a referência métrica de cones, o
-controle segue a trajetória já identificada por até `cone_loss_frames`
-quadros (padrão 6) e `cone_loss_tolerance` segundos (padrão 0,6), reduzindo
-a vref em rampa até `curve_min_speed`. Se a perda continuar, neutraliza os
-comandos. O modo de linha continua disponível apenas por seleção explícita com
+estimador segue a trajetória já identificada pela odometria enquanto a memória
+do corredor for válida. O contador de quadros só limita o *hold* do Stanley
+quando o estimador deixa de fornecer uma referência válida. Até esse limite,
+a vref continua sendo calculada pela trajetória, pela confiança da referência
+e pelos limites de velocidade ativos. Esgotado o *hold*, o controle neutraliza
+os comandos. O modo de linha é selecionado explicitamente com
 `--navigation line`.
 
 A GUI `tools/fva_gui_um_carro.py` já inicia nesse modo com `--stream 8080`.
@@ -65,11 +67,12 @@ próxima curva. O rastreamento e a memória são os mesmos da
 interface: cones persistem por até 350 ms; uma borda visível pode usar a largura
 aprendida por até 1500 ms, sujeita ao limite de confiança. `tracking=False`
 desativa essa estimativa. Quando não resta uma referência de cones válida, o
-Stanley entra em *hold*. Prevê a trajetória por odometria, sem esterço de busca,
-e reduz a vref em rampa. Também descarta saltos impossíveis entre quadros
+Stanley entra em *hold* e prevê a trajetória por odometria, sem esterço de busca.
+Também descarta saltos impossíveis entre quadros
 (`cone_max_lateral_jump_m` 0,25 m, `cone_max_heading_jump_rad` 0,35 rad).
 Esgotada a tolerância, neutraliza os comandos. `--loss-frames N` ajusta a
-tolerância. Com `--loss-frames 0`, para no primeiro quadro perdido. Sem o estimador
+tolerância do *hold*. Com `--loss-frames 0`, o seguidor exige uma referência
+válida do detector ou do estimador em cada quadro. Sem o estimador
 (`cone_estimator: False`), o adaptador calcula os erros do Stanley junto ao eixo
 dianteiro a partir do centro métrico de cada quadro.
 
@@ -125,7 +128,7 @@ distância: 1 px ≈ 5 cm a 2,5 m, e 1° de arfagem desloca ~10 linhas. Por isso
 | `AMBAS` | cones dos dois lados | ×1 |
 | `SO_EXTERNA` / `SO_INTERNA` | uma cor só, na curva (a de fora / a de dentro) | ×0,8 |
 | `UMA_BORDA_RETA` | uma cor só, \|κ\| < 0,15 | ×0,85 |
-| `MEMORIA` | nenhum cone aceito; segue a previsão por até `memory_m` (0,8 m) / 1 s | ×0,6 e teto de 0,35 m/s |
+| `MEMORIA` | nenhum cone aceito, trajetória propagada por até 0,8 m (`memory_m`) e 2,5 s (`memory_s`) por padrão | limites da última referência visual válida e da incerteza no eixo |
 | `PERDIDO` | além disso | neutro |
 
 - **Liberação**: o critério é a incerteza lateral do centro **1 m à frente**
@@ -488,8 +491,9 @@ nas retas**. Quem decide quanto o carro corre em cada trecho:
   (~0,5 m/s²). Então ele supõe que, logo depois do trecho visto, pode vir a curva
   mais fechada da pista, e corre só o que ainda deixa rolar até a velocidade
   dela. Na reta, isso dá ~1,6 m/s.
-- **Confiança**: com uma borda só, o teto é de 0,9 m/s (`one_border_speed`); na
-  memória ou com incerteza alta, 0,35 m/s; perdido, para.
+- **Confiança**: com uma borda só, o teto é de 0,9 m/s (`one_border_speed`).
+  Com incerteza alta, vale o teto de 0,35 m/s. A memória mantém os limites da
+  referência visual que gerou o trajeto, enquanto ele for válido.
 
 Na pista virtual, com vref 2,0 contra 0,7 hoje, a volta ficou de 26 a 46% mais
 rápida (retas longas: 52 → 30 s). Não houve toques, o erro foi de 2–4 cm RMS e a

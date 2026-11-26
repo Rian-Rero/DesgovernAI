@@ -44,7 +44,7 @@ import numpy as np
 # MAPA: tracado pelo mapa (SLAM + SVM, map_path.py) com o estimador sem cones suficientes.
 STATES = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA', 'PERDIDO', 'LINHA', 'MAPA')
 SPEED_FACTOR = {'MAPA': .7, 'LINHA': 1., 'AMBAS': 1., 'SO_EXTERNA': .8, 'SO_INTERNA': .8, 'UMA_BORDA_RETA': .85,
-                'MEMORIA': .6, 'PERDIDO': 0.}
+                'MEMORIA': 0., 'PERDIDO': 0.}
 E, PSI, KAPPA, DKAPPA, WIDTH = range(5)
 # Linha central amostrada de -1 a 4,5 m de caminho (a camera ve ate ~3 m).
 ARC = np.arange(-1., 4.5 + 1e-9, .05)
@@ -124,10 +124,7 @@ class CorridorSettings:
     # Cones para (re)comecar quando a largura da pista ja foi aprendida nesta
     # corrida (sem ela, sempre 3). Ver _initialize.
     restart_cones: float = 2.
-    # Tempo maximo sem cones aceitos. Era 1 s: numa curva fechada os cones saem da
-    # imagem e o carro desacelera (MEMORIA, 0,1-0,4 m/s); no ensaio 20261117_205307
-    # o tempo venceu com 22 cm andados e o carro parou de vez. A distancia
-    # (memory_m) continua sendo o limite de seguranca.
+    # Tempo maximo sem cones aceitos. A memoria tambem expira por distancia.
     memory_s: float = 2.5
     # Liberacao do controle: incerteza lateral da linha central a check_distance_m
     # a frente (onde o carro estara em ~1 s), nao no eixo. Com so cones distantes
@@ -191,10 +188,15 @@ class CorridorEstimate:
     slow: bool = False             # incerteza alta: limitar a velocidade
     near_uncertain: bool = False   # eixo incerto (sigma e > near_sigma_e): mirar longe
     learned_width_m: float = math.nan  # largura aprendida nesta corrida (nan: ainda nao medida)
+    remembered_state: str | None = None  # origem da trajetoria em MEMORIA
+
+    @property
+    def reference_state(self):
+        return self.remembered_state or self.state
 
     @property
     def speed_factor(self):
-        return SPEED_FACTOR[self.state]
+        return SPEED_FACTOR[self.reference_state]
 
     def debug(self):
         r = lambda v, d=3: None if v is None or not math.isfinite(v) else round(float(v), d)
@@ -350,6 +352,7 @@ class CorridorEstimator:
         self.P = None
         self.last_time = None
         self.last_update_time = None
+        self.last_visual_estimate = None
         self.blind_m = 0.
         self.bad_frames = 0
         self.used_center = 0
@@ -657,12 +660,15 @@ class CorridorEstimator:
         # para liberar a partida e com cones, e o limite e memory_m.
         uncertain = ((state != 'MEMORIA' and lateral_sigma > cfg.max_sigma_lateral)
                      or sigma[E] > cfg.max_sigma_e or sigma[PSI] > cfg.max_sigma_psi)
-        valid = state != 'PERDIDO' and not uncertain
+        remembered = self.last_visual_estimate if state == 'MEMORIA' else None
+        valid = state != 'PERDIDO' and not uncertain and (state != 'MEMORIA' or remembered is not None)
         if state == 'PERDIDO':
             reason = f'Corredor perdido: {self.blind_m:.2f} m sem cones aceitos'
         elif uncertain:
             reason = (f'Corredor incerto (sigma lateral a {cfg.check_distance_m:.1f} m={lateral_sigma:.2f} m,'
                       f' eixo={sigma[E]:.2f} m, rumo={sigma[PSI]:.2f} rad)')
+        elif not valid:
+            reason = 'Corredor sem trajetoria visual valida na memoria'
         else:
             reason = {'LINHA': 'Linha amarela (estimador)', 'AMBAS': 'Corredor pelas duas bordas',
                       'SO_EXTERNA': 'Corredor pela borda externa da curva',
@@ -670,12 +676,18 @@ class CorridorEstimator:
                       'UMA_BORDA_RETA': 'Corredor por uma borda (reta)',
                       'MEMORIA': f'Corredor pela memoria ({self.blind_m:.2f} m sem cones)'}[state]
         errors = (float(self.x[E]), float(self.x[PSI]), float(self.x[KAPPA])) if valid else None
+        # Continuidade da mesma trajetoria: conserva a cautela da ultima
+        # observacao e o teto por incerteza do eixo durante a propagacao.
+        slow_path = remembered.slow if remembered is not None else (
+            lateral_sigma > cfg.slow_sigma_lateral or width_guessed)
         estimate = CorridorEstimate(valid, state, errors, float(self.x[WIDTH]), sigma, (used_left, used_right),
                                     rejected, self.blind_m, reason, tuple(float(v) for v in self.x),
-                                    slow=valid and (state == 'MEMORIA' or lateral_sigma > cfg.slow_sigma_lateral
-                                                    or sigma[E] > cfg.slow_sigma_e or width_guessed),
+                                    slow=valid and (slow_path or sigma[E] > cfg.slow_sigma_e),
                                     near_uncertain=valid and sigma[E] > cfg.near_sigma_e,
-                                    learned_width_m=math.nan if self.learned_width is None else self.learned_width)
+                                    learned_width_m=math.nan if self.learned_width is None else self.learned_width,
+                                    remembered_state=remembered.state if remembered is not None else None)
+        if state != 'MEMORIA':
+            self.last_visual_estimate = estimate if valid else None
         if state == 'PERDIDO':
             self.reset()
         return estimate

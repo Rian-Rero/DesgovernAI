@@ -539,7 +539,7 @@ class RealConeDetector:
             speed_factor = estimate.speed_factor if valid else 1.
             if valid:
                 path_dkappa = float(estimate.state_vector[3])
-                if estimate.state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA'):
+                if estimate.reference_state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA'):
                     speed_cap = self.corridor.settings.one_border_speed
                 one_border_curve = estimate.state in ('SO_EXTERNA', 'SO_INTERNA')
                 sigma_e = float(estimate.sigma[0])

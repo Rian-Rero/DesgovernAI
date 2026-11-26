@@ -473,7 +473,7 @@ def run(track, config, corridor=None, seed=0, fps=15., latency=(.12, .18), durat
             states[estimate.state] += 1
             valid += estimate.valid
             ready = now + rng.uniform(*latency)
-            one_border = estimate.valid and estimate.state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA')
+            one_border = estimate.valid and estimate.reference_state in ('SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA')
             fields = dict(speed_factor=estimate.speed_factor if estimate.valid else 1.,
                           one_border_curve=estimate.valid and estimate.state in ('SO_EXTERNA', 'SO_INTERNA'),
                           path_dkappa=float(estimate.state_vector[3]) if estimate.valid else math.nan,
