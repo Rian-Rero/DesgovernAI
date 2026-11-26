@@ -21,7 +21,7 @@ import math
 
 import numpy as np
 
-from .corridor import sample_centerline
+from .corridor import move_states, offsets, sample_centerline
 
 # HC-SR04: feixe nominal de +-15 graus, mas cone perto e de lado ecoa ate ~+-35.
 BEAM_HALF_DEG = 35.
@@ -39,6 +39,7 @@ STRAIGHT_RANGE_TOLERANCE_M = .25
 SENSOR_X_M = 0.           # ultrassom (embaixo da camera) na linha do eixo dianteiro (medido em 19/11)
 MAX_AGE_S = .5            # estado da visao mais velho que isto nao serve
 ONE_OR_TWO_BORDERS = ('AMBAS', 'SO_EXTERNA', 'SO_INTERNA', 'UMA_BORDA_RETA', 'MEMORIA')
+RESUME_ECHO_TOLERANCE_M = .12
 
 
 def border_echo(distance, state_vector, sensor_x=SENSOR_X_M, beam_half_deg=BEAM_HALF_DEG,
@@ -58,21 +59,74 @@ def border_echo(distance, state_vector, sensor_x=SENSOR_X_M, beam_half_deg=BEAM_
     return None
 
 
+def _visible_cones(observation):
+    debug = getattr(observation, 'debug', None) or {}
+    detection = debug.get('detection') or {}
+    points = [p for color in ('green', 'red') for p in ((detection.get(color) or {}).get('m') or [])]
+    return points + list(debug.get('map_cones') or [])
+
+
 def real_cone_echo(distance, observation, speed, age, min_lateral_m=STRAIGHT_MIN_LATERAL_M,
                    max_bearing_deg=STRAIGHT_MAX_BEARING_DEG, tolerance=STRAIGHT_RANGE_TOLERANCE_M):
     """(x, y) de um cone visto (quadro ou mapa SLAM) na distancia do eco e ao lado do
     caminho reto (|y| >= min_lateral_m), ou None."""
-    debug = getattr(observation, 'debug', None) or {}
-    detection = debug.get('detection') or {}
-    points = [p for color in ('green', 'red') for p in ((detection.get(color) or {}).get('m') or [])]
-    points += list(debug.get('map_cones') or [])
     travelled = max(0., speed)*age
-    for x, y in points:
+    for x, y in _visible_cones(observation):
         x = float(x) - travelled - SENSOR_X_M   # o carro andou desde a foto
         rng, bearing = math.hypot(x, y), math.degrees(math.atan2(abs(y), x))
         if x > 0 and abs(rng - distance) <= tolerance and abs(y) >= min_lateral_m and bearing <= max_bearing_deg:
             return x, float(y)
     return None
+
+
+def sign_echo_matches(distance, position):
+    if position is None:
+        return False
+    x, y = position[0] - SENSOR_X_M, position[1]
+    return (x > 0 and abs(y) <= x and abs(math.hypot(x, y) - distance) <= RESUME_ECHO_TOLERANCE_M)
+
+
+def resume_border_echo(distance, observation, steer_rad, now, wheelbase, front_overhang,
+                       motion=None, sign_position=None):
+    """Na saida do PARE, associa o eco a um cone real e testa a folga do carro."""
+    corridor = getattr(observation, 'corridor', None)
+    if (corridor is None or not corridor.valid or corridor.state not in ONE_OR_TWO_BORDERS
+            or corridor.state_vector is None or not 0. <= now - observation.timestamp <= MAX_AGE_S
+            or not math.isfinite(steer_rad)
+            or (motion is None and now - observation.timestamp > .12)):
+        return False, 'sem geometria confiavel para a retomada'
+    vector = corridor.state_vector
+    cones = np.asarray(_visible_cones(observation), float).reshape(-1, 2)
+    if motion is not None:
+        dx, dy, angle = motion  # eixo traseiro na foto -> eixo traseiro agora
+        c, s = math.cos(angle), math.sin(angle)
+        front = np.array([dx + wheelbase*(c - 1), dy + wheelbase*s])
+        vector = move_states(vector, *front, angle)[0]
+        cones = (cones - front) @ np.array([[c, -s], [s, c]])
+    if sign_position is not None:
+        cones = np.vstack((cones, sign_position))
+
+    matches = cones[[sign_echo_matches(distance, cone) for cone in cones]]
+    if not len(matches):
+        return False, 'eco sem cone identificado na distancia medida'
+    cross, _, _, _ = offsets(matches, vector)
+    if np.any(np.abs(cross) < max(STRAIGHT_MIN_LATERAL_M, vector[4]/2 - .18)):
+        return False, 'eco compativel com ponto dentro do corredor'
+
+    # Amostra o eixo da carroceria (eixo traseiro ate a frente) nas proximas
+    # poses dadas pelo esterco atual. A distancia inclui o arrasto da traseira.
+    advance = np.linspace(0., distance + .25, 25)
+    curvature = math.tan(steer_rad) / wheelbase
+    heading = advance * curvature
+    rear = np.column_stack((advance*np.sinc(heading/np.pi) - wheelbase,
+                            .5*advance*heading*np.sinc(heading/(2*np.pi))**2))
+    tangent = np.column_stack((np.cos(heading), np.sin(heading)))
+    delta = matches[:, None, :] - rear
+    along = np.clip(np.einsum('cij,ij->ci', delta, tangent), 0., wheelbase + front_overhang)
+    clearance = np.min(np.linalg.norm(delta - along[:, :, None]*tangent, axis=-1))
+    if clearance < STRAIGHT_MIN_LATERAL_M:
+        return False, 'cone dentro da trajetoria da carroceria na retomada'
+    return True, 'eco associado a cone da borda, fora da trajetoria de retomada'
 
 
 def curve_echo(distance, observation, steer_rad, speed, now):

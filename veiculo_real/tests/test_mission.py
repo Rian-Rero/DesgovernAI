@@ -258,7 +258,7 @@ class MissionTests(unittest.TestCase):
             stamp = 10. + self.car.t
             markers = (Marker(1, 320., 350., 80.).to_tuple(),) if self.car.t <= 2. else ()
             self.vision_data['observation'] = ConeObservation(
-                stamp, errors=(.1, 0., 0.), markers=markers,
+                stamp, errors=(.1, 0., .55), markers=markers,
                 marker_timestamp=stamp, marker_scan=int(self.car.t))
             if self.car.t == 4.:
                 mission.RESUME_REQUEST.set()
@@ -270,9 +270,11 @@ class MissionTests(unittest.TestCase):
             mission.run_mission(dict(self.settings, ts=5., navigation_mode='cones', save=False),
                                 car_factory=lambda _: self.car, clock=lambda: 10. + self.car.t)
         logs = [call.kwargs for call in self.car.log.call_args_list if 'aruco_state' in call.kwargs]
-        self.assertEqual([log['aruco_state'] for log in logs], [0, 2, 2, 3])
+        self.assertEqual([log['aruco_state'] for log in logs], [2, 2, 2, 3])
         control = [call.kwargs for call in self.car.log.call_args_list if 'steer_cmd_rad' in call.kwargs]
-        self.assertEqual([(log['vref'], log['u']) for log in control[1:3]], [(0., 0.), (0., 0.)])
+        self.assertEqual([(log['vref'], log['u']) for log in control[:3]], [(0., 0.)]*3)
+        self.assertGreater(control[2]['steer_cmd_rad'], 0.)
+        self.assertGreaterEqual(control[-1]['steer_cmd_rad'], control[2]['steer_cmd_rad'])
         self.assertGreater(control[-1]['vref'], 0.)
 
     def test_interface_releases_the_obstacle_stop(self):

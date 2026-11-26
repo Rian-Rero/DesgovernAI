@@ -1199,7 +1199,7 @@ class RealStanleyFollower:
         moved = move_states([*errors, dkappa, 1.], dx, dy, dth, self.max_curvature)[0]
         return float(moved[0]), float(moved[1]), float(moved[2])
 
-    def apply(self, car, observation, now, obstacle_detected=False):
+    def apply(self, car, observation, now, obstacle_detected=False, *, sign_hold=False, coast=False):
         """Retorna True quando uma observacao atual, ou a faixa vista ha no maximo
         line_loss_frames quadros (e line_loss_tolerance segundos), autoriza seguir."""
         age = float('nan')
@@ -1368,15 +1368,26 @@ class RealStanleyFollower:
                 speed_raw = min(speed_raw, max(self.min_speed, self.latency_budget/max(self.age_average, .05)))
             limit = min(speed_limit, self.line_speed_limit, self.safe_speed, self.external_speed_limit)
             speed_raw = min(speed_raw, limit)
-            car.set_vel(min(self._filter_speed(speed_raw, car.dt, getattr(car, 'v', 0.)), limit))
+            target = min(self._filter_speed(speed_raw, car.dt, car.v), limit)
+            if sign_hold or coast:
+                car._set_ref(0. if sign_hold else target)
+                car.vel_error_integral = 0.
+                car.set_u(0.)
+            else:
+                car.set_vel(target)
             active = bool(getattr(car, 'encoder_valid', True))
             stanley_speed = car.vref if self.use_vref else self._filter_measured_speed(car.v, car.dt)
+            if sign_hold:
+                # Mantem a direcao da curva com o carro parado, evitando a
+                # amplificacao do erro transversal do Stanley perto de v = 0.
+                stanley_speed = max(stanley_speed, .3)
             reference_valid = (isinstance(stanley_speed, (int, float, np.number))
                                and math.isfinite(stanley_speed))
             active = active and reference_valid
             dkappa = self.path_dkappa if math.isfinite(self.path_dkappa) else 0.
             straight = max(abs(curvature), abs(curvature + 1.5*dkappa)) < self.centering_max_curvature
-            if ((self.centering_gain > 0 or self.centering_steer_gain > 0) and line_seen and not holding and not search and straight
+            if ((self.centering_gain > 0 or self.centering_steer_gain > 0) and line_seen and not sign_hold
+                    and not holding and not search and straight
                     and self.line_speed_factor >= .999 and abs(lateral) < .4
                     and abs(float(car.v)) >= self.centering_min_speed):
                 learn = self.centering_gain*lateral + self.centering_steer_gain*self.controller.steer

@@ -13,6 +13,7 @@ import queue
 import signal
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -22,6 +23,17 @@ from .lateral import LineObservation
 _EMPTY_MASK = np.zeros((0, 0), np.uint8)
 # Horario do driver aceito se o quadro chegou ate isto antes do fim do read().
 MAX_DRIVER_DELAY_S = 0.5
+
+
+def publish_observation(vision_data, observation):
+    """Entrega a geometria mais recente e preserva leituras positivas de placa."""
+    pending = vision_data.get("marker_observations") if isinstance(vision_data, dict) else None
+    if (pending is not None and getattr(observation, "markers", ())
+            and observation.marker_timestamp == observation.timestamp):
+        pending.append(SimpleNamespace(timestamp=observation.timestamp,
+                                       marker_timestamp=observation.marker_timestamp,
+                                       marker_scan=observation.marker_scan, markers=observation.markers))
+    vision_data["observation"] = observation
 
 
 def frame_time(car, read_started, read_ended):
@@ -102,7 +114,7 @@ def vision_func(
             print(f"Visao interrompida: {error}", flush=True)
             return
         # Erros, imagem e horario pertencem ao mesmo frame.
-        vision_data["observation"] = observation
+        publish_observation(vision_data, observation)
         if frame is None:
             stop_event.wait(0.02)
 
@@ -529,7 +541,7 @@ class VisionProcess:
                         self.frames_lost += 1  # vaga reescrita: segue sem a imagem
                     observation = replace(observation, source_frame=frame)
                 self.frames_received += 1
-                self.vision_data["observation"] = observation
+                publish_observation(self.vision_data, observation)
 
     def is_alive(self):
         return (self.process.is_alive() and self.receiver is not None and self.receiver.is_alive())

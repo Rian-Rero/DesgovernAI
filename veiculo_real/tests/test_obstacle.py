@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fva_car.corridor import CorridorEstimate  # noqa: E402
-from fva_car.obstacle import border_echo, curve_echo, real_cone_echo  # noqa: E402
+from fva_car.obstacle import border_echo, curve_echo, real_cone_echo, resume_border_echo  # noqa: E402
 import test_mission  # noqa: E402  (modulo, nao a classe: senao o unittest roda os testes dela de novo)
 mission = test_mission.mission
 
@@ -97,6 +97,21 @@ class StraightBorderEchoTests(unittest.TestCase):
 
     def test_cone_on_the_axis_does_not_count(self):
         self.assertIsNone(real_cone_echo(1., self.straight(cones=[(1.05, .1)]), 0., 0.))
+
+
+class ResumeBorderEchoTests(unittest.TestCase):
+    def test_echo_must_match_a_cone_outside_the_swept_path(self):
+        obs = observation((.22, .08, .65, 0., 1.3), state='SO_EXTERNA')
+        side = (.52, -.39)
+        distance = math.hypot(*side)
+        check = lambda steer, stamp=10.05: resume_border_echo(distance, obs, steer, stamp, .36, .07)[0]
+        self.assertFalse(check(.24))   # nenhuma associacao com o corredor desenhado sozinho
+        obs.debug = {'map_cones': [side]}
+        self.assertTrue(check(.24))
+        self.assertFalse(check(-.30))  # virando para o cone
+        self.assertFalse(check(.24, 10.55))  # quadro antigo
+        obs.debug['map_cones'].append((distance, 0.))
+        self.assertFalse(check(.24))   # segundo eco possivel no meio
 
 
 class MissionWiringTests(unittest.TestCase):

@@ -1254,15 +1254,17 @@ concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracad
 ### Placas ArUco (PARE)
 
 `fva_car/aruco.py`, dicionário 5×5 (IDs 0–99), o mesmo do `camera.py`.
-- **Busca:** a cada 2 quadros na imagem cheia (~1,3 ms no notebook).
+- **Busca:** em todo quadro na resolução da câmera. Quando falta o ID 1,
+  repete a busca ampliando a região inferior para recuperar marcas pequenas.
 - **No vídeo:** as placas aparecem com um quadrado magenta e o ID.
 - **Ação por ID:** `aruco.actions` no `main.py`, decidida num `match`/`case`.
   Hoje só a ID 1 tem ação (`"pare"`); `"ignorar"` só registra.
 
 **PARE (ID 1), placa lateral ou cone à frente:**
-1. A placa precisa aparecer em duas buscas seguidas. Com a posição estimada,
-   o carro reduz para 0,3 m/s (`approach_speed`). Se confirmar o ID sem
-   conseguir localizar a placa, corta a tração imediatamente.
+1. Uma leitura válida do ID 1 aciona a aproximação. A leitura positiva chega
+   ao controle mesmo se o quadro seguinte vier sem placa. Com posição estimada,
+   a velocidade desce em direção a 0,3 m/s (`approach_speed`). Com o ID
+   confirmado e sem posição utilizável, a tração é cortada imediatamente.
 2. **Onde está a placa** (`fva_car/camera_pose.py`):
    - a calibração guarda só a homografia do chão; dela sai o foco da câmera
      (521 px, 63° de campo) e a altura dela (~25 cm);
@@ -1274,13 +1276,15 @@ concordando antes de mudar foi pior (pedaladas 48 → 39 só). `--memoria-tracad
      e a calibração da câmera.
 3. **Lembrada pela odometria:** a placa ao lado sai da imagem ~1,5 m antes de o
    carro chegar. A posição dela fica guardada no referencial da odometria, com
-   peso maior para as leituras de perto, e o carro segue contando quanto falta.
+   peso maior para as leituras de perto. Com uma curva válida, a distância até
+   o ponto de parada é medida ao longo do traçado.
 4. **Parada:** o corte de tração é antecipado pela distância de desaceleração
    em neutro. Com a placa lateral, o alvo é a **frente do carro na altura da
    placa** (`stop_at_m` igual a 0). Com o cone à frente, o alvo visual fica
    8 cm antes do cone (`stop_gap_m`). O ultrassom mantém seu limiar normal.
-5. Fica parado até **🔓 Liberar parada** (ou `--pare-segundos S`) e depois
-   ignora a placa por 4 s.
+5. Mantém a direção seguindo o traçado com a tração em neutro, por 5 s a partir
+   da parada por padrão (`--pare-segundos S`). O botão **Liberar parada** antecipa
+   a retomada. Na saída, a mesma placa fica ignorada por 4 s.
 
 **Medir antes do ensaio:** o lado do **quadrado preto** do marcador impresso
 (`marker_m`, padrão 0,10 m; `--placa-lado 0.12`). Um erro de 20% no tamanho
@@ -1629,10 +1633,10 @@ máquina.
   sozinho e ignora a mesma placa por `ignore_s`.
 - **Antes do tempo:** o botão "Liberar parada" libera na hora.
 - **Linha de comando:** `--pare-segundos S` (0 = só pelo botão).
-- **Ultrassom ao seguir:** placa ao lado ganha a mesma carência de 2 s do
-  botão, para o ultrassom não travar no cone da borda. Placa num cone **à
-  frente** não ganha carência: seguir bateria no cone, então o ultrassom
-  trava a parada.
+- **Ultrassom ao seguir:** permanece ativo. Para descartar um eco, a distância
+  precisa coincidir com um cone lateral identificado e a trajetória prevista
+  da carroceria precisa passar com folga. Ecos sem associação e cones no
+  caminho ainda podem travar a parada.
 - **Bipe** (`STOP_BEEPS` no `main.py`):
   - **placa: um bipe LONGO (0,7 s) a cada 1,5 s**;
   - ultrassom: dois curtos por segundo, como antes.
@@ -1682,7 +1686,8 @@ Testado e **não** adotado:
   das buscas a achavam (a 0,64 m/s, 2 de 9). O quadrado impresso tem ~6 cm.
   Exigir 2 acertos **seguidos** quase nunca confirmaria a 1,5 m/s.
   - Agora busca em **todo** quadro (`every` 1; custo medido no Pi ~5 ms).
-  - Confirma com **2 acertos nas últimas 4 buscas**.
+  - Depois desses ensaios, a configuração passou a aceitar **uma leitura válida**
+    e a guardar leituras positivas para evitar que um quadro sem placa as sobrescreva.
   - No teste de ponta a ponta, a 1,5 m/s com 40% de acerto: para em todas as
     corridas, com a frente a 8 cm da placa.
 - **Aproximação suave.** A referência caía em degrau para 0,3 m/s. Agora desce

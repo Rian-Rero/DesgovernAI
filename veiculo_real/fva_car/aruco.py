@@ -28,10 +28,13 @@ import math
 import cv2
 import numpy as np
 
+from .corridor import offsets
+
 ACTIONS = ("pare", "ignorar")
 STILL_SPEED = .05      # m/s: abaixo disto o carro esta parado (conta hold_s)
 STILL_TIMEOUT_S = 3.   # s: sem chegar a STILL_SPEED, conta hold_s depois disto
 APPROACH_CRAWL_S = .6  # s em approach_speed no fim do perfil de aproximacao
+DISTINCT_SIGN_M = 1.0  # tolerancia da localizacao de leituras da mesma placa
 STATES = ("LIVRE", "APROXIMANDO", "PARADO", "SAINDO")
 
 
@@ -58,27 +61,49 @@ class ArucoDetector:
     """Marcadores ArUco de um quadro BGR (OpenCV novo ou antigo)."""
     def __init__(self, dictionary=None):
         dictionary = cv2.aruco.DICT_5X5_100 if dictionary is None else dictionary
+        self._detect = self._detector(dictionary)
+        self._detect_small = self._detector(dictionary, small=True)
+
+    @staticmethod
+    def _detector(dictionary, small=False):
+        aruco = cv2.aruco
+        parameters = (aruco.DetectorParameters() if hasattr(aruco, "DetectorParameters")
+                      else aruco.DetectorParameters_create())
+        if small:
+            parameters.minMarkerPerimeterRate = .018
+            parameters.adaptiveThreshWinSizeMax = 19
+            parameters.adaptiveThreshWinSizeStep = 4
+            parameters.polygonalApproxAccuracyRate = .06
+            parameters.perspectiveRemovePixelPerCell = 8
         if hasattr(cv2.aruco, "ArucoDetector"):
-            detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(dictionary),
-                                               cv2.aruco.DetectorParameters())
-            self._detect = detector.detectMarkers
-        else:  # OpenCV < 4.7
-            table = cv2.aruco.Dictionary_get(dictionary)
-            parameters = cv2.aruco.DetectorParameters_create()
-            self._detect = lambda gray: cv2.aruco.detectMarkers(gray, table, parameters=parameters)
+            return aruco.ArucoDetector(aruco.getPredefinedDictionary(dictionary), parameters).detectMarkers
+        table = aruco.Dictionary_get(dictionary)  # OpenCV < 4.7
+        return lambda gray: aruco.detectMarkers(gray, table, parameters=parameters)
 
     def detect(self, frame):
         gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self._detect(gray)
-        if ids is None:
-            return ()
-        markers = []
-        for quad, marker_id in zip(corners, ids.ravel()):
-            quad = np.asarray(quad, float).reshape(4, 2)  # sup-esq, sup-dir, inf-dir, inf-esq
-            side = float((np.linalg.norm(quad[2] - quad[1]) + np.linalg.norm(quad[3] - quad[0]))/2)
-            cx, cy = quad.mean(axis=0)
-            markers.append(Marker(int(marker_id), float(cx), float(cy), side))
+        markers = self._markers(corners, ids)
+        if not any(marker.marker_id == 1 for marker in markers):
+            # O PARE dos cones aparece na metade inferior. Amplia so essa regiao,
+            # com a mesma decodificacao do dicionario e sem afrouxar a correcao de bits.
+            top = int(gray.shape[0] * .62)
+            enlarged = cv2.resize(gray[top:], None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            corners, ids, _ = self._detect_small(enlarged)
+            markers.extend(marker for marker in self._markers(corners, ids, scale=2, top=top)
+                           if marker.marker_id == 1)
         return tuple(markers)
+
+    @staticmethod
+    def _markers(corners, ids, scale=1, top=0):
+        markers = []
+        if ids is not None:
+            for quad, marker_id in zip(corners, ids.ravel()):
+                quad = (np.asarray(quad, float).reshape(4, 2) + .5) / scale - .5 + (0, top)
+                side = (np.linalg.norm(quad[2] - quad[1]) + np.linalg.norm(quad[3] - quad[0])) / 2
+                cx, cy = quad.mean(axis=0)
+                markers.append(Marker(int(marker_id), float(cx), float(cy), float(side)))
+        return markers
 
 
 @dataclass(frozen=True)
@@ -91,6 +116,7 @@ class SignCommand:
     stop: bool = False                 # entrou em PARADO neste passo
     remaining_m: float = math.nan      # quanto falta ate a posicao de parada
     in_path: bool = False
+    cone_position: tuple | None = None  # posicao no referencial atual do eixo dianteiro
 
 
 class SignController:
@@ -138,29 +164,51 @@ class SignController:
         x, y, th = pose
         return x + self.wheelbase*math.cos(th), y + self.wheelbase*math.sin(th), th
 
-    def _remember(self, marker, capture_pose):
-        """Placa no referencial da odometria; perto pesa mais (o tamanho erra menos)."""
+    def _world_position(self, marker, capture_pose):
         if capture_pose is None or not (math.isfinite(marker.x) and math.isfinite(marker.y)):
-            return
+            return None
         fx, fy, th = self._front(capture_pose)
         c, s = math.cos(th), math.sin(th)
-        world = np.array([fx + c*marker.x - s*marker.y, fy + s*marker.x + c*marker.y])
+        return np.array([fx + c*marker.x - s*marker.y, fy + s*marker.x + c*marker.y])
+
+    def _remember(self, marker, world):
+        """Combina leituras da mesma placa; de perto a localizacao pesa mais."""
+        if world is None:
+            return
         weight = 1./max(math.hypot(marker.x, marker.y), .5)**2
         if self.sign_world is None:
             self.sign_world, self.sign_weight = world, weight
-        else:
+        elif np.linalg.norm(world - self.sign_world) < DISTINCT_SIGN_M:
             self.sign_world = (self.sign_weight*self.sign_world + weight*world)/(self.sign_weight + weight)
             self.sign_weight += weight
 
-    def _remaining(self, pose):
-        """Distancia ate o ponto de parada e se o cone intercepta a frente."""
+    def _relative_position(self, pose):
         if self.sign_world is None or pose is None:
-            return math.nan, False
+            return None
         fx, fy, th = self._front(pose)
         dx, dy = self.sign_world[0] - fx, self.sign_world[1] - fy
         c, s = math.cos(th), math.sin(th)
-        ahead = c*dx + s*dy
-        in_path = abs(-s*dx + c*dy) <= self.front_half_width_m
+        return c*dx + s*dy, -s*dx + c*dy
+
+    def _remaining(self, position, observation, pose, pose_at, now):
+        """Distancia de parada pela linha central quando a curva ja foi estimada."""
+        if position is None:
+            return math.nan, False
+        ahead, lateral = position
+        corridor = getattr(observation, "corridor", None)
+        if (corridor is not None and corridor.valid and corridor.state_vector is not None
+                and pose_at is not None and 0. <= now - observation.timestamp <= .5):
+            capture = pose_at(observation.timestamp)
+            if capture is not None:
+                fx, fy, th = self._front(capture)
+                x, y, _ = self._front(pose)
+                c, s = math.cos(th), math.sin(th)
+                front = ((x - fx)*c + (y - fy)*s, -(x - fx)*s + (y - fy)*c)
+                marker = self._relative_position(capture)
+                cross, arc, _, _ = offsets([front, marker], corridor.state_vector)
+                if abs(cross[1]) <= corridor.width_m / 2 + .30 and -.5 <= arc[1] <= 3.5:
+                    ahead, lateral = float(arc[1] - arc[0]), float(cross[1])
+        in_path = abs(lateral) <= self.front_half_width_m
         gap = max(-self.stop_at_m, self.stop_gap_m) if in_path else -self.stop_at_m
         return ahead - self.front_overhang_m - gap, in_path
 
@@ -185,13 +233,11 @@ class SignController:
         self.seen = {i: sum(i in scan for scan in self.recent) for i in ids}
         confirmed = []
         for marker in markers:
-            if self.seen[marker.marker_id] >= self.confirm_frames and now >= self.ignore_until.get(marker.marker_id, -1):
+            if self.seen[marker.marker_id] >= self.confirm_frames:
                 confirmed.append(marker)
         return confirmed
 
-    def update(self, observation, now, pose=None, pose_at=None, speed=math.nan):
-        """Comando deste passo. observation: a ultima da visao (com .markers);
-        pose: (x, y, th) do eixo traseiro agora; pose_at(t): a do instante da foto."""
+    def _observe(self, observation, now, pose, pose_at, speed):
         stamp = getattr(observation, "marker_timestamp", getattr(observation, "timestamp", None))
         scan = getattr(observation, "marker_scan", None)
         message = ""
@@ -206,11 +252,21 @@ class SignController:
             markers = tuple(Marker(*m) for m in (getattr(observation, "markers", ()) or ()))
             confirmed = self._new_frame(markers, now)
             capture_pose = pose_at(stamp) if confirmed and pose_at is not None else None
+            if (capture_pose is None and pose is not None and math.isfinite(speed)
+                    and now - stamp <= .12 and abs(speed)*(now - stamp) <= .06):
+                # Na primeira imagem ainda pode faltar uma segunda pose para
+                # interpolar. A geometria local basta com deslocamento pequeno.
+                capture_pose = pose
             for marker in confirmed:
                 action = self.actions.get(marker.marker_id)
                 match action:
                     case "pare":
-                        if self.state == "LIVRE":
+                        world = self._world_position(marker, capture_pose)
+                        previous = self._relative_position(pose) if self.state == "SAINDO" else None
+                        distinct = (previous is not None and previous[0] < -.30 and world is not None and marker.x > 0.
+                                    and np.linalg.norm(world - self.sign_world) >= DISTINCT_SIGN_M)
+                        armed = self.state == "LIVRE" and now >= self.ignore_until.get(marker.marker_id, -1)
+                        if armed or distinct:
                             self.state, self.marker_id = "APROXIMANDO", marker.marker_id
                             self.sign_world, self.sign_weight = None, 0.
                             where = (f" a {marker.x:.2f} m, {'esquerda' if marker.y > 0 else 'direita'}"
@@ -223,20 +279,30 @@ class SignController:
                                           " o marcador e menor que marker_m (meca o quadrado preto)")
                             message = f"PARE confirmado (ArUco {marker.marker_id}, lado {marker.side_px:.0f} px){where}"
                         if self.state == "APROXIMANDO" and marker.marker_id == self.marker_id:
-                            self._remember(marker, capture_pose)
+                            self._remember(marker, world)
                     case "ignorar":
                         pass
                     case _:
                         if marker.marker_id not in self.reported:
                             self.reported.add(marker.marker_id)
                             message = f"ArUco {marker.marker_id} visto, sem acao configurada"
-        remaining, in_path = self._remaining(pose)
+        return message
+
+    def update(self, observation, now, pose=None, pose_at=None, speed=math.nan, marker_observations=()):
+        """Processa as leituras da placa e calcula o comando pela trajetoria atual."""
+        if self.state == "SAINDO" and now >= self.ignore_until.get(self.marker_id, -1):
+            self.state = "LIVRE"
+        message = ""
+        for sample in (*marker_observations, observation):
+            message = self._observe(sample, now, pose, pose_at, speed) or message
+        position = self._relative_position(pose) if self.state != "LIVRE" else None
+        remaining, in_path = self._remaining(position, observation, pose, pose_at, now)
         if self.state == "APROXIMANDO":
             if not math.isfinite(remaining) or remaining <= self.braking_distance(speed):
                 self.stopped(now)
-                return SignCommand(self.state, 0., self.marker_id, message, True, remaining, in_path)
+                return SignCommand(self.state, 0., self.marker_id, message, True, remaining, in_path, position)
             return SignCommand(self.state, self.approach_limit(remaining), self.marker_id, message,
-                               remaining_m=remaining, in_path=in_path)
+                               remaining_m=remaining, in_path=in_path, cone_position=position)
         if self.state == "PARADO" and self.hold_s is not None:
             # O tempo conta com o carro parado: PARADO comeca ainda freando. Sem
             # velocidade, conta da ordem de parar; com o encoder sem zerar
@@ -253,7 +319,10 @@ class SignController:
             self.state = "LIVRE"
         if self.state == "PARADO":
             return SignCommand(self.state, 0., self.marker_id, message,
-                               remaining_m=remaining, in_path=in_path)
+                               remaining_m=remaining, in_path=in_path, cone_position=position)
+        if self.state == "SAINDO":
+            return SignCommand(self.state, math.inf, self.marker_id, message,
+                               in_path=in_path, cone_position=position)
         return SignCommand(self.state, math.inf, self.marker_id, message)
 
     def stopped(self, now):

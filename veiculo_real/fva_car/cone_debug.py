@@ -96,6 +96,7 @@ class ConeDebugRecorder:
         state = {
             "valid": valid,
             "active": bool(control.get("active")),
+            "stopped": bool(control.get("obstacle")),
             "hold": bool(control.get("hold")),
             "branch": bool(debug.get("branch")),
         }
@@ -137,7 +138,8 @@ class ConeDebugRecorder:
                 events.append("perda_cones")
             if not previous["valid"] and state["valid"]:
                 events.append("reaquisicao")
-            if previous["active"] and not state["active"]:
+            if ((previous["active"] and not state["active"])
+                    or (not previous["stopped"] and state["stopped"])):
                 events.append("parada")
             if state["branch"] and not previous["branch"]:
                 events.append("bifurcacao")

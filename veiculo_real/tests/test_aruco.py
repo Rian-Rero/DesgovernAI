@@ -38,6 +38,21 @@ class DetectorTests(unittest.TestCase):
         self.assertAlmostEqual(marker.side_px, 80, delta=3)   # lado vertical
         self.assertEqual(ArucoDetector().detect(np.full((480, 640, 3), 140, np.uint8)), ())
 
+    def test_small_oblique_stop_sign_is_decoded_at_original_coordinates(self):
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_100)
+        marker = cv2.aruco.generateImageMarker(dictionary, 1, 70)
+        patch = cv2.copyMakeBorder(marker, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
+        source = np.float32([[0, 0], [89, 0], [89, 89], [0, 89]])
+        target = np.float32([[101, 159], [111, 155], [110, 173], [100, 174]])
+        transform = cv2.getPerspectiveTransform(source, 4*target)
+        image = cv2.warpPerspective(patch, transform, (1280, 960), borderValue=135)
+        image = cv2.resize(image, (320, 240), interpolation=cv2.INTER_AREA)
+        marks = ArucoDetector().detect(image)
+        self.assertEqual([m.marker_id for m in marks], [1])
+        self.assertAlmostEqual(marks[0].cx, 105., delta=1.)
+        self.assertAlmostEqual(marks[0].cy, 165., delta=2.)
+        self.assertAlmostEqual(marks[0].side_px, 13., delta=2.)
+
     def test_cone_detector_carries_markers_every_n_frames(self):
         from fva_car.cones import RealConeDetector
         from fva_car.lateral import GroundCalibration
@@ -65,6 +80,51 @@ class DetectorTests(unittest.TestCase):
 
 
 class StopSignTests(unittest.TestCase):
+    def test_isolated_read_survives_a_newer_frame_without_markers(self):
+        from collections import deque
+        from fva_car.cones import ConeObservation
+        from fva_car.vision_process import publish_observation
+        import main
+
+        pending = deque(maxlen=64)
+        vision = {'marker_observations': pending}
+        pose = (0., 0., 0.)
+        marker = Marker(1, 320, 350, 14, 1.7, .6).to_tuple()
+        publish_observation(vision, ConeObservation(1., markers=(marker,), marker_timestamp=1., marker_scan=1))
+        publish_observation(vision, ConeObservation(1.06, marker_timestamp=1.06, marker_scan=2))
+        signs = main.sign_controller(main.parameters, 'cones')
+        command = signs.update(vision['observation'], 1.1, pose, lambda _: pose, .7, pending)
+        self.assertEqual(command.state, 'APROXIMANDO')
+        self.assertEqual(command.marker_id, 1)
+        self.assertGreater(command.remaining_m, 1.)
+
+    def test_lateral_cone_ahead_of_a_curve_is_classified_against_the_path(self):
+        from fva_car.corridor import CorridorEstimate, sample_centerline
+        vector = (0., 0., .7, 0., 1.4)
+        x, y = sample_centerline(vector, [1.35], offset=-.65)[0]
+        self.assertLess(abs(y), .25)  # alinhada com a tangente atual, mas fora da curva
+        obs = seen(1., Marker(1, 320, 350, 16, x, y))
+        obs.corridor = CorridorEstimate(True, 'AMBAS', vector[:3], 1.4, state_vector=vector)
+        signs = SignController(confirm_frames=1)
+        pose = (0., 0., 0.)
+        command = signs.update(obs, 1., pose, lambda _: pose, .3)
+        self.assertFalse(command.in_path)
+        self.assertAlmostEqual(command.remaining_m, 1.35 - .07, delta=.05)
+
+    def test_distinct_cone_rearms_the_same_id_after_passing_the_first(self):
+        signs = SignController(confirm_frames=1, hold_s=.5)
+        pose = (0., 0., 0.)
+        first = Marker(1, 320, 350, 16, .08, .7)
+        self.assertTrue(signs.update(seen(1., first), 1., pose, lambda _: pose, .1).stop)
+        self.assertEqual(signs.update(seen(1.6), 1.6, pose, speed=0.).state, 'PARADO')
+        self.assertEqual(signs.update(seen(2.2), 2.2, pose, speed=0.).state, 'SAINDO')
+        self.assertEqual(signs.update(seen(2.3, first), 2.3, pose, lambda _: pose, .2).state, 'SAINDO')
+        second = Marker(1, 330, 360, 16, 2., -.7)
+        advanced = (.65, 0., 0.)
+        command = signs.update(seen(2.5, second), 2.5, advanced, lambda _: advanced, .4)
+        self.assertEqual(command.state, 'APROXIMANDO')
+        self.assertGreater(command.remaining_m, 1.5)
+
     def test_confirmed_stop_sign_slows_then_stops_close_and_waits_for_the_button(self):
         signs = SignController({1: 'pare'}, confirm_frames=2, approach_speed=.3, stop_gap_m=.08)
         sign = Marker(1, 320, 200, 40, 2., 0., .2)
