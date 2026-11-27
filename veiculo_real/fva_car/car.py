@@ -13,8 +13,10 @@ from datetime import datetime
 
 try:
     from . import encoder, servos, buzzer, ultrasonic, filter
+    from .throttle import AUTO_MAX_SPEED_M_S
 except ImportError:
     import encoder, servos, buzzer, ultrasonic, filter
+    from throttle import AUTO_MAX_SPEED_M_S
 
 
 # QUESTAO DA ORIENTACAO DO CARRINHO NA FUSAO DE POSICAO (COMECA SEMPRE PARA O LESTE)
@@ -27,8 +29,8 @@ except ImportError:
 ########################################
 # parametros do carro
 CAR = {
-    # Teto do automatico (a missao pede ate 4 m/s; acima disto o throttle e cortado).
-    "VELMAX": 4.5,  # m/s
+    # Teto do automatico. Acima dele, o throttle e cortado.
+    "VELMAX": AUTO_MAX_SPEED_M_S,
     # Radio (RC): o manche cheio continua pedindo 2 m/s, como antes.
     "RC_VELMAX": 2.0,  # m/s
     "ACCELMAX": 1.0,  # m/s^2

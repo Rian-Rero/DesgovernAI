@@ -503,24 +503,26 @@ calibração +8 px, visão a 10 quadros/s com servo lento) também ficaram sem
 toques, com erro máximo de 16 cm. Sem o limite de visibilidade, o carro chegava
 no grampo com 0,57 m/s².
 
-**Até 4 m/s** (24/11): `--speed` aceita até 4,0 e a GUI tem 3,0 e 4,0. O `Car`
-corta o acelerador só acima de 4,5 m/s; o rádio continua indo até 2 m/s com o
-manche cheio (`RC_VELMAX`).
+**Até 6 m/s de referência.** `--speed` e a GUI aceitam até 6,0. O `Car` corta
+o acelerador acima de 6,0 m/s medidos. No rádio, o manche cheio pede 2 m/s
+(`RC_VELMAX`). Na aba **Comandos**, use **Recolher opções da missão** para
+dar espaço ao gráfico.
 
 **A trava de verdade estava no servo do acelerador.** `fva_car/servos.py`
 cortava `velmax` em 1,5 m/s, e o `Car` nem passava a velocidade. Com isso, o PWM
 máximo era 113° (18° acima do neutro), e com o acelerador em 100% o carro não
 passava de ~1,5 m/s (logs de 19/11: máximo 1,56 m/s; saturado, 1,0–1,2 m/s).
-- **Agora:** o `Car` cria os servos com `velmax` 4,5 m/s (PWM até ~146°).
+- **Agora** o `Car` cria os servos com `velmax` 6,0 m/s. O modelo existente
+  associa esse teto a ~162° de comando do ESC.
 - **A unidade do comando não mudou:** `u = 1` continua sendo os mesmos 18°. Por
   isso o feedforward (0,32 + 0,22 v) e o mapa aprendido (`logs/acelerador.json`)
   valem como antes.
-- **Acima de ~1,5 m/s o comando passa de 1**, até 2,8 no automático. No rádio,
+- **Acima de ~1,5 m/s o comando passa de 1**, até 3,7 no automático. No rádio,
   o comando continua parando em 1. Na prática, quem decide a velocidade é o menor de:
 
 | limite | valor hoje | de onde vem |
 |---|---|---|
-| teto pedido (GUI / `--speed`) | até 4,0 m/s | nas retas |
+| teto pedido (GUI / `--speed`) | até 6,0 m/s | nas retas |
 | curva (`curve_lateral_accel` 0,45 m/s²) | √(0,45·R): R = 2 m → 0,95 m/s | prévia de 2,5 m |
 | atraso da visão (0,5 m ÷ idade) | 220 ms → ~2,3 m/s | `latency_speed_budget_m` |
 | parada no alcance do ultrassom | **~2,8 m/s** | `ultrasonic_speed_cap` |

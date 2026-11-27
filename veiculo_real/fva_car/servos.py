@@ -14,8 +14,10 @@ import threading
 from enum import Enum
 try:
 	from . import filter
+	from .throttle import AUTO_MAX_SPEED_M_S as THROTTLE_VELMAX
 except ImportError:
 	import filter
+	from throttle import AUTO_MAX_SPEED_M_S as THROTTLE_VELMAX
 
 # Canais de entradas dos servos
 SERVO_STEERING  	= 0
@@ -34,7 +36,6 @@ GEAR_SHIFTING_TIME  = 2.5  # tempo para a troca de marcha [s]
 # aprendido (logs/acelerador.json) estao nesta unidade. Acima de 1,5 m/s o comando
 # passa de 1,0, ate o PWM de velmax.
 THROTTLE_UNIT_VEL   = 1.5  # m/s do comando 1,0
-THROTTLE_VELMAX     = 4.5  # m/s: maior velmax aceito (PWM ~146 graus)
 
 def throttle_pwm_deg(velocity):
 	"""PWM (graus) que a curva experimental associa a velocidade (m/s)."""

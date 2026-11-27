@@ -15,6 +15,7 @@ import math
 
 import numpy as np
 
+AUTO_MAX_SPEED_M_S = 6.0  # teto de referencia e de atuacao no modo automatico
 SPEEDS = np.round(np.arange(.2, 1.6001, .1), 2)  # centros das faixas, m/s
 MIN_SAMPLES = 25    # passos em regime (0,5 s a 50 Hz) para a faixa valer
 TAU_S = 2.          # constante de tempo da media de cada faixa

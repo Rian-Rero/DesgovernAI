@@ -175,11 +175,11 @@ class SteeringScaleTests(unittest.TestCase):
 
 
 class SpeedLimitTests(unittest.TestCase):
-    """Teto de 4 m/s: o automatico pode pedir, o radio continua em 2 e o ultrassom limita."""
+    """Teto do automatico, referencia do radio e limite pelo ultrassom."""
     def test_car_limits(self):
         from test_rc_input import load_car
         module = load_car()
-        self.assertGreaterEqual(module.CAR["VELMAX"], 4.0)
+        self.assertEqual(module.CAR["VELMAX"], 6.0)
         self.assertEqual(module.CAR["RC_VELMAX"], 2.0)
 
     def test_ultrasonic_cap_stops_inside_the_sensor_range(self):
@@ -187,7 +187,7 @@ class SpeedLimitTests(unittest.TestCase):
         self.assertAlmostEqual(main.stopping_distance(cap, .15), 3.7, places=3)
         self.assertTrue(2.5 < cap < 3.)
         self.assertGreater(main.stopping_distance(4., .15), 4.)  # a 4 m/s nao para no alcance
-        config = main.with_safety_speed({"velocity_reference": 4., "obstacle_confirm_s": .15})
+        config = main.with_safety_speed({"velocity_reference": 6., "obstacle_confirm_s": .15})
         self.assertAlmostEqual(config["safe_speed_m_s"], cap)
         self.assertNotIn("safe_speed_m_s", main.with_safety_speed({"ultrasonic_speed_cap": False}))
 
@@ -198,12 +198,12 @@ class SpeedLimitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RealStanleyFollower({"safe_speed_m_s": 0})
 
-    def test_speed_argument_accepts_up_to_four(self):
+    def test_speed_argument_accepts_up_to_six(self):
         from unittest.mock import patch
-        with patch.object(sys, "argv", ["main.py", "--speed", "4"]), patch.object(main, "run_mission") as run:
+        with patch.object(sys, "argv", ["main.py", "--speed", "6"]), patch.object(main, "run_mission") as run:
             main.main()
-        self.assertEqual(run.call_args[0][0]["velocity_reference"], 4.)
-        with patch.object(sys, "argv", ["main.py", "--speed", "5"]), self.assertRaises(SystemExit):
+        self.assertEqual(run.call_args[0][0]["velocity_reference"], 6.)
+        with patch.object(sys, "argv", ["main.py", "--speed", "6.1"]), self.assertRaises(SystemExit):
             main.main()
 
 
@@ -252,13 +252,14 @@ class ServoThrottleLimitTests(unittest.TestCase):
         return module, servos
 
     def test_command_one_keeps_the_old_pwm_and_more_reaches_velmax(self):
-        module, servos = self.servos(4.5)
+        module, servos = self.servos(6.5)
+        self.assertEqual(servos.velmax, 6.)
         self.assertAlmostEqual(np.rad2deg(servos.throttle_unit), 18.1, places=1)  # o 1,0 de sempre
-        self.assertAlmostEqual(servos.max_command, 2.80, places=2)
+        self.assertAlmostEqual(servos.max_command, 3.697, delta=.01)
         servos.set_throttle(.5)
         self.assertAlmostEqual(servos.th_pwm, .5*servos.throttle_unit)
         servos.set_throttle(10.)
-        self.assertAlmostEqual(np.rad2deg(servos.th_pwm + module.ZERO_THROTTLE_ANGLE), 145.6, places=1)
+        self.assertAlmostEqual(np.rad2deg(servos.th_pwm + module.ZERO_THROTTLE_ANGLE), 161.8, places=1)
 
     def test_old_cap_is_the_default_one(self):
         _, servos = self.servos(1.5)
@@ -284,11 +285,16 @@ class CarThrottleCommandTests(unittest.TestCase):
         return car
 
     def test_auto_can_go_past_the_old_full_throttle(self):
-        car = self.car()
-        car.v = 1.5
-        car.set_vel(4.)
+        car = self.car(max_command=3.7)
+        del car._set_ref  # exercita o limite de referencia do Car real
+        car.v = 5.5
+        car.set_vel(6.1)
+        self.assertEqual(car.vref, 6.)
         self.assertGreater(car.u, 1.)
-        self.assertLessEqual(car.u, 2.8)
+        self.assertLessEqual(car.u, 3.7)
+        car.v = 6.1
+        car.set_u(2.)
+        self.assertEqual(car.u, 0.)
 
     def test_radio_keeps_the_old_full_throttle(self):
         car = self.car(auto=False)

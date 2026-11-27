@@ -48,7 +48,7 @@ DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
 # m/s; nos cones e a velocidade MAXIMA NAS RETAS (o carro reduz sozinho antes
 # das curvas e pelo limite de visibilidade, ~1,6 m/s com curva de R = 1,5 m).
-SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "3.5", "4.0", "4.5", "5.0")
+SPEED_PRESETS = ("0.7", "1.0", "1.5", "2.0", "3.0", "3.5", "4.0", "4.5", "5.0", "5.5", "6.0")
 CURVE_RADII = (
     "1.2",
     "1.5",
@@ -1590,8 +1590,14 @@ class RsyncGUI(tk.Tk):
 
     def _build_mission_options(self, parent):
         """Caixas da missao (main.py): cada mudanca reescreve a linha do comando."""
-        box = ttk.LabelFrame(parent, text="Opções da missão (main.py)")
-        box.pack(fill="x", padx=10, pady=(4, 2))
+        section = ttk.Frame(parent)
+        section.pack(fill="x", padx=10, pady=(4, 2))
+        self.mission_options_button = ttk.Button(
+            section, text="Recolher opções da missão", command=self.toggle_mission_options
+        )
+        self.mission_options_button.pack(anchor="w")
+        box = self.mission_options_panel = ttk.Frame(section)
+        box.pack(fill="x")
         self.mission_vars = {}
         for key, value in MISSION_DEFAULTS.items():
             variable = (
@@ -1772,6 +1778,15 @@ class RsyncGUI(tk.Tk):
             "valendo. Relatório do ensaio: python3 tools/analisar_ensaio.py <pasta> --linha",
         ).pack(anchor="w", padx=6, pady=(0, 4))
         self._update_mission_widgets()
+
+    def toggle_mission_options(self):
+        panel = self.mission_options_panel
+        if panel.winfo_manager() == "pack":
+            panel.pack_forget()
+            self.mission_options_button.configure(text="Mostrar opções da missão")
+        else:
+            panel.pack(fill="x")
+            self.mission_options_button.configure(text="Recolher opções da missão")
 
     def _fit_to_screen(self):
         """Abre com o tamanho que o conteudo pede (no minimo 1120x760), ate o limite

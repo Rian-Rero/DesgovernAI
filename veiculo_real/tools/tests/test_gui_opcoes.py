@@ -6,7 +6,7 @@ import shlex
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("fva_gui_opcoes", ROOT / "tools" / "fva_gui_um_carro.py")
@@ -33,17 +33,31 @@ class MissionOptionsTests(unittest.TestCase):
                          " --speed 0.7 --tempo 50 --stream 8080 --classifier modelos/cones.onnx")
 
     def test_map_and_speed_cap_options_reach_main(self):
-        self.assertIn("4.0", gui.SPEED_PRESETS)
-        command = gui.build_main_command({"cone_map": False, "speed_cap": False, "speed": "4.0"})
+        self.assertIn("6.0", gui.SPEED_PRESETS)
+        command = gui.build_main_command({"cone_map": False, "speed_cap": False, "speed": "6.0"})
         self.assertIn("--sem-mapa", command)
         self.assertIn("--sem-teto-ultrassom", command)
         settings = parsed(command)
         self.assertIs(settings["cone_map"], False)
         self.assertIs(settings["ultrasonic_speed_cap"], False)
-        self.assertEqual(settings["velocity_reference"], 4.0)
+        self.assertEqual(settings["velocity_reference"], 6.0)
         self.assertIn("sem-mapa", gui.command_label(command))
         # Sem o estimador o mapa nao existe: nem pede --sem-mapa.
         self.assertNotIn("--sem-mapa", gui.build_main_command({"cone_map": False, "estimator": False}))
+
+    def test_mission_options_can_be_hidden_and_restored(self):
+        app = Mock()
+        panel = app.mission_options_panel
+        panel.winfo_manager.side_effect = ["pack", ""]
+
+        gui.RsyncGUI.toggle_mission_options(app)
+        panel.pack_forget.assert_called_once_with()
+        app.mission_options_button.configure.assert_called_with(text="Mostrar opções da missão")
+
+        gui.RsyncGUI.toggle_mission_options(app)
+        panel.pack.assert_called_once_with(fill="x")
+        app.mission_options_button.configure.assert_called_with(text="Recolher opções da missão")
+        app.apply_mission_options.assert_not_called()
 
     def test_every_checkbox_combination_is_accepted_by_main(self):
         keys = ("stream", "estimator", "pure_pursuit", "preview", "cone_debug", "record_frames", "classifier",

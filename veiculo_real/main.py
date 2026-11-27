@@ -29,6 +29,7 @@ import cv2  # noqa: E402
 from fva_car.cone_debug import ConeDebugRecorder
 from fva_car.cones import RealConeDetector
 from fva_car.obstacle import curve_echo, resume_border_echo, sign_echo_matches
+from fva_car.throttle import AUTO_MAX_SPEED_M_S as MAX_VEL
 from fva_car.version import code_version
 from fva_car.odometry import PoseHistory, SharedPoseHistory
 from fva_car.vision_process import VisionProcess, capture_func, vision_func  # noqa: F401
@@ -41,7 +42,6 @@ from fva_car.lateral import (
 
 MAIN_VEL = 0.7  # m/s: velocidade padrao da missao
 FAST_VEL = 1.5  # m/s: selecionada com --fast
-MAX_VEL = 4.0  # m/s: maior teto aceito em --speed (o Car corta o throttle acima de 4,5)
 # Missao em andamento: PID para a GUI encerrar (SIGTERM) ou liberar a parada do
 # ultrassom (SIGUSR1) sem reiniciar o programa.
 MISSION_PID_FILE = Path("/tmp/fva_missao.pid")
